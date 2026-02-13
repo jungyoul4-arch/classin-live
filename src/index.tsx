@@ -1098,12 +1098,12 @@ ${navHTML}
       </div>
       <div class="hidden md:grid grid-cols-2 gap-3">
         <div class="space-y-3">
-          <img src="https://www.genspark.ai/api/files/s/xV0U8IjF" class="w-full rounded-2xl shadow-2xl object-cover" alt="박서욱 선생님">
-          <img src="https://www.genspark.ai/api/files/s/nEasnWma" class="w-full rounded-2xl shadow-2xl object-cover" alt="조우제 선생님">
+          <img src="/static/instructors/park-sw.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="박서욱 선생님">
+          <img src="/static/instructors/cho-wj.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="조우제 선생님">
         </div>
         <div class="space-y-3 mt-6">
-          <img src="https://www.genspark.ai/api/files/s/IBeOTAAE" class="w-full rounded-2xl shadow-2xl object-cover" alt="이지후 선생님">
-          <img src="https://www.genspark.ai/api/files/s/wnXY027B" class="w-full rounded-2xl shadow-2xl object-cover" alt="박지영 선생님">
+          <img src="/static/instructors/lee-jh.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="이지후 선생님">
+          <img src="/static/instructors/park-jy.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="박지영 선생님">
         </div>
       </div>
     </div>
