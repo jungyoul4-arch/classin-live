@@ -552,6 +552,205 @@ app.get('/api/enrollment/:enrollmentId/classin-session', async (c) => {
   return c.json(session)
 })
 
+// ==================== Subscription API Routes ====================
+
+// Create a new subscription (월간 자동결제)
+app.post('/api/subscription/create', async (c) => {
+  const { userId, planType, classId, amount, paymentMethod, cardNumber, cardExpiry, cardCvc } = await c.req.json()
+  
+  if (!userId || !planType || !amount) return c.json({ error: '필수 정보가 누락되었습니다.' }, 400)
+  
+  // Check if user already has active subscription of same type
+  const existing = await c.env.DB.prepare(`
+    SELECT id FROM subscriptions WHERE user_id = ? AND plan_type = ? AND status = 'active' ${classId ? 'AND class_id = ?' : 'AND class_id IS NULL'}
+  `).bind(...(classId ? [userId, planType, classId] : [userId, planType])).first()
+  
+  if (existing) return c.json({ error: '이미 동일한 구독이 활성화되어 있습니다.' }, 400)
+  
+  const last4 = cardNumber ? cardNumber.replace(/\s/g, '').slice(-4) : '0000'
+  const today = new Date()
+  const billingDay = today.getDate() // 결제일 = 가입일 기준
+  const txId = `SUB_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  
+  // Calculate period end and next billing date (1 month later)
+  const periodEnd = new Date(today)
+  periodEnd.setMonth(periodEnd.getMonth() + 1)
+  const nextBilling = new Date(periodEnd)
+  
+  // Create subscription
+  const subResult = await c.env.DB.prepare(`
+    INSERT INTO subscriptions (user_id, plan_type, class_id, amount, payment_method, card_last4, billing_day, status, started_at, current_period_start, current_period_end, next_billing_date)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'), ?, ?)
+  `).bind(
+    userId, planType, classId || null, amount,
+    paymentMethod || 'card', last4, billingDay,
+    periodEnd.toISOString(), nextBilling.toISOString()
+  ).run()
+  
+  const subscriptionId = subResult.meta.last_row_id
+  
+  // Record first payment
+  await c.env.DB.prepare(`
+    INSERT INTO subscription_payments (subscription_id, user_id, amount, payment_status, transaction_id, billing_period_start, billing_period_end)
+    VALUES (?, ?, ?, 'completed', ?, datetime('now'), ?)
+  `).bind(subscriptionId, userId, amount, txId, periodEnd.toISOString()).run()
+  
+  // Also create order record
+  await c.env.DB.prepare(`
+    INSERT INTO orders (user_id, order_type, class_id, subscription_plan, amount, payment_method, payment_status, card_last4, transaction_id)
+    VALUES (?, 'subscription', ?, ?, ?, ?, 'completed', ?, ?)
+  `).bind(userId, classId || null, planType, amount, paymentMethod || 'card', last4, txId).run()
+  
+  // Update user subscription info
+  await c.env.DB.prepare(`
+    UPDATE users SET subscription_plan = 'monthly', subscription_expires_at = ? WHERE id = ?
+  `).bind(periodEnd.toISOString(), userId).run()
+  
+  // If class subscription, also enroll in class + create ClassIn session
+  let classinSession: ClassInSessionResult | null = null
+  if (classId) {
+    await c.env.DB.prepare('INSERT OR IGNORE INTO enrollments (user_id, class_id) VALUES (?, ?)').bind(userId, classId).run()
+    const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, classId).first() as any
+    await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, classId).run()
+    await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(classId).run()
+    
+    const classInConfig: ClassInConfig | undefined = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+      ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+      : undefined
+    classinSession = await createClassInSession(c.env.DB, classId, userId, enrollment?.id || 0, classInConfig)
+  }
+  
+  return c.json({
+    success: true,
+    subscriptionId,
+    transactionId: txId,
+    billingDay,
+    nextBillingDate: nextBilling.toISOString(),
+    periodEnd: periodEnd.toISOString(),
+    message: `월간 자동결제가 시작되었습니다! 매월 ${billingDay}일에 자동 결제됩니다.`,
+    classinSession: classinSession ? {
+      joinUrl: classinSession.joinUrl,
+      classId: classinSession.classId,
+      isDemo: !c.env.CLASSIN_SID
+    } : null
+  })
+})
+
+// Get user's subscriptions
+app.get('/api/user/:userId/subscriptions', async (c) => {
+  const userId = c.req.param('userId')
+  const { results } = await c.env.DB.prepare(`
+    SELECT s.*, c.title as class_title, c.slug as class_slug, c.thumbnail as class_thumbnail,
+           c.instructor_id, i.display_name as instructor_name
+    FROM subscriptions s
+    LEFT JOIN classes c ON s.class_id = c.id
+    LEFT JOIN instructors i ON c.instructor_id = i.id
+    WHERE s.user_id = ?
+    ORDER BY s.created_at DESC
+  `).bind(userId).all()
+  return c.json(results)
+})
+
+// Get subscription payment history
+app.get('/api/subscription/:subId/payments', async (c) => {
+  const subId = c.req.param('subId')
+  const { results } = await c.env.DB.prepare(`
+    SELECT * FROM subscription_payments WHERE subscription_id = ? ORDER BY created_at DESC
+  `).bind(subId).all()
+  return c.json(results)
+})
+
+// Cancel subscription
+app.post('/api/subscription/:subId/cancel', async (c) => {
+  const subId = c.req.param('subId')
+  const { userId } = await c.req.json()
+  
+  const sub = await c.env.DB.prepare('SELECT * FROM subscriptions WHERE id = ? AND user_id = ?').bind(subId, userId).first() as any
+  if (!sub) return c.json({ error: '구독을 찾을 수 없습니다.' }, 404)
+  if (sub.status !== 'active') return c.json({ error: '이미 해지된 구독입니다.' }, 400)
+  
+  // Cancel - subscription stays active until period end
+  await c.env.DB.prepare(`
+    UPDATE subscriptions SET status = 'cancelled', cancelled_at = datetime('now'), updated_at = datetime('now') WHERE id = ?
+  `).bind(subId).run()
+  
+  return c.json({
+    success: true,
+    message: `구독이 해지되었습니다. ${new Date(sub.current_period_end).toLocaleDateString('ko-KR')}까지 이용 가능합니다.`,
+    activeUntil: sub.current_period_end
+  })
+})
+
+// Reactivate cancelled subscription
+app.post('/api/subscription/:subId/reactivate', async (c) => {
+  const subId = c.req.param('subId')
+  const { userId } = await c.req.json()
+  
+  const sub = await c.env.DB.prepare('SELECT * FROM subscriptions WHERE id = ? AND user_id = ?').bind(subId, userId).first() as any
+  if (!sub) return c.json({ error: '구독을 찾을 수 없습니다.' }, 404)
+  if (sub.status !== 'cancelled') return c.json({ error: '해지된 구독만 재활성화할 수 있습니다.' }, 400)
+  
+  await c.env.DB.prepare(`
+    UPDATE subscriptions SET status = 'active', cancelled_at = NULL, updated_at = datetime('now') WHERE id = ?
+  `).bind(subId).run()
+  
+  return c.json({ success: true, message: '구독이 다시 활성화되었습니다.' })
+})
+
+// Process automatic renewal (can be called by Cloudflare Cron Trigger)
+app.post('/api/subscription/process-renewals', async (c) => {
+  const now = new Date().toISOString()
+  const { results: dueSubscriptions } = await c.env.DB.prepare(`
+    SELECT s.*, u.name as user_name, u.email as user_email
+    FROM subscriptions s JOIN users u ON s.user_id = u.id
+    WHERE s.status = 'active' AND s.next_billing_date <= ? AND s.failed_attempts < 3
+  `).bind(now).all() as any
+  
+  const results: any[] = []
+  
+  for (const sub of dueSubscriptions) {
+    const txId = `RENEW_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    const newPeriodStart = new Date(sub.current_period_end)
+    const newPeriodEnd = new Date(newPeriodStart)
+    newPeriodEnd.setMonth(newPeriodEnd.getMonth() + 1)
+    const nextBilling = new Date(newPeriodEnd)
+    
+    // Demo mode: always succeed
+    const paymentSuccess = true
+    
+    if (paymentSuccess) {
+      // Record payment
+      await c.env.DB.prepare(`
+        INSERT INTO subscription_payments (subscription_id, user_id, amount, payment_status, transaction_id, billing_period_start, billing_period_end)
+        VALUES (?, ?, ?, 'completed', ?, ?, ?)
+      `).bind(sub.id, sub.user_id, sub.amount, txId, newPeriodStart.toISOString(), newPeriodEnd.toISOString()).run()
+      
+      // Update subscription
+      await c.env.DB.prepare(`
+        UPDATE subscriptions SET current_period_start = ?, current_period_end = ?, next_billing_date = ?, failed_attempts = 0, updated_at = datetime('now') WHERE id = ?
+      `).bind(newPeriodStart.toISOString(), newPeriodEnd.toISOString(), nextBilling.toISOString(), sub.id).run()
+      
+      // Order record
+      await c.env.DB.prepare(`
+        INSERT INTO orders (user_id, order_type, class_id, subscription_plan, amount, payment_method, payment_status, card_last4, transaction_id)
+        VALUES (?, 'subscription', ?, ?, ?, ?, 'completed', ?, ?)
+      `).bind(sub.user_id, sub.class_id || null, sub.plan_type, sub.amount, sub.payment_method, sub.card_last4, txId).run()
+      
+      // Update user subscription expiry
+      await c.env.DB.prepare(`UPDATE users SET subscription_expires_at = ? WHERE id = ?`).bind(newPeriodEnd.toISOString(), sub.user_id).run()
+      
+      results.push({ subscriptionId: sub.id, userId: sub.user_id, status: 'renewed', txId })
+    } else {
+      await c.env.DB.prepare(`
+        UPDATE subscriptions SET failed_attempts = failed_attempts + 1, last_payment_error = '결제 실패', updated_at = datetime('now') WHERE id = ?
+      `).bind(sub.id).run()
+      results.push({ subscriptionId: sub.id, userId: sub.user_id, status: 'failed' })
+    }
+  }
+  
+  return c.json({ processed: results.length, results })
+})
+
 // ClassIn API Config status
 app.get('/api/classin/status', async (c) => {
   const isConfigured = !!(c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
@@ -1212,7 +1411,127 @@ async function processPayment() {
 
 function closeSuccessModal() {
   document.getElementById('successModal').classList.add('hidden');
-  location.reload();
+  // Refresh user data
+  if (currentUser) {
+    fetch('/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email:currentUser.email, password:'any'}) })
+      .then(r=>r.json()).then(d=>{ if(d.user){ currentUser=d.user; localStorage.setItem('classin_user',JSON.stringify(d.user)); updateAuthUI(); }});
+  }
+}
+
+// ==================== Subscription (월간 자동결제) ====================
+let subscriptionData = {};
+
+function openSubscriptionModal(data) {
+  if (!currentUser) { openAuthModal('login'); return; }
+  subscriptionData = data;
+  document.getElementById('paymentModal').classList.remove('hidden');
+  
+  const billingDay = new Date().getDate();
+  const nextMonth = new Date(); nextMonth.setMonth(nextMonth.getMonth() + 1);
+  
+  document.getElementById('paymentOrderSummary').innerHTML = \`
+    <div class="flex gap-3">
+      \${data.thumbnail ? \`<img src="\${data.thumbnail}" class="w-20 h-14 rounded-lg object-cover">\` : \`<div class="w-20 h-14 bg-primary-50 rounded-lg flex items-center justify-center"><i class="fas fa-crown text-primary-500 text-xl"></i></div>\`}
+      <div>
+        <p class="text-sm font-semibold text-dark-800">\${data.title}</p>
+        <p class="text-xs text-gray-500 mt-0.5">\${data.instructor_name || '모든 클래스 무제한'}</p>
+      </div>
+    </div>
+    <div class="mt-3 bg-blue-50 rounded-xl p-3">
+      <div class="flex items-center gap-2 mb-1">
+        <i class="fas fa-sync-alt text-blue-500 text-sm"></i>
+        <span class="text-sm font-bold text-blue-800">월간 자동결제</span>
+      </div>
+      <p class="text-xs text-blue-600">매월 <strong>\${billingDay}일</strong>에 자동 결제 · 다음 결제일: <strong>\${nextMonth.toLocaleDateString('ko-KR', {month:'long', day:'numeric'})}</strong></p>
+    </div>
+  \`;
+  
+  const discount = (data.originalAmount || data.amount) - data.amount;
+  document.getElementById('priceSummary').innerHTML = \`
+    <div class="flex justify-between text-sm"><span class="text-gray-500">월 정가</span><span class="text-gray-700">\${(data.originalAmount || data.amount).toLocaleString()}원</span></div>
+    \${discount > 0 ? \`<div class="flex justify-between text-sm"><span class="text-gray-500">할인</span><span class="text-primary-500 font-medium">-\${discount.toLocaleString()}원</span></div>\` : ''}
+    <div class="flex justify-between text-base font-bold pt-2 border-t border-gray-200 mt-2">
+      <span class="text-dark-900">월 결제금액</span>
+      <div class="text-right">
+        <span class="text-primary-600">\${data.amount.toLocaleString()}원/월</span>
+        <p class="text-[10px] text-gray-400 font-normal">매월 \${billingDay}일 자동결제</p>
+      </div>
+    </div>
+  \`;
+  
+  // Override payment button for subscription
+  const payBtn = document.getElementById('payButton');
+  payBtn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>월간 구독 시작하기';
+  payBtn.onclick = processSubscription;
+}
+
+async function processSubscription() {
+  const agree = document.getElementById('paymentAgree').checked;
+  if (!agree) { showError('paymentError', '결제 동의에 체크해주세요.'); return; }
+  
+  const btn = document.getElementById('payButton');
+  btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>구독 처리 중...';
+  
+  try {
+    const body = {
+      userId: currentUser.id,
+      planType: subscriptionData.planType,
+      classId: subscriptionData.classId || null,
+      amount: subscriptionData.amount,
+      paymentMethod: paymentData.paymentMethod || 'card',
+      cardNumber: document.getElementById('cardNumber')?.value?.replace(/\\s/g,'') || '',
+      cardExpiry: document.getElementById('cardExpiry')?.value || '',
+      cardCvc: document.getElementById('cardCvc')?.value || ''
+    };
+    
+    await new Promise(r => setTimeout(r, 1500));
+    
+    const res = await fetch('/api/subscription/create', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    const data = await res.json();
+    
+    if (data.success) {
+      closePaymentModal();
+      document.getElementById('successModal').classList.remove('hidden');
+      document.getElementById('successMessage').textContent = data.message;
+      
+      if (data.classinSession && data.classinSession.joinUrl) {
+        const infoDiv = document.getElementById('classinSessionInfo');
+        infoDiv.classList.remove('hidden');
+        document.getElementById('classinJoinUrlText').textContent = data.classinSession.joinUrl;
+        document.getElementById('classinClassIdText').textContent = '수업 ID: ' + (data.classinSession.classId || '');
+        document.getElementById('classinJoinBtn').href = data.classinSession.joinUrl;
+        document.getElementById('classinModeTag').textContent = data.classinSession.isDemo ? 'DEMO MODE' : 'ClassIn API 연동됨';
+      } else {
+        document.getElementById('classinSessionInfo').classList.add('hidden');
+      }
+    } else {
+      showError('paymentError', data.error || '구독 처리에 실패했습니다.');
+    }
+  } catch(e) {
+    showError('paymentError', '구독 처리 중 오류가 발생했습니다.');
+  }
+  
+  btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>월간 구독 시작하기';
+  // Reset pay button for normal payment
+  btn.onclick = processPayment;
+  btn.innerHTML = '결제하기';
+}
+
+// Switch between onetime and monthly pay options on class detail page
+function switchPayOption(opt) {
+  document.getElementById('payOnetime')?.classList.toggle('hidden', opt !== 'onetime');
+  document.getElementById('payMonthly')?.classList.toggle('hidden', opt !== 'monthly');
+  document.querySelectorAll('.pay-opt-tab').forEach(b => {
+    b.classList.toggle('bg-white', false);
+    b.classList.toggle('text-dark-900', false);
+    b.classList.toggle('shadow-sm', false);
+    b.classList.add('text-gray-500');
+  });
+  const activeBtn = document.getElementById(opt === 'onetime' ? 'payOptOnetime' : 'payOptMonthly');
+  if (activeBtn) {
+    activeBtn.classList.add('bg-white', 'text-dark-900', 'shadow-sm');
+    activeBtn.classList.remove('text-gray-500');
+  }
 }
 
 // ==================== My Page ====================
@@ -1234,9 +1553,10 @@ async function openMyPage(tab) {
       </div>
     </div>
     <div class="flex gap-1 mb-4 bg-gray-100 rounded-xl p-1">
-      <button onclick="loadMyPageTab('enrollments')" class="mypage-tab flex-1 py-2 text-sm font-medium rounded-lg transition-all \${activeTab==='enrollments'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강중</button>
-      <button onclick="loadMyPageTab('wishlist')" class="mypage-tab flex-1 py-2 text-sm font-medium rounded-lg transition-all \${activeTab==='wishlist'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">찜</button>
-      <button onclick="loadMyPageTab('orders')" class="mypage-tab flex-1 py-2 text-sm font-medium rounded-lg transition-all \${activeTab==='orders'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">결제내역</button>
+      <button onclick="loadMyPageTab('enrollments')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='enrollments'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강중</button>
+      <button onclick="loadMyPageTab('subscriptions')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='subscriptions'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}"><i class="fas fa-sync-alt mr-0.5 text-[9px]"></i>구독</button>
+      <button onclick="loadMyPageTab('wishlist')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='wishlist'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">찜</button>
+      <button onclick="loadMyPageTab('orders')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='orders'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">결제내역</button>
     </div>
     <div id="myPageTabContent"></div>
   \`;
@@ -1246,7 +1566,7 @@ function closeMyPage() { document.getElementById('myPageSidebar').classList.add(
 
 async function loadMyPageTab(tab) {
   document.querySelectorAll('.mypage-tab').forEach((b,i) => {
-    const tabs = ['enrollments','wishlist','orders'];
+    const tabs = ['enrollments','subscriptions','wishlist','orders'];
     b.classList.toggle('bg-white', tabs[i]===tab);
     b.classList.toggle('text-dark-900', tabs[i]===tab);
     b.classList.toggle('shadow-sm', tabs[i]===tab);
@@ -1297,6 +1617,72 @@ async function loadMyPageTab(tab) {
           \` : ''}
         </div>
       \`}).join('');
+  } else if (tab === 'subscriptions') {
+    const res = await fetch('/api/user/'+currentUser.id+'/subscriptions');
+    const subs = await res.json();
+    if (!Array.isArray(subs) || subs.length === 0) {
+      container.innerHTML = \`
+        <div class="text-center py-8 text-gray-400">
+          <i class="fas fa-sync-alt text-3xl mb-2"></i>
+          <p>활성 구독이 없습니다</p>
+          <a href="/#subscription" onclick="closeMyPage()" class="inline-block mt-3 px-4 py-2 bg-primary-500 text-white text-sm font-semibold rounded-xl hover:bg-primary-600 transition-all">구독 시작하기</a>
+        </div>\`;
+    } else {
+      container.innerHTML = subs.map(sub => {
+        const isActive = sub.status === 'active';
+        const isCancelled = sub.status === 'cancelled';
+        const nextDate = sub.next_billing_date ? new Date(sub.next_billing_date) : null;
+        const periodEnd = sub.current_period_end ? new Date(sub.current_period_end) : null;
+        return \`
+        <div class="p-4 rounded-xl border \${isActive ? 'border-blue-200 bg-blue-50/50' : isCancelled ? 'border-orange-200 bg-orange-50/50' : 'border-gray-200'} mb-3">
+          <div class="flex items-start justify-between mb-3">
+            <div class="flex items-center gap-2">
+              <div class="w-9 h-9 \${isActive ? 'bg-blue-100' : 'bg-gray-100'} rounded-lg flex items-center justify-center">
+                <i class="fas \${sub.plan_type === 'all_monthly' ? 'fa-crown text-yellow-500' : 'fa-sync-alt text-blue-500'} text-sm"></i>
+              </div>
+              <div>
+                <p class="text-sm font-bold text-dark-800">\${sub.class_title || '전체 클래스 구독'}</p>
+                <p class="text-xs text-gray-500">\${sub.instructor_name || '모든 강의 무제한'}</p>
+              </div>
+            </div>
+            <span class="px-2 py-0.5 text-[10px] font-bold rounded-full \${isActive ? 'bg-green-100 text-green-700' : isCancelled ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-600'}">
+              \${isActive ? '구독중' : isCancelled ? '해지 예정' : sub.status === 'payment_failed' ? '결제 실패' : sub.status}
+            </span>
+          </div>
+          
+          <div class="grid grid-cols-2 gap-2 mb-3">
+            <div class="bg-white rounded-lg p-2">
+              <p class="text-[10px] text-gray-400">월 결제금액</p>
+              <p class="text-sm font-bold text-dark-800">\${sub.amount?.toLocaleString()}원</p>
+            </div>
+            <div class="bg-white rounded-lg p-2">
+              <p class="text-[10px] text-gray-400">결제 수단</p>
+              <p class="text-sm font-bold text-dark-800">\${sub.payment_method === 'card' ? '카드' : sub.payment_method} ····\${sub.card_last4}</p>
+            </div>
+            <div class="bg-white rounded-lg p-2">
+              <p class="text-[10px] text-gray-400">매월 결제일</p>
+              <p class="text-sm font-bold text-dark-800">매월 \${sub.billing_day}일</p>
+            </div>
+            <div class="bg-white rounded-lg p-2">
+              <p class="text-[10px] text-gray-400">\${isCancelled ? '이용 가능일' : '다음 결제일'}</p>
+              <p class="text-sm font-bold \${isCancelled ? 'text-orange-600' : 'text-blue-600'}">\${nextDate ? nextDate.toLocaleDateString('ko-KR', {month:'short', day:'numeric'}) : '-'}</p>
+            </div>
+          </div>
+          
+          \${isActive ? \`
+            <button onclick="cancelSubscription(\${sub.id})" class="w-full h-9 border border-gray-200 text-gray-500 text-xs font-medium rounded-lg hover:bg-gray-50 hover:text-red-500 transition-all">
+              <i class="fas fa-times mr-1"></i>구독 해지
+            </button>
+          \` : isCancelled ? \`
+            <div class="flex gap-2">
+              <p class="flex-1 text-xs text-orange-600 flex items-center"><i class="fas fa-info-circle mr-1"></i>\${periodEnd ? periodEnd.toLocaleDateString('ko-KR') : ''}까지 이용 가능</p>
+              <button onclick="reactivateSubscription(\${sub.id})" class="h-9 px-4 bg-blue-500 text-white text-xs font-semibold rounded-lg hover:bg-blue-600 transition-all">
+                <i class="fas fa-redo mr-1"></i>다시 구독
+              </button>
+            </div>
+          \` : ''}
+        </div>\`}).join('');
+    }
   } else if (tab === 'wishlist') {
     const res = await fetch('/api/user/'+currentUser.id+'/wishlist');
     const items = await res.json();
@@ -1386,6 +1772,32 @@ function classCardHTML(cls) {
       </div>
     </a>
   \`;
+}
+
+// ==================== Subscription Management ====================
+async function cancelSubscription(subId) {
+  if (!confirm('정말 구독을 해지하시겠습니까?\\n해지 후에도 현재 결제 기간까지는 이용 가능합니다.')) return;
+  try {
+    const res = await fetch('/api/subscription/' + subId + '/cancel', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ userId: currentUser.id })
+    });
+    const data = await res.json();
+    if (data.success) { showToast(data.message); loadMyPageTab('subscriptions'); }
+    else showToast(data.error || '해지에 실패했습니다.');
+  } catch(e) { showToast('오류가 발생했습니다.'); }
+}
+
+async function reactivateSubscription(subId) {
+  try {
+    const res = await fetch('/api/subscription/' + subId + '/reactivate', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ userId: currentUser.id })
+    });
+    const data = await res.json();
+    if (data.success) { showToast(data.message); loadMyPageTab('subscriptions'); }
+    else showToast(data.error || '재활성화에 실패했습니다.');
+  } catch(e) { showToast('오류가 발생했습니다.'); }
 }
 
 // Search handling
@@ -1549,47 +1961,111 @@ ${navHTML}
 <!-- Subscription Section -->
 <section id="subscription" class="max-w-7xl mx-auto px-4 sm:px-6 py-12">
   <div class="text-center mb-10">
-    <h2 class="text-2xl md:text-3xl font-bold text-dark-900 mb-3"><i class="fas fa-crown text-yellow-500 mr-2"></i>구독으로 모든 클래스를 무제한으로</h2>
-    <p class="text-gray-500">월간 또는 연간 구독으로 모든 라이브 양방향 클래스를 자유롭게 수강하세요</p>
+    <h2 class="text-2xl md:text-3xl font-bold text-dark-900 mb-3"><i class="fas fa-crown text-yellow-500 mr-2"></i>월간 구독으로 편하게 수강하세요</h2>
+    <p class="text-gray-500">결제일 기준 매월 자동결제! 5일에 결제하면 매달 5일에 자동으로 결제됩니다</p>
+    <div class="inline-flex items-center gap-2 mt-3 px-4 py-2 bg-blue-50 rounded-full">
+      <i class="fas fa-sync-alt text-blue-500 text-sm"></i>
+      <span class="text-sm text-blue-700 font-medium">월간 자동결제 · 언제든 해지 가능</span>
+    </div>
   </div>
-  <div class="grid md:grid-cols-2 gap-6 max-w-3xl mx-auto">
-    <!-- Monthly -->
+  <div class="grid md:grid-cols-3 gap-6 max-w-5xl mx-auto">
+    
+    <!-- 개별 클래스 월간 구독 -->
     <div class="bg-white rounded-2xl border-2 border-gray-100 p-6 hover:border-primary-200 transition-all">
       <div class="text-center">
-        <span class="text-sm font-semibold text-gray-500 uppercase">월간 플랜</span>
-        <div class="mt-3 mb-4">
-          <span class="text-4xl font-extrabold text-dark-900">19,900</span>
-          <span class="text-gray-500">원/월</span>
+        <div class="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center mx-auto mb-3">
+          <i class="fas fa-book-open text-blue-500 text-lg"></i>
         </div>
-        <ul class="text-sm text-gray-600 space-y-2 mb-6">
-          <li><i class="fas fa-check text-green-500 mr-2"></i>모든 라이브 양방향 클래스 무제한 수강</li>
+        <span class="text-sm font-semibold text-gray-500 uppercase">클래스 월간 구독</span>
+        <div class="mt-3 mb-1">
+          <span class="text-3xl font-extrabold text-dark-900">클래스별</span>
+        </div>
+        <p class="text-sm text-gray-400 mb-4">월 수강료 자동결제</p>
+        <ul class="text-sm text-gray-600 space-y-2 mb-6 text-left">
+          <li><i class="fas fa-check text-green-500 mr-2"></i>선택한 클래스 매월 수강</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>매월 결제일에 자동 결제</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>ClassIn 라이브 수업 참여</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>녹화 강의 다시보기</li>
-          <li><i class="fas fa-check text-green-500 mr-2"></i>커뮤니티 참여</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>언제든 해지 가능</li>
         </ul>
-        <button onclick="openPaymentModal({title:'월간 구독 플랜', price:19900, original_price:19900, orderType:'subscription', subscriptionPlan:'monthly'})" class="w-full h-11 border-2 border-primary-500 text-primary-500 font-semibold rounded-xl hover:bg-primary-50 transition-all">구독 시작하기</button>
+        <a href="/categories" class="block w-full h-11 border-2 border-blue-500 text-blue-500 font-semibold rounded-xl hover:bg-blue-50 transition-all leading-[2.75rem] text-center">클래스 선택하기</a>
       </div>
     </div>
-    <!-- Annual -->
+
+    <!-- 전체 클래스 월간 구독 -->
     <div class="bg-white rounded-2xl border-2 border-primary-500 p-6 relative shadow-lg shadow-primary-100">
-      <div class="absolute -top-3 left-1/2 -translate-x-1/2 px-4 py-1 bg-primary-500 text-white text-xs font-bold rounded-full">33% 할인</div>
+      <div class="absolute -top-3 left-1/2 -translate-x-1/2 px-4 py-1 bg-primary-500 text-white text-xs font-bold rounded-full">BEST</div>
       <div class="text-center">
-        <span class="text-sm font-semibold text-primary-500 uppercase">연간 플랜</span>
-        <div class="mt-3 mb-1">
-          <span class="text-4xl font-extrabold text-dark-900">159,000</span>
-          <span class="text-gray-500">원/년</span>
+        <div class="w-12 h-12 bg-primary-50 rounded-xl flex items-center justify-center mx-auto mb-3">
+          <i class="fas fa-crown text-primary-500 text-lg"></i>
         </div>
-        <p class="text-xs text-gray-400 mb-4">월 13,250원 <span class="line-through">238,800원</span></p>
-        <ul class="text-sm text-gray-600 space-y-2 mb-6">
-          <li><i class="fas fa-check text-green-500 mr-2"></i>모든 라이브 양방향 클래스 무제한 수강</li>
-          <li><i class="fas fa-check text-green-500 mr-2"></i>녹화 강의 다시보기</li>
-          <li><i class="fas fa-check text-green-500 mr-2"></i>커뮤니티 참여</li>
-          <li><i class="fas fa-check text-green-500 mr-2"></i>1:1 멘토링 월 1회</li>
-          <li><i class="fas fa-check text-green-500 mr-2"></i>수료증 발급</li>
+        <span class="text-sm font-semibold text-primary-500 uppercase">전체 구독 플랜</span>
+        <div class="mt-3 mb-1">
+          <span class="text-3xl font-extrabold text-dark-900">199,000</span>
+          <span class="text-gray-500">원/월</span>
+        </div>
+        <p class="text-xs text-gray-400 mb-4">매월 자동결제 <span class="line-through">299,000원</span> <span class="text-primary-500 font-bold">33% 할인</span></p>
+        <ul class="text-sm text-gray-600 space-y-2 mb-6 text-left">
+          <li><i class="fas fa-check text-green-500 mr-2"></i><strong>모든 클래스</strong> 무제한 수강</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>매월 결제일에 자동 결제</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>ClassIn 라이브 수업 무제한</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>녹화 강의 전체 다시보기</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>1:1 멘토링 월 2회</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>커뮤니티 & 학습자료 제공</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>언제든 해지 가능</li>
         </ul>
-        <button onclick="openPaymentModal({title:'연간 구독 플랜', price:159000, original_price:238800, discount_percent:33, orderType:'subscription', subscriptionPlan:'annual'})" class="w-full h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30">연간 구독 시작하기</button>
+        <button onclick="openSubscriptionModal({planType:'all_monthly', title:'전체 클래스 월간 구독', amount:199000, originalAmount:299000})" class="w-full h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30">월간 구독 시작하기</button>
       </div>
     </div>
+
+    <!-- 구독 혜택 안내 -->
+    <div class="bg-gradient-to-br from-dark-800 to-dark-900 rounded-2xl p-6 text-white">
+      <div class="text-center md:text-left">
+        <div class="w-12 h-12 bg-white/10 rounded-xl flex items-center justify-center mx-auto md:mx-0 mb-3">
+          <i class="fas fa-shield-alt text-yellow-400 text-lg"></i>
+        </div>
+        <h3 class="text-lg font-bold mb-4">월간 자동결제 안내</h3>
+        <div class="space-y-4 text-sm">
+          <div class="flex items-start gap-3">
+            <div class="w-7 h-7 bg-blue-500/20 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
+              <i class="fas fa-calendar-check text-blue-400 text-xs"></i>
+            </div>
+            <div>
+              <p class="font-semibold">결제일 기준 자동결제</p>
+              <p class="text-gray-400 text-xs mt-0.5">5일에 결제하면 매달 5일에 자동 결제</p>
+            </div>
+          </div>
+          <div class="flex items-start gap-3">
+            <div class="w-7 h-7 bg-green-500/20 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
+              <i class="fas fa-undo text-green-400 text-xs"></i>
+            </div>
+            <div>
+              <p class="font-semibold">언제든 해지 가능</p>
+              <p class="text-gray-400 text-xs mt-0.5">해지해도 결제 기간까지 이용 가능</p>
+            </div>
+          </div>
+          <div class="flex items-start gap-3">
+            <div class="w-7 h-7 bg-yellow-500/20 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
+              <i class="fas fa-bell text-yellow-400 text-xs"></i>
+            </div>
+            <div>
+              <p class="font-semibold">결제 전 알림</p>
+              <p class="text-gray-400 text-xs mt-0.5">자동결제 3일 전 알림 발송</p>
+            </div>
+          </div>
+          <div class="flex items-start gap-3">
+            <div class="w-7 h-7 bg-primary-500/20 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
+              <i class="fas fa-credit-card text-primary-400 text-xs"></i>
+            </div>
+            <div>
+              <p class="font-semibold">안전한 결제</p>
+              <p class="text-gray-400 text-xs mt-0.5">카드정보 암호화 저장, PCI DSS 준수</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
   </div>
 </section>
 
@@ -1839,9 +2315,35 @@ ${navHTML}
               <span class="text-xs text-gray-500 whitespace-nowrap">${cls.current_students}/${cls.max_students}명</span>
             </div>
             
-            <button onclick='openPaymentModal(${JSON.stringify({id:cls.id, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30 mb-2">
-              <i class="fas fa-credit-card mr-2"></i>바로 수강하기
-            </button>
+            <!-- 결제 옵션 탭 -->
+            <div class="flex gap-1 mb-3 bg-gray-100 rounded-xl p-1">
+              <button onclick="switchPayOption('onetime')" id="payOptOnetime" class="pay-opt-tab flex-1 py-2 text-xs font-semibold rounded-lg bg-white text-dark-900 shadow-sm transition-all">1회 결제</button>
+              <button onclick="switchPayOption('monthly')" id="payOptMonthly" class="pay-opt-tab flex-1 py-2 text-xs font-semibold rounded-lg text-gray-500 transition-all">
+                <i class="fas fa-sync-alt mr-0.5 text-[10px]"></i>월간 자동결제
+              </button>
+            </div>
+            
+            <!-- 1회 결제 -->
+            <div id="payOnetime">
+              <button onclick='openPaymentModal(${JSON.stringify({id:cls.id, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30 mb-2">
+                <i class="fas fa-credit-card mr-2"></i>바로 수강하기 · ${cls.price.toLocaleString()}원
+              </button>
+            </div>
+            
+            <!-- 월간 구독 -->
+            <div id="payMonthly" class="hidden">
+              <div class="bg-blue-50 rounded-xl p-3 mb-2">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-xs font-bold text-blue-800"><i class="fas fa-sync-alt mr-1"></i>월간 자동결제</span>
+                  <span class="text-[10px] text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">매월 결제일 자동결제</span>
+                </div>
+                <p class="text-[11px] text-blue-600">오늘 결제 시 매월 ${new Date().getDate()}일에 자동으로 결제됩니다</p>
+              </div>
+              <button onclick='openSubscriptionModal(${JSON.stringify({planType:"class_monthly", classId:cls.id, title:cls.title, amount:cls.price, originalAmount:cls.original_price, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/30 mb-2">
+                <i class="fas fa-sync-alt mr-2"></i>월간 구독 시작 · ${cls.price.toLocaleString()}원/월
+              </button>
+            </div>
+            
             <div class="grid grid-cols-2 gap-2">
               <button onclick="addToCart(${cls.id})" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
                 <i class="fas fa-shopping-cart mr-1"></i>장바구니
