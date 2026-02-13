@@ -300,7 +300,7 @@ const headHTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ClassIn Live - 라이브 클래스 플랫폼</title>
+  <title>ClassIn Live - 라이브 양방향 클래스 플랫폼</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.0/css/all.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css" rel="stylesheet">
@@ -1070,15 +1070,15 @@ ${navHTML}
       <div>
         <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-6">
           <span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>
-          <span class="text-sm font-medium">실시간 라이브 클래스</span>
+          <span class="text-sm font-medium">실시간 라이브 양방향 클래스</span>
         </div>
         <h1 class="text-3xl md:text-5xl font-extrabold leading-tight mb-4">
           당신의 성장을 위한<br>
-          <span class="text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-pink-400">라이브 클래스</span>가 시작됩니다
+          <span class="text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-pink-400">라이브 양방향 클래스</span>가 시작됩니다
         </h1>
         <p class="text-gray-300 text-base md:text-lg mb-8 leading-relaxed">
-          검증된 전문가의 실시간 강의로 배우고,<br>
-          직접 소통하며 빠르게 성장하세요.
+          검증된 전문 강사의 실시간 양방향 수업으로 배우고,<br>
+          직접 질문하고 소통하며 빠르게 성장하세요.
         </p>
         <div class="flex flex-wrap gap-3">
           <a href="/categories" class="px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30">
@@ -1098,12 +1098,12 @@ ${navHTML}
       </div>
       <div class="hidden md:grid grid-cols-2 gap-3">
         <div class="space-y-3">
-          <img src="https://images.unsplash.com/photo-1513364776144-60967b0f800f?w=300&h=200&fit=crop" class="w-full rounded-2xl shadow-2xl" alt="">
-          <img src="https://images.unsplash.com/photo-1534438327276-14e5300c3a48?w=300&h=180&fit=crop" class="w-full rounded-2xl shadow-2xl" alt="">
+          <img src="https://www.genspark.ai/api/files/s/xV0U8IjF" class="w-full rounded-2xl shadow-2xl object-cover" alt="박서욱 선생님">
+          <img src="https://www.genspark.ai/api/files/s/nEasnWma" class="w-full rounded-2xl shadow-2xl object-cover" alt="조우제 선생님">
         </div>
         <div class="space-y-3 mt-6">
-          <img src="https://images.unsplash.com/photo-1633356122544-f134324a6cee?w=300&h=180&fit=crop" class="w-full rounded-2xl shadow-2xl" alt="">
-          <img src="https://images.unsplash.com/photo-1510915361894-db8b60106cb1?w=300&h=200&fit=crop" class="w-full rounded-2xl shadow-2xl" alt="">
+          <img src="https://www.genspark.ai/api/files/s/IBeOTAAE" class="w-full rounded-2xl shadow-2xl object-cover" alt="이지후 선생님">
+          <img src="https://www.genspark.ai/api/files/s/wnXY027B" class="w-full rounded-2xl shadow-2xl object-cover" alt="박지영 선생님">
         </div>
       </div>
     </div>
@@ -1151,8 +1151,8 @@ ${navHTML}
           <span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>
           <span class="text-sm font-medium text-red-400">LIVE</span>
         </div>
-        <h2 class="text-xl md:text-2xl font-bold text-white">예정된 라이브 클래스</h2>
-        <p class="text-sm text-gray-400 mt-1">실시간으로 강사와 소통하며 배워보세요</p>
+        <h2 class="text-xl md:text-2xl font-bold text-white">예정된 라이브 양방향 클래스</h2>
+        <p class="text-sm text-gray-400 mt-1">실시간으로 선생님과 소통하며 배워보세요</p>
       </div>
     </div>
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1193,7 +1193,7 @@ ${navHTML}
 <section id="subscription" class="max-w-7xl mx-auto px-4 sm:px-6 py-12">
   <div class="text-center mb-10">
     <h2 class="text-2xl md:text-3xl font-bold text-dark-900 mb-3"><i class="fas fa-crown text-yellow-500 mr-2"></i>구독으로 모든 클래스를 무제한으로</h2>
-    <p class="text-gray-500">월간 또는 연간 구독으로 모든 라이브 클래스를 자유롭게 수강하세요</p>
+    <p class="text-gray-500">월간 또는 연간 구독으로 모든 라이브 양방향 클래스를 자유롭게 수강하세요</p>
   </div>
   <div class="grid md:grid-cols-2 gap-6 max-w-3xl mx-auto">
     <!-- Monthly -->
@@ -1205,7 +1205,7 @@ ${navHTML}
           <span class="text-gray-500">원/월</span>
         </div>
         <ul class="text-sm text-gray-600 space-y-2 mb-6">
-          <li><i class="fas fa-check text-green-500 mr-2"></i>모든 라이브 클래스 무제한 수강</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>모든 라이브 양방향 클래스 무제한 수강</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>녹화 강의 다시보기</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>커뮤니티 참여</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>언제든 해지 가능</li>
@@ -1224,7 +1224,7 @@ ${navHTML}
         </div>
         <p class="text-xs text-gray-400 mb-4">월 13,250원 <span class="line-through">238,800원</span></p>
         <ul class="text-sm text-gray-600 space-y-2 mb-6">
-          <li><i class="fas fa-check text-green-500 mr-2"></i>모든 라이브 클래스 무제한 수강</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>모든 라이브 양방향 클래스 무제한 수강</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>녹화 강의 다시보기</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>커뮤니티 참여</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>1:1 멘토링 월 1회</li>
