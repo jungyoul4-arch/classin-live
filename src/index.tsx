@@ -3,11 +3,202 @@ import { cors } from 'hono/cors'
 
 type Bindings = {
   DB: D1Database
+  CLASSIN_SID?: string
+  CLASSIN_SECRET?: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
 
 app.use('/api/*', cors())
+
+// ==================== ClassIn API Integration Module ====================
+
+interface ClassInConfig {
+  SID: string
+  SECRET: string
+  API_BASE: string
+}
+
+interface ClassInSessionResult {
+  success: boolean
+  courseId?: string
+  classId?: string
+  joinUrl?: string
+  liveUrl?: string
+  error?: string
+}
+
+// ClassIn API helper - generate safeKey (MD5 of SECRET + timestamp)
+async function generateSafeKey(secret: string, timestamp: number): Promise<string> {
+  const data = new TextEncoder().encode(secret + timestamp)
+  const hashBuffer = await crypto.subtle.digest('MD5', data).catch(() => null)
+  if (hashBuffer) {
+    return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('')
+  }
+  // Fallback: simple hash simulation for environments without MD5
+  let hash = 0
+  const str = secret + timestamp
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i)
+    hash = ((hash << 5) - hash) + char
+    hash = hash & hash
+  }
+  return Math.abs(hash).toString(16).padStart(32, '0')
+}
+
+// ClassIn API: Create Course
+async function createClassInCourse(config: ClassInConfig, courseName: string, teacherUid?: string): Promise<{ courseId?: string; error?: string }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+  
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('courseName', courseName)
+  if (teacherUid) formData.set('mainTeacherUid', teacherUid)
+  
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addCourse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const data = await res.json() as any
+    if (data.error_info?.errno === 1) {
+      return { courseId: data.data?.courseId?.toString() }
+    }
+    return { error: data.error_info?.error || 'Failed to create course' }
+  } catch (e: any) {
+    return { error: e.message || 'Network error' }
+  }
+}
+
+// ClassIn API: Create Class (Lesson) and get live URL
+async function createClassInLesson(
+  config: ClassInConfig,
+  courseId: string,
+  className: string,
+  beginTime: number,
+  endTime: number,
+  teacherUid: string,
+  options?: { live?: number; record?: number; seatNum?: number }
+): Promise<ClassInSessionResult> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+  
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('courseId', courseId)
+  formData.set('className', className)
+  formData.set('beginTime', beginTime.toString())
+  formData.set('endTime', endTime.toString())
+  formData.set('teacherUid', teacherUid)
+  if (options?.live !== undefined) formData.set('live', options.live.toString())
+  if (options?.record !== undefined) formData.set('record', options.record.toString())
+  if (options?.seatNum !== undefined) formData.set('seatNum', options.seatNum.toString())
+  
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addCourseClass`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const data = await res.json() as any
+    if (data.error_info?.errno === 1) {
+      return {
+        success: true,
+        classId: data.data?.toString(),
+        liveUrl: data.live_url || '',
+        joinUrl: data.live_url || `https://www.classin.com/classroom?classId=${data.data}`
+      }
+    }
+    return { success: false, error: data.error_info?.error || 'Failed to create lesson' }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
+// DEMO MODE: Generate a simulated ClassIn session when no API keys are configured
+function generateDemoClassInSession(classData: any, userId: number): ClassInSessionResult {
+  const demoClassId = `DEMO_CLS_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`
+  const demoCourseId = `DEMO_CRS_${classData.id}`
+  const sessionToken = Math.random().toString(36).substr(2, 12)
+  
+  return {
+    success: true,
+    courseId: demoCourseId,
+    classId: demoClassId,
+    joinUrl: `https://www.classin.com/classroom?courseId=${demoCourseId}&classId=${demoClassId}&token=${sessionToken}`,
+    liveUrl: `https://live.eeo.cn/live_partner.html?classId=${demoClassId}&uid=${userId}`
+  }
+}
+
+// Main function: Create ClassIn session after payment
+async function createClassInSession(
+  db: D1Database,
+  classId: number,
+  userId: number,
+  enrollmentId: number,
+  config?: ClassInConfig
+): Promise<ClassInSessionResult> {
+  // Get class details
+  const cls = await db.prepare(`
+    SELECT c.*, i.display_name as instructor_name, i.user_id as instructor_user_id
+    FROM classes c JOIN instructors i ON c.instructor_id = i.id WHERE c.id = ?
+  `).bind(classId).first() as any
+  
+  if (!cls) return { success: false, error: 'Class not found' }
+  
+  let result: ClassInSessionResult
+  
+  if (config && config.SID && config.SECRET) {
+    // PRODUCTION MODE: Use real ClassIn API
+    const courseResult = await createClassInCourse(config, cls.title, cls.instructor_user_id?.toString())
+    if (!courseResult.courseId) {
+      return { success: false, error: courseResult.error || 'Failed to create course' }
+    }
+    
+    const beginTime = cls.schedule_start ? Math.floor(new Date(cls.schedule_start).getTime() / 1000) : Math.floor(Date.now() / 1000) + 86400
+    const endTime = beginTime + (cls.duration_minutes || 60) * 60
+    
+    result = await createClassInLesson(
+      config,
+      courseResult.courseId,
+      cls.title,
+      beginTime,
+      endTime,
+      cls.instructor_user_id?.toString() || '1',
+      { live: 1, record: 1 }
+    )
+    result.courseId = courseResult.courseId
+  } else {
+    // DEMO MODE: Generate simulated session
+    result = generateDemoClassInSession(cls, userId)
+  }
+  
+  if (result.success) {
+    // Save session to database
+    const scheduledAt = cls.schedule_start || new Date(Date.now() + 86400000).toISOString()
+    await db.prepare(`
+      INSERT INTO classin_sessions (class_id, enrollment_id, user_id, classin_course_id, classin_class_id, classin_join_url, classin_live_url, session_title, instructor_name, scheduled_at, duration_minutes, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready')
+    `).bind(
+      classId, enrollmentId, userId,
+      result.courseId || '', result.classId || '',
+      result.joinUrl || '', result.liveUrl || '',
+      cls.title, cls.instructor_name || '',
+      scheduledAt, cls.duration_minutes || 60
+    ).run()
+    
+    // Update enrollment with ClassIn join URL
+    await db.prepare('UPDATE enrollments SET classin_join_url = ? WHERE id = ?').bind(result.joinUrl || '', enrollmentId).run()
+  }
+  
+  return result
+}
 
 // ==================== API Routes ====================
 
@@ -223,7 +414,7 @@ app.delete('/api/cart', async (c) => {
   return c.json({ success: true })
 })
 
-// Process payment (demo)
+// Process payment (demo) - with ClassIn session auto-creation
 app.post('/api/payment/process', async (c) => {
   const { userId, classId, paymentMethod, cardNumber, cardExpiry, cardCvc, amount, orderType, subscriptionPlan } = await c.req.json()
   
@@ -236,13 +427,32 @@ app.post('/api/payment/process', async (c) => {
     VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?)
   `).bind(userId, orderType || 'class', classId || null, subscriptionPlan || null, amount, paymentMethod || 'card', last4, txId).run()
 
-  // If class purchase, create enrollment
+  let classinSession: ClassInSessionResult | null = null
+
+  // If class purchase, create enrollment + ClassIn session
   if (classId) {
     await c.env.DB.prepare('INSERT OR IGNORE INTO enrollments (user_id, class_id) VALUES (?, ?)').bind(userId, classId).run()
+    
+    // Get enrollment ID
+    const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, classId).first() as any
+    
     // Remove from cart
     await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, classId).run()
     // Update student count
     await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(classId).run()
+    
+    // Create ClassIn session automatically
+    const classInConfig: ClassInConfig | undefined = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET) 
+      ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+      : undefined
+    
+    classinSession = await createClassInSession(
+      c.env.DB,
+      classId,
+      userId,
+      enrollment?.id || 0,
+      classInConfig
+    )
   }
 
   // If subscription purchase
@@ -255,7 +465,13 @@ app.post('/api/payment/process', async (c) => {
     success: true, 
     orderId: orderResult.meta.last_row_id,
     transactionId: txId,
-    message: '결제가 완료되었습니다!'
+    message: '결제가 완료되었습니다!',
+    classinSession: classinSession ? {
+      joinUrl: classinSession.joinUrl,
+      classId: classinSession.classId,
+      courseId: classinSession.courseId,
+      isDemo: !c.env.CLASSIN_SID
+    } : null
   })
 })
 
@@ -281,6 +497,71 @@ app.get('/api/instructors/:id', async (c) => {
     SELECT c.*, cat.name as category_name FROM classes c JOIN categories cat ON c.category_id = cat.id WHERE c.instructor_id = ? AND c.status = 'active'
   `).bind(id).all()
   return c.json({ instructor, classes })
+})
+
+// ==================== ClassIn Session API Routes ====================
+
+// Get user's ClassIn sessions (for My Page)
+app.get('/api/user/:userId/classin-sessions', async (c) => {
+  const userId = c.req.param('userId')
+  const { results } = await c.env.DB.prepare(`
+    SELECT cs.*, c.title as class_title, c.slug as class_slug, c.thumbnail as class_thumbnail, 
+           c.schedule_start, c.class_type, c.level,
+           i.display_name as instructor_name, i.profile_image as instructor_image
+    FROM classin_sessions cs
+    JOIN classes c ON cs.class_id = c.id
+    JOIN instructors i ON c.instructor_id = i.id
+    WHERE cs.user_id = ?
+    ORDER BY cs.scheduled_at ASC
+  `).bind(userId).all()
+  return c.json(results)
+})
+
+// Get specific ClassIn session detail (for classroom entry page)
+app.get('/api/classin-session/:sessionId', async (c) => {
+  const sessionId = c.req.param('sessionId')
+  const session = await c.env.DB.prepare(`
+    SELECT cs.*, c.title as class_title, c.slug as class_slug, c.thumbnail as class_thumbnail,
+           c.description as class_description, c.schedule_start, c.duration_minutes as class_duration,
+           c.total_lessons, c.class_type, c.level,
+           i.display_name as instructor_name, i.profile_image as instructor_image,
+           i.bio as instructor_bio, i.specialty as instructor_specialty
+    FROM classin_sessions cs
+    JOIN classes c ON cs.class_id = c.id
+    JOIN instructors i ON c.instructor_id = i.id
+    WHERE cs.id = ?
+  `).bind(sessionId).first()
+  if (!session) return c.json({ error: 'Session not found' }, 404)
+  return c.json(session)
+})
+
+// Get ClassIn session by enrollment (alternative lookup)
+app.get('/api/enrollment/:enrollmentId/classin-session', async (c) => {
+  const enrollmentId = c.req.param('enrollmentId')
+  const session = await c.env.DB.prepare(`
+    SELECT cs.*, c.title as class_title, c.slug as class_slug, c.thumbnail as class_thumbnail,
+           c.schedule_start, c.class_type,
+           i.display_name as instructor_name, i.profile_image as instructor_image
+    FROM classin_sessions cs
+    JOIN classes c ON cs.class_id = c.id
+    JOIN instructors i ON c.instructor_id = i.id
+    WHERE cs.enrollment_id = ?
+    ORDER BY cs.created_at DESC LIMIT 1
+  `).bind(enrollmentId).first()
+  if (!session) return c.json({ error: 'No ClassIn session found' }, 404)
+  return c.json(session)
+})
+
+// ClassIn API Config status
+app.get('/api/classin/status', async (c) => {
+  const isConfigured = !!(c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+  return c.json({ 
+    configured: isConfigured,
+    mode: isConfigured ? 'production' : 'demo',
+    message: isConfigured 
+      ? 'ClassIn API가 연결되어 있습니다.' 
+      : 'ClassIn API 데모 모드로 운영 중입니다. 실제 연동은 SID/SECRET 설정이 필요합니다.'
+  })
 })
 
 // Post a review
@@ -584,13 +865,48 @@ const modalsHTML = `
 <!-- Payment Success Modal -->
 <div id="successModal" class="fixed inset-0 z-[110] hidden">
   <div class="absolute inset-0 bg-black/50 modal-overlay"></div>
-  <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-sm bg-white rounded-2xl shadow-2xl p-8 text-center fade-in">
+  <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-white rounded-2xl shadow-2xl p-8 text-center fade-in">
     <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
       <i class="fas fa-check text-green-500 text-2xl"></i>
     </div>
     <h3 class="text-xl font-bold text-dark-900 mb-2">결제 완료!</h3>
-    <p id="successMessage" class="text-sm text-gray-600 mb-6">결제가 성공적으로 완료되었습니다.</p>
-    <button onclick="closeSuccessModal()" class="w-full h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all">확인</button>
+    <p id="successMessage" class="text-sm text-gray-600 mb-4">결제가 성공적으로 완료되었습니다.</p>
+    
+    <!-- ClassIn Session Info -->
+    <div id="classinSessionInfo" class="hidden mb-4">
+      <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 text-left">
+        <div class="flex items-center gap-2 mb-3">
+          <div class="w-8 h-8 bg-blue-500 rounded-lg flex items-center justify-center">
+            <i class="fas fa-video text-white text-sm"></i>
+          </div>
+          <div>
+            <p class="text-sm font-bold text-blue-900">ClassIn 수업방이 생성되었습니다</p>
+            <p id="classinModeTag" class="text-[10px] text-blue-600 font-medium"></p>
+          </div>
+        </div>
+        <div class="space-y-2">
+          <div class="flex items-center gap-2 text-sm">
+            <i class="fas fa-link text-blue-400 w-4"></i>
+            <span class="text-blue-800 truncate flex-1" id="classinJoinUrlText"></span>
+          </div>
+          <div class="flex items-center gap-2 text-sm">
+            <i class="fas fa-hashtag text-blue-400 w-4"></i>
+            <span class="text-blue-800" id="classinClassIdText">수업 ID: </span>
+          </div>
+        </div>
+        <a id="classinJoinBtn" href="#" target="_blank" rel="noopener" class="mt-3 w-full h-10 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-xl transition-all flex items-center justify-center gap-2">
+          <i class="fas fa-door-open"></i>
+          ClassIn 수업방 입장하기
+        </a>
+      </div>
+    </div>
+    
+    <div class="flex gap-2">
+      <button onclick="closeSuccessModal()" class="flex-1 h-11 bg-gray-100 hover:bg-gray-200 text-dark-700 font-semibold rounded-xl transition-all">확인</button>
+      <button id="goToMyClassBtn" onclick="closeSuccessModal(); openMyPage('enrollments')" class="flex-1 h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all">
+        <i class="fas fa-book-open mr-1"></i>내 수업 보기
+      </button>
+    </div>
   </div>
 </div>
 
@@ -872,6 +1188,18 @@ async function processPayment() {
       closePaymentModal();
       document.getElementById('successModal').classList.remove('hidden');
       document.getElementById('successMessage').textContent = data.message + ' (거래번호: ' + data.transactionId + ')';
+      
+      // Show ClassIn session info if available
+      if (data.classinSession && data.classinSession.joinUrl) {
+        const infoDiv = document.getElementById('classinSessionInfo');
+        infoDiv.classList.remove('hidden');
+        document.getElementById('classinJoinUrlText').textContent = data.classinSession.joinUrl;
+        document.getElementById('classinClassIdText').textContent = '수업 ID: ' + (data.classinSession.classId || '');
+        document.getElementById('classinJoinBtn').href = data.classinSession.joinUrl;
+        document.getElementById('classinModeTag').textContent = data.classinSession.isDemo ? 'DEMO MODE - 실제 API 키 설정 시 ClassIn 연동' : 'ClassIn API 연동됨';
+      } else {
+        document.getElementById('classinSessionInfo').classList.add('hidden');
+      }
     } else {
       showError('paymentError', data.error || '결제에 실패했습니다.');
     }
@@ -929,17 +1257,46 @@ async function loadMyPageTab(tab) {
   if (tab === 'enrollments') {
     const res = await fetch('/api/user/'+currentUser.id+'/enrollments');
     const items = await res.json();
+    // Also fetch ClassIn sessions
+    const sessRes = await fetch('/api/user/'+currentUser.id+'/classin-sessions');
+    const sessions = await sessRes.json();
+    const sessionMap = {};
+    if (Array.isArray(sessions)) sessions.forEach(s => { sessionMap[s.class_id] = s; });
+    
     container.innerHTML = items.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-book-open text-3xl mb-2"></i><p>수강 중인 클래스가 없습니다</p></div>'
-      : items.map(e => \`
-        <a href="/class/\${e.slug}" class="flex gap-3 p-3 rounded-xl hover:bg-gray-50 transition-all mb-2">
-          <img src="\${e.thumbnail}" class="w-20 h-14 rounded-lg object-cover">
-          <div class="flex-1 min-w-0">
-            <p class="text-sm font-medium text-dark-800 line-clamp-1">\${e.title}</p>
-            <p class="text-xs text-gray-500">\${e.instructor_name}</p>
-            <div class="w-full bg-gray-200 rounded-full h-1.5 mt-2"><div class="bg-primary-500 h-1.5 rounded-full" style="width:\${e.progress}%"></div></div>
+      : items.map(e => {
+        const session = sessionMap[e.class_id];
+        return \`
+        <div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100">
+          <a href="/class/\${e.slug}" class="flex gap-3">
+            <div class="relative flex-shrink-0">
+              <img src="\${e.thumbnail}" class="w-20 h-14 rounded-lg object-cover">
+              \${session ? '<span class="absolute -top-1 -right-1 w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center"><i class="fas fa-video text-white text-[8px]"></i></span>' : ''}
+            </div>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-dark-800 line-clamp-1">\${e.title}</p>
+              <p class="text-xs text-gray-500">\${e.instructor_name}</p>
+              <div class="w-full bg-gray-200 rounded-full h-1.5 mt-2"><div class="bg-primary-500 h-1.5 rounded-full" style="width:\${e.progress}%"></div></div>
+            </div>
+          </a>
+          \${session ? \`
+          <div class="mt-2 pt-2 border-t border-gray-50">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-bold rounded">\${session.status === 'ready' ? 'ClassIn 준비됨' : session.status === 'live' ? 'LIVE 진행중' : session.status === 'ended' ? '수업 종료' : 'ClassIn'}</span>
+              <span class="text-[11px] text-gray-400">\${session.scheduled_at ? new Date(session.scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : ''}</span>
+            </div>
+            <div class="flex gap-2">
+              <a href="\${session.classin_join_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all">
+                <i class="fas fa-door-open"></i> 수업 입장
+              </a>
+              <a href="/classroom/\${session.id}" onclick="event.stopPropagation()" class="h-8 px-3 border border-gray-200 text-dark-600 text-xs font-medium rounded-lg flex items-center justify-center gap-1 hover:bg-gray-50 transition-all">
+                <i class="fas fa-info-circle"></i> 상세
+              </a>
+            </div>
           </div>
-        </a>
-      \`).join('');
+          \` : ''}
+        </div>
+      \`}).join('');
   } else if (tab === 'wishlist') {
     const res = await fetch('/api/user/'+currentUser.id+'/wishlist');
     const items = await res.json();
@@ -1637,6 +1994,286 @@ ${navHTML}
     <div class="hidden md:block md:col-span-2"></div>
   </div>
 </section>
+
+${footerHTML}
+${modalsHTML}
+${globalScripts}
+</body></html>`
+  return c.html(html)
+})
+
+// ==================== ClassIn Classroom Entry Page ====================
+app.get('/classroom/:sessionId', async (c) => {
+  const sessionId = c.req.param('sessionId')
+  const session = await c.env.DB.prepare(`
+    SELECT cs.*, c.title as class_title, c.slug as class_slug, c.thumbnail as class_thumbnail,
+           c.description as class_description, c.schedule_start, c.duration_minutes as class_duration,
+           c.total_lessons, c.class_type, c.level, c.tags,
+           i.display_name as instructor_name, i.profile_image as instructor_image,
+           i.bio as instructor_bio, i.specialty as instructor_specialty,
+           i.total_students as instructor_total_students, i.rating as instructor_rating, i.verified as instructor_verified
+    FROM classin_sessions cs
+    JOIN classes c ON cs.class_id = c.id
+    JOIN instructors i ON c.instructor_id = i.id
+    WHERE cs.id = ?
+  `).bind(sessionId).first() as any
+
+  if (!session) return c.html('<h1>Session not found</h1>', 404)
+
+  const isDemo = !c.env.CLASSIN_SID
+  const scheduledDate = session.schedule_start ? new Date(session.schedule_start) : new Date()
+  const now = new Date()
+  const isUpcoming = scheduledDate > now
+  const timeDiff = scheduledDate.getTime() - now.getTime()
+  const daysUntil = Math.max(0, Math.floor(timeDiff / 86400000))
+  const hoursUntil = Math.max(0, Math.floor((timeDiff % 86400000) / 3600000))
+  const minutesUntil = Math.max(0, Math.floor((timeDiff % 3600000) / 60000))
+
+  const html = `${headHTML}
+<body class="bg-gray-50 min-h-screen">
+${navHTML}
+
+<!-- Classroom Entry Hero -->
+<section class="bg-gradient-to-br from-blue-900 via-dark-900 to-indigo-900 text-white">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 py-10 md:py-16">
+    <div class="grid md:grid-cols-2 gap-8 items-center">
+      <div>
+        <!-- Back link -->
+        <a href="/class/${session.class_slug}" class="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-white mb-4 transition-colors">
+          <i class="fas fa-arrow-left text-xs"></i> 클래스로 돌아가기
+        </a>
+        
+        <!-- Status Badge -->
+        <div class="flex items-center gap-2 mb-4">
+          <span class="px-2.5 py-1 ${session.status === 'live' ? 'bg-red-500 badge-live' : session.status === 'ready' ? 'bg-blue-500' : 'bg-gray-500'} text-white text-xs font-bold rounded-lg">
+            <i class="fas ${session.status === 'live' ? 'fa-circle text-[6px] mr-1' : session.status === 'ready' ? 'fa-check-circle mr-1' : 'fa-clock mr-1'}"></i>
+            ${session.status === 'live' ? 'LIVE 진행중' : session.status === 'ready' ? '수업 준비 완료' : session.status === 'ended' ? '수업 종료' : '대기중'}
+          </span>
+          ${isDemo ? '<span class="px-2 py-0.5 bg-yellow-500/20 text-yellow-300 text-[10px] font-bold rounded-lg border border-yellow-500/30">DEMO MODE</span>' : '<span class="px-2 py-0.5 bg-green-500/20 text-green-300 text-[10px] font-bold rounded-lg border border-green-500/30">ClassIn API 연동</span>'}
+        </div>
+        
+        <h1 class="text-2xl md:text-3xl font-bold leading-tight mb-3">${session.session_title}</h1>
+        
+        <!-- Instructor -->
+        <div class="flex items-center gap-3 mb-6">
+          <img src="${session.instructor_image}" class="w-10 h-10 rounded-full border-2 border-white/20">
+          <div>
+            <div class="flex items-center gap-1.5">
+              <span class="font-semibold">${session.instructor_name}</span>
+              ${session.instructor_verified ? '<i class="fas fa-check-circle text-blue-400 text-sm"></i>' : ''}
+            </div>
+            <p class="text-sm text-gray-400">${session.instructor_specialty || ''}</p>
+          </div>
+        </div>
+        
+        <!-- Schedule countdown -->
+        ${isUpcoming ? `
+        <div class="bg-white/10 backdrop-blur-sm rounded-2xl p-5 mb-6 border border-white/10">
+          <p class="text-sm text-gray-300 mb-3"><i class="fas fa-calendar-alt mr-1"></i>수업 시작까지</p>
+          <div class="grid grid-cols-3 gap-4 text-center">
+            <div>
+              <p class="text-3xl font-extrabold">${daysUntil}</p>
+              <p class="text-xs text-gray-400 mt-1">일</p>
+            </div>
+            <div>
+              <p class="text-3xl font-extrabold">${hoursUntil}</p>
+              <p class="text-xs text-gray-400 mt-1">시간</p>
+            </div>
+            <div>
+              <p class="text-3xl font-extrabold">${minutesUntil}</p>
+              <p class="text-xs text-gray-400 mt-1">분</p>
+            </div>
+          </div>
+          <p class="text-center text-sm text-gray-300 mt-3">
+            <i class="far fa-calendar mr-1"></i>
+            ${scheduledDate.toLocaleDateString('ko-KR', {year:'numeric', month:'long', day:'numeric', weekday:'long'})} 
+            ${scheduledDate.toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit'})}
+          </p>
+        </div>
+        ` : `
+        <div class="bg-green-500/10 backdrop-blur-sm rounded-2xl p-4 mb-6 border border-green-500/20">
+          <div class="flex items-center gap-2">
+            <span class="w-3 h-3 bg-green-500 rounded-full badge-live"></span>
+            <p class="text-sm font-semibold text-green-300">수업이 곧 시작됩니다! 아래 버튼을 눌러 입장하세요.</p>
+          </div>
+        </div>
+        `}
+        
+        <!-- Join Button -->
+        <a href="${session.classin_join_url}" target="_blank" rel="noopener" class="w-full h-14 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-2xl transition-all shadow-lg shadow-blue-500/30 flex items-center justify-center gap-3 text-lg mb-3">
+          <i class="fas fa-door-open"></i>
+          ClassIn 수업방 입장하기
+        </a>
+        <p class="text-center text-xs text-gray-500">ClassIn 앱 또는 웹 브라우저에서 수업이 열립니다</p>
+      </div>
+      
+      <!-- Right side: Session Info Card -->
+      <div class="bg-white/5 backdrop-blur-sm rounded-2xl p-6 border border-white/10">
+        <img src="${session.class_thumbnail}" class="w-full rounded-xl mb-4 aspect-video object-cover">
+        
+        <h3 class="text-lg font-bold mb-4">수업 정보</h3>
+        
+        <div class="space-y-3">
+          <div class="flex items-center gap-3 text-sm">
+            <div class="w-8 h-8 bg-white/10 rounded-lg flex items-center justify-center"><i class="fas fa-clock text-blue-400"></i></div>
+            <div>
+              <p class="text-gray-400 text-xs">수업 시간</p>
+              <p class="font-medium">${session.duration_minutes}분</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 text-sm">
+            <div class="w-8 h-8 bg-white/10 rounded-lg flex items-center justify-center"><i class="fas fa-signal text-green-400"></i></div>
+            <div>
+              <p class="text-gray-400 text-xs">수업 유형</p>
+              <p class="font-medium">실시간 라이브 양방향</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 text-sm">
+            <div class="w-8 h-8 bg-white/10 rounded-lg flex items-center justify-center"><i class="fas fa-graduation-cap text-yellow-400"></i></div>
+            <div>
+              <p class="text-gray-400 text-xs">난이도</p>
+              <p class="font-medium">${session.level === 'beginner' ? '입문' : session.level === 'intermediate' ? '중급' : session.level === 'advanced' ? '고급' : '전체 수준'}</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 text-sm">
+            <div class="w-8 h-8 bg-white/10 rounded-lg flex items-center justify-center"><i class="fas fa-book text-purple-400"></i></div>
+            <div>
+              <p class="text-gray-400 text-xs">총 수업 수</p>
+              <p class="font-medium">${session.total_lessons || 0}강</p>
+            </div>
+          </div>
+        </div>
+        
+        <!-- ClassIn Session Details -->
+        <div class="mt-5 pt-5 border-t border-white/10">
+          <h4 class="text-sm font-bold text-gray-300 mb-3"><i class="fas fa-link mr-1"></i>ClassIn 세션 정보</h4>
+          <div class="bg-white/5 rounded-xl p-3 space-y-2 text-xs">
+            <div class="flex justify-between"><span class="text-gray-400">세션 ID</span><span class="font-mono">${session.classin_class_id || 'N/A'}</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">코스 ID</span><span class="font-mono">${session.classin_course_id || 'N/A'}</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">상태</span><span class="font-medium ${session.status === 'ready' ? 'text-green-400' : 'text-blue-400'}">${session.status === 'ready' ? '준비 완료' : session.status === 'live' ? '진행 중' : session.status}</span></div>
+            <div class="flex justify-between"><span class="text-gray-400">모드</span><span class="font-medium ${isDemo ? 'text-yellow-400' : 'text-green-400'}">${isDemo ? '데모 모드' : '프로덕션'}</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Preparation Checklist -->
+<section class="max-w-5xl mx-auto px-4 sm:px-6 py-10">
+  <div class="grid md:grid-cols-2 gap-6">
+    <!-- Before Class -->
+    <div class="bg-white rounded-2xl p-6 border border-gray-100">
+      <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-clipboard-check text-blue-500 mr-2"></i>수업 전 체크리스트</h2>
+      <div class="space-y-3">
+        <label class="flex items-start gap-3 p-3 rounded-xl bg-gray-50 cursor-pointer hover:bg-gray-100 transition-all">
+          <input type="checkbox" class="mt-0.5 accent-blue-500 w-4 h-4">
+          <div>
+            <p class="text-sm font-medium text-dark-800">인터넷 연결 확인</p>
+            <p class="text-xs text-gray-500">안정적인 Wi-Fi 또는 유선 연결 권장</p>
+          </div>
+        </label>
+        <label class="flex items-start gap-3 p-3 rounded-xl bg-gray-50 cursor-pointer hover:bg-gray-100 transition-all">
+          <input type="checkbox" class="mt-0.5 accent-blue-500 w-4 h-4">
+          <div>
+            <p class="text-sm font-medium text-dark-800">카메라 & 마이크 테스트</p>
+            <p class="text-xs text-gray-500">양방향 수업을 위해 카메라와 마이크가 정상 작동하는지 확인</p>
+          </div>
+        </label>
+        <label class="flex items-start gap-3 p-3 rounded-xl bg-gray-50 cursor-pointer hover:bg-gray-100 transition-all">
+          <input type="checkbox" class="mt-0.5 accent-blue-500 w-4 h-4">
+          <div>
+            <p class="text-sm font-medium text-dark-800">ClassIn 앱 설치 (선택)</p>
+            <p class="text-xs text-gray-500">더 나은 경험을 위해 <a href="https://www.classin.com/download" target="_blank" class="text-blue-500 underline">ClassIn 앱</a>을 설치하세요</p>
+          </div>
+        </label>
+        <label class="flex items-start gap-3 p-3 rounded-xl bg-gray-50 cursor-pointer hover:bg-gray-100 transition-all">
+          <input type="checkbox" class="mt-0.5 accent-blue-500 w-4 h-4">
+          <div>
+            <p class="text-sm font-medium text-dark-800">필기도구 및 교재 준비</p>
+            <p class="text-xs text-gray-500">수업 내용을 메모할 수 있는 도구를 준비하세요</p>
+          </div>
+        </label>
+      </div>
+    </div>
+    
+    <!-- ClassIn Features -->
+    <div class="bg-white rounded-2xl p-6 border border-gray-100">
+      <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-star text-yellow-500 mr-2"></i>ClassIn 양방향 수업 기능</h2>
+      <div class="space-y-4">
+        <div class="flex items-start gap-3">
+          <div class="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-chalkboard text-blue-500"></i>
+          </div>
+          <div>
+            <p class="text-sm font-semibold text-dark-800">인터랙티브 화이트보드</p>
+            <p class="text-xs text-gray-500">선생님과 학생이 함께 사용할 수 있는 실시간 화이트보드</p>
+          </div>
+        </div>
+        <div class="flex items-start gap-3">
+          <div class="w-10 h-10 bg-green-50 rounded-xl flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-hand-paper text-green-500"></i>
+          </div>
+          <div>
+            <p class="text-sm font-semibold text-dark-800">실시간 질문 & 손들기</p>
+            <p class="text-xs text-gray-500">궁금한 점을 바로 질문하고 선생님의 답변을 받으세요</p>
+          </div>
+        </div>
+        <div class="flex items-start gap-3">
+          <div class="w-10 h-10 bg-purple-50 rounded-xl flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-users text-purple-500"></i>
+          </div>
+          <div>
+            <p class="text-sm font-semibold text-dark-800">소그룹 토론방</p>
+            <p class="text-xs text-gray-500">소그룹으로 나뉘어 토론하고 협력 학습을 진행합니다</p>
+          </div>
+        </div>
+        <div class="flex items-start gap-3">
+          <div class="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-record-vinyl text-red-500"></i>
+          </div>
+          <div>
+            <p class="text-sm font-semibold text-dark-800">수업 녹화 & 다시보기</p>
+            <p class="text-xs text-gray-500">놓친 부분은 녹화본으로 복습할 수 있습니다</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+${isDemo ? `
+<!-- Demo Mode Notice -->
+<section class="max-w-5xl mx-auto px-4 sm:px-6 pb-10">
+  <div class="bg-yellow-50 border border-yellow-200 rounded-2xl p-6">
+    <div class="flex items-start gap-3">
+      <div class="w-10 h-10 bg-yellow-100 rounded-xl flex items-center justify-center flex-shrink-0">
+        <i class="fas fa-info-circle text-yellow-600 text-lg"></i>
+      </div>
+      <div>
+        <h3 class="text-base font-bold text-yellow-900 mb-2">데모 모드 안내</h3>
+        <p class="text-sm text-yellow-800 leading-relaxed mb-3">
+          현재 ClassIn API가 데모 모드로 운영 중입니다. 실제 수업방이 생성되지는 않습니다.<br>
+          실제 ClassIn 수업방을 자동 생성하려면 다음이 필요합니다:
+        </p>
+        <div class="bg-yellow-100/50 rounded-xl p-4 space-y-2 text-sm text-yellow-900">
+          <p><i class="fas fa-key mr-2 text-yellow-600"></i><strong>CLASSIN_SID</strong> - ClassIn 파트너 학교 ID</p>
+          <p><i class="fas fa-lock mr-2 text-yellow-600"></i><strong>CLASSIN_SECRET</strong> - ClassIn API 비밀키</p>
+          <p class="text-xs text-yellow-700 mt-2">
+            <i class="fas fa-external-link-alt mr-1"></i>
+            ClassIn 파트너 신청: <a href="https://www.classin.com/kr/partnership/" target="_blank" class="underline">classin.com/partnership</a>
+          </p>
+        </div>
+        <div class="mt-3 p-3 bg-dark-800 rounded-xl text-xs font-mono text-green-400">
+          <p class="text-gray-500"># Cloudflare 환경변수 설정</p>
+          <p>npx wrangler secret put CLASSIN_SID</p>
+          <p>npx wrangler secret put CLASSIN_SECRET</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+` : ''}
 
 ${footerHTML}
 ${modalsHTML}
