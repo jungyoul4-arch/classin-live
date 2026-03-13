@@ -200,6 +200,85 @@ async function createClassInSession(
   return result
 }
 
+// ==================== ClassIn Virtual Account Management ====================
+
+interface VirtualAccountResult {
+  success: boolean
+  uid?: string
+  error?: string
+}
+
+// ClassIn API: Register Virtual Account (가상 계정을 ClassIn에 등록)
+async function registerVirtualAccount(
+  config: ClassInConfig,
+  accountUid: string,
+  studentName: string,
+  password: string
+): Promise<VirtualAccountResult> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('studentAccount', accountUid)
+  formData.set('studentName', studentName)
+  formData.set('password', password)
+
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=registerStudent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const data = await res.json() as any
+    if (data.error_info?.errno === 1) {
+      return { success: true, uid: accountUid }
+    }
+    return { success: false, error: data.error_info?.error || 'Failed to register account' }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
+// ClassIn API: Add student to course (수강생을 코스에 추가)
+async function addStudentToCourse(
+  config: ClassInConfig,
+  courseId: string,
+  studentUid: string
+): Promise<{ success: boolean; error?: string }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('courseId', courseId)
+  formData.set('studentUid', studentUid)
+
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addCourseStudent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const data = await res.json() as any
+    if (data.error_info?.errno === 1) {
+      return { success: true }
+    }
+    return { success: false, error: data.error_info?.error || 'Failed to add student to course' }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
+// Generate default password for virtual accounts
+function generateDefaultPassword(): string {
+  return 'ClassIn' + Math.random().toString(36).substr(2, 6).toUpperCase()
+}
+
 // ==================== API Routes ====================
 
 // Get all categories
@@ -326,13 +405,65 @@ app.post('/api/auth/login', async (c) => {
   return c.json({ user, token: `demo_token_${(user as any).id}` })
 })
 
-// Simple auth - register
+// Simple auth - register (with automatic ClassIn virtual account assignment)
 app.post('/api/auth/register', async (c) => {
   const { email, password, name } = await c.req.json()
   try {
     const result = await c.env.DB.prepare('INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)').bind(email, `hash_${password}`, name).run()
-    const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role FROM users WHERE id = ?').bind(result.meta.last_row_id).first()
-    return c.json({ user, token: `demo_token_${(user as any).id}` })
+    const userId = result.meta.last_row_id
+    const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, classin_account_uid, classin_registered FROM users WHERE id = ?').bind(userId).first() as any
+
+    // Auto-assign ClassIn virtual account
+    let classInAccount = null
+    const availableAccount = await c.env.DB.prepare(`
+      SELECT * FROM classin_virtual_accounts
+      WHERE status = 'available' AND (expires_at IS NULL OR expires_at > datetime('now'))
+      ORDER BY id LIMIT 1
+    `).first() as any
+
+    if (availableAccount) {
+      const accountPassword = generateDefaultPassword()
+      let isRegistered = false
+
+      // Try to register with ClassIn API if configured
+      const classInConfig = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+        ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+        : null
+
+      if (classInConfig) {
+        const regResult = await registerVirtualAccount(classInConfig, availableAccount.account_uid, name, accountPassword)
+        isRegistered = regResult.success
+      }
+
+      // Assign account to user
+      await c.env.DB.prepare(`
+        UPDATE classin_virtual_accounts
+        SET user_id = ?, assigned_at = datetime('now'), assigned_name = ?,
+            account_password = ?, is_registered = ?, status = 'assigned', updated_at = datetime('now')
+        WHERE id = ?
+      `).bind(userId, name, accountPassword, isRegistered ? 1 : 0, availableAccount.id).run()
+
+      // Update user with ClassIn account
+      await c.env.DB.prepare(`
+        UPDATE users SET classin_account_uid = ?, classin_registered = ? WHERE id = ?
+      `).bind(availableAccount.account_uid, isRegistered ? 1 : 0, userId).run()
+
+      classInAccount = {
+        accountUid: availableAccount.account_uid,
+        password: accountPassword,
+        isRegistered
+      }
+
+      // Update user object
+      user.classin_account_uid = availableAccount.account_uid
+      user.classin_registered = isRegistered ? 1 : 0
+    }
+
+    return c.json({
+      user,
+      token: `demo_token_${userId}`,
+      classInAccount
+    })
   } catch (e: any) {
     if (e.message?.includes('UNIQUE')) return c.json({ error: '이미 등록된 이메일입니다.' }, 400)
     return c.json({ error: '회원가입에 실패했습니다.' }, 500)
@@ -497,6 +628,383 @@ app.get('/api/instructors/:id', async (c) => {
     SELECT c.*, cat.name as category_name FROM classes c JOIN categories cat ON c.category_id = cat.id WHERE c.instructor_id = ? AND c.status = 'active'
   `).bind(id).all()
   return c.json({ instructor, classes })
+})
+
+// ==================== Test Account API Routes ====================
+
+// Activate test account with access code (테스트 계정 활성화)
+app.post('/api/test-account/activate', async (c) => {
+  const { userId, accessCode } = await c.req.json()
+
+  if (!userId || !accessCode) {
+    return c.json({ error: 'userId와 accessCode가 필요합니다.' }, 400)
+  }
+
+  // Check if code is valid
+  const code = await c.env.DB.prepare(`
+    SELECT * FROM test_access_codes
+    WHERE code = ? AND is_active = 1 AND (expires_at IS NULL OR expires_at > datetime('now'))
+    AND (max_uses = 0 OR used_count < max_uses)
+  `).bind(accessCode).first() as any
+
+  if (!code) {
+    return c.json({ error: '유효하지 않거나 만료된 테스트 코드입니다.' }, 400)
+  }
+
+  // Update user as test account (valid for 30 days)
+  await c.env.DB.prepare(`
+    UPDATE users SET is_test_account = 1, test_expires_at = datetime('now', '+30 days') WHERE id = ?
+  `).bind(userId).run()
+
+  // Increment code usage
+  await c.env.DB.prepare(`
+    UPDATE test_access_codes SET used_count = used_count + 1 WHERE id = ?
+  `).bind(code.id).run()
+
+  return c.json({
+    success: true,
+    message: '테스트 계정이 활성화되었습니다. 30일간 결제 없이 모든 기능을 이용할 수 있습니다.',
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+  })
+})
+
+// Check if user is test account
+app.get('/api/user/:userId/test-status', async (c) => {
+  const userId = c.req.param('userId')
+  const user = await c.env.DB.prepare(`
+    SELECT is_test_account, test_expires_at FROM users WHERE id = ?
+  `).bind(userId).first() as any
+
+  if (!user) {
+    return c.json({ error: 'User not found' }, 404)
+  }
+
+  const isActive = user.is_test_account === 1 &&
+    (!user.test_expires_at || new Date(user.test_expires_at) > new Date())
+
+  return c.json({
+    isTestAccount: isActive,
+    expiresAt: user.test_expires_at
+  })
+})
+
+// Test account: Free enrollment (테스트 계정용 무료 수강신청)
+app.post('/api/test-account/enroll', async (c) => {
+  const { userId, classId } = await c.req.json()
+
+  if (!userId || !classId) {
+    return c.json({ error: 'userId와 classId가 필요합니다.' }, 400)
+  }
+
+  // Check if user is test account
+  const user = await c.env.DB.prepare(`
+    SELECT * FROM users WHERE id = ? AND is_test_account = 1
+    AND (test_expires_at IS NULL OR test_expires_at > datetime('now'))
+  `).bind(userId).first() as any
+
+  if (!user) {
+    return c.json({ error: '테스트 계정이 아니거나 만료되었습니다.' }, 403)
+  }
+
+  // Create enrollment
+  await c.env.DB.prepare('INSERT OR IGNORE INTO enrollments (user_id, class_id) VALUES (?, ?)').bind(userId, classId).run()
+  const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, classId).first() as any
+
+  // Create test order (amount = 0)
+  const txId = `TEST_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  await c.env.DB.prepare(`
+    INSERT INTO orders (user_id, order_type, class_id, amount, payment_method, payment_status, transaction_id)
+    VALUES (?, 'class', ?, 0, 'test', 'completed', ?)
+  `).bind(userId, classId, txId).run()
+
+  // Remove from cart if exists
+  await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, classId).run()
+
+  // Update student count
+  await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(classId).run()
+
+  // Create ClassIn session
+  const classInConfig: ClassInConfig | undefined = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : undefined
+
+  const classinSession = await createClassInSession(
+    c.env.DB,
+    classId,
+    userId,
+    enrollment?.id || 0,
+    classInConfig
+  )
+
+  return c.json({
+    success: true,
+    message: '테스트 수강신청이 완료되었습니다!',
+    transactionId: txId,
+    classinSession: classinSession ? {
+      joinUrl: classinSession.joinUrl,
+      classId: classinSession.classId,
+      isDemo: !c.env.CLASSIN_SID
+    } : null
+  })
+})
+
+// Admin: Create test access code
+app.post('/api/admin/test-codes/create', async (c) => {
+  const { code, description, maxUses, expiresAt, adminKey } = await c.req.json()
+
+  if (adminKey !== 'classin-admin-2024') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
+
+  const finalCode = code || `TEST-${Date.now().toString(36).toUpperCase()}`
+
+  try {
+    await c.env.DB.prepare(`
+      INSERT INTO test_access_codes (code, description, max_uses, expires_at)
+      VALUES (?, ?, ?, ?)
+    `).bind(finalCode, description || '', maxUses || 100, expiresAt || null).run()
+
+    return c.json({ success: true, code: finalCode })
+  } catch (e: any) {
+    return c.json({ error: '코드 생성 실패: ' + e.message }, 500)
+  }
+})
+
+// Admin: Get test access codes
+app.get('/api/admin/test-codes', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM test_access_codes ORDER BY created_at DESC').all()
+  return c.json(results)
+})
+
+// ==================== ClassIn Virtual Account API Routes ====================
+
+// Initialize virtual accounts (관리자: 가상 계정 일괄 생성)
+app.post('/api/admin/virtual-accounts/init', async (c) => {
+  const { startUid, endUid, sid, expiresAt, adminKey } = await c.req.json()
+
+  // Simple admin key check (in production, use proper auth)
+  if (adminKey !== 'classin-admin-2024') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
+
+  if (!startUid || !endUid || !sid) {
+    return c.json({ error: 'startUid, endUid, sid가 필요합니다.' }, 400)
+  }
+
+  // Parse UIDs: format "0065-20000532100"
+  const prefix = startUid.split('-')[0] // "0065"
+  const startNum = parseInt(startUid.split('-')[1]) // 20000532100
+  const endNum = parseInt(endUid.split('-')[1]) // 20000532599
+
+  if (isNaN(startNum) || isNaN(endNum) || endNum < startNum) {
+    return c.json({ error: 'UID 범위가 올바르지 않습니다.' }, 400)
+  }
+
+  const count = endNum - startNum + 1
+  let inserted = 0
+  let skipped = 0
+
+  // Insert in batches
+  for (let i = startNum; i <= endNum; i++) {
+    const accountUid = `${prefix}-${i}`
+    try {
+      await c.env.DB.prepare(`
+        INSERT OR IGNORE INTO classin_virtual_accounts (account_uid, sid, status, expires_at)
+        VALUES (?, ?, 'available', ?)
+      `).bind(accountUid, sid, expiresAt || '2028-03-11 00:00:00').run()
+      inserted++
+    } catch (e) {
+      skipped++
+    }
+  }
+
+  return c.json({
+    success: true,
+    message: `${inserted}개의 가상 계정이 생성되었습니다.`,
+    total: count,
+    inserted,
+    skipped
+  })
+})
+
+// Get virtual accounts status (관리자: 가상 계정 현황)
+app.get('/api/admin/virtual-accounts', async (c) => {
+  const status = c.req.query('status')
+  const limit = parseInt(c.req.query('limit') || '50')
+  const offset = parseInt(c.req.query('offset') || '0')
+
+  let query = `SELECT * FROM classin_virtual_accounts`
+  const params: any[] = []
+
+  if (status) {
+    query += ` WHERE status = ?`
+    params.push(status)
+  }
+
+  query += ` ORDER BY id LIMIT ? OFFSET ?`
+  params.push(limit, offset)
+
+  const { results } = await c.env.DB.prepare(query).bind(...params).all()
+
+  // Get stats
+  const stats = await c.env.DB.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'available' THEN 1 ELSE 0 END) as available,
+      SUM(CASE WHEN status = 'assigned' THEN 1 ELSE 0 END) as assigned,
+      SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) as expired,
+      SUM(CASE WHEN is_registered = 1 THEN 1 ELSE 0 END) as registered
+    FROM classin_virtual_accounts
+  `).first() as any
+
+  return c.json({ accounts: results, stats })
+})
+
+// Assign virtual account to user (사용자에게 가상 계정 할당)
+app.post('/api/virtual-accounts/assign', async (c) => {
+  const { userId, userName } = await c.req.json()
+
+  if (!userId || !userName) {
+    return c.json({ error: 'userId와 userName이 필요합니다.' }, 400)
+  }
+
+  // Check if user already has an account
+  const existingUser = await c.env.DB.prepare(
+    'SELECT classin_account_uid FROM users WHERE id = ? AND classin_account_uid != ""'
+  ).bind(userId).first() as any
+
+  if (existingUser?.classin_account_uid) {
+    return c.json({
+      success: true,
+      accountUid: existingUser.classin_account_uid,
+      message: '이미 할당된 계정이 있습니다.'
+    })
+  }
+
+  // Get an available virtual account
+  const account = await c.env.DB.prepare(`
+    SELECT * FROM classin_virtual_accounts
+    WHERE status = 'available' AND (expires_at IS NULL OR expires_at > datetime('now'))
+    ORDER BY id LIMIT 1
+  `).first() as any
+
+  if (!account) {
+    return c.json({ error: '사용 가능한 가상 계정이 없습니다.' }, 404)
+  }
+
+  const password = generateDefaultPassword()
+
+  // Try to register with ClassIn API if configured
+  let isRegistered = false
+  const classInConfig = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  if (classInConfig) {
+    const result = await registerVirtualAccount(classInConfig, account.account_uid, userName, password)
+    isRegistered = result.success
+    if (!result.success) {
+      // Update error message but continue with assignment
+      await c.env.DB.prepare(
+        'UPDATE classin_virtual_accounts SET error_message = ? WHERE id = ?'
+      ).bind(result.error || 'Registration failed', account.id).run()
+    }
+  }
+
+  // Assign account to user
+  await c.env.DB.prepare(`
+    UPDATE classin_virtual_accounts
+    SET user_id = ?, assigned_at = datetime('now'), assigned_name = ?,
+        account_password = ?, is_registered = ?, status = 'assigned', updated_at = datetime('now')
+    WHERE id = ?
+  `).bind(userId, userName, password, isRegistered ? 1 : 0, account.id).run()
+
+  // Update user with ClassIn account
+  await c.env.DB.prepare(`
+    UPDATE users SET classin_account_uid = ?, classin_registered = ? WHERE id = ?
+  `).bind(account.account_uid, isRegistered ? 1 : 0, userId).run()
+
+  return c.json({
+    success: true,
+    accountUid: account.account_uid,
+    password: password,
+    isRegistered,
+    message: isRegistered
+      ? 'ClassIn 계정이 등록되고 할당되었습니다.'
+      : 'ClassIn 계정이 할당되었습니다. (API 등록 대기 중)'
+  })
+})
+
+// Register virtual account with ClassIn API (계정을 ClassIn에 등록)
+app.post('/api/virtual-accounts/register', async (c) => {
+  const { accountId } = await c.req.json()
+
+  const account = await c.env.DB.prepare(
+    'SELECT * FROM classin_virtual_accounts WHERE id = ?'
+  ).bind(accountId).first() as any
+
+  if (!account) {
+    return c.json({ error: '계정을 찾을 수 없습니다.' }, 404)
+  }
+
+  if (account.is_registered) {
+    return c.json({ success: true, message: '이미 등록된 계정입니다.' })
+  }
+
+  const classInConfig = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  if (!classInConfig) {
+    return c.json({ error: 'ClassIn API가 설정되지 않았습니다.' }, 400)
+  }
+
+  const password = account.account_password || generateDefaultPassword()
+  const result = await registerVirtualAccount(
+    classInConfig,
+    account.account_uid,
+    account.assigned_name || 'Student',
+    password
+  )
+
+  if (result.success) {
+    await c.env.DB.prepare(`
+      UPDATE classin_virtual_accounts
+      SET is_registered = 1, registered_at = datetime('now'), account_password = ?, error_message = '', updated_at = datetime('now')
+      WHERE id = ?
+    `).bind(password, accountId).run()
+
+    if (account.user_id) {
+      await c.env.DB.prepare(
+        'UPDATE users SET classin_registered = 1 WHERE id = ?'
+      ).bind(account.user_id).run()
+    }
+
+    return c.json({ success: true, message: 'ClassIn 등록 완료' })
+  } else {
+    await c.env.DB.prepare(
+      'UPDATE classin_virtual_accounts SET error_message = ?, updated_at = datetime("now") WHERE id = ?'
+    ).bind(result.error || 'Unknown error', accountId).run()
+    return c.json({ success: false, error: result.error })
+  }
+})
+
+// Get user's ClassIn account info
+app.get('/api/user/:userId/classin-account', async (c) => {
+  const userId = c.req.param('userId')
+
+  const account = await c.env.DB.prepare(`
+    SELECT va.*, u.name as user_name, u.email as user_email
+    FROM classin_virtual_accounts va
+    JOIN users u ON va.user_id = u.id
+    WHERE va.user_id = ?
+  `).bind(userId).first()
+
+  if (!account) {
+    return c.json({ hasAccount: false })
+  }
+
+  return c.json({ hasAccount: true, account })
 })
 
 // ==================== ClassIn Session API Routes ====================
@@ -1109,6 +1617,48 @@ const modalsHTML = `
   </div>
 </div>
 
+<!-- Test Code Modal -->
+<div id="testCodeModal" class="fixed inset-0 z-[100] hidden">
+  <div class="absolute inset-0 bg-black/50 modal-overlay" onclick="closeTestCodeModal()"></div>
+  <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-white rounded-2xl shadow-2xl fade-in">
+    <div class="p-6 border-b border-gray-100">
+      <div class="flex items-center justify-between">
+        <h2 class="text-xl font-bold text-dark-900"><i class="fas fa-flask text-purple-500 mr-2"></i>테스트 코드 입력</h2>
+        <button onclick="closeTestCodeModal()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times text-xl"></i></button>
+      </div>
+    </div>
+    <div class="p-6">
+      <div class="bg-purple-50 border border-purple-100 rounded-xl p-4 mb-4">
+        <p class="text-sm text-purple-800"><i class="fas fa-info-circle mr-2"></i>테스트 코드를 입력하면 <strong>30일간 결제 없이</strong> 모든 클래스를 무료로 수강할 수 있습니다.</p>
+      </div>
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-2">테스트 코드</label>
+        <input type="text" id="testCodeInput" placeholder="테스트 코드를 입력하세요" class="w-full h-12 px-4 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 uppercase" style="text-transform: uppercase;">
+      </div>
+      <p id="testCodeError" class="text-red-500 text-sm mb-4 hidden"></p>
+      <p id="testCodeSuccess" class="text-green-600 text-sm mb-4 hidden"></p>
+      <button onclick="activateTestCode()" class="w-full h-12 bg-purple-500 hover:bg-purple-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-purple-500/30">
+        <i class="fas fa-check-circle mr-2"></i>테스트 코드 활성화
+      </button>
+    </div>
+    <div class="px-6 pb-6">
+      <div id="testAccountStatus" class="hidden">
+        <div class="bg-green-50 border border-green-200 rounded-xl p-4">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
+              <i class="fas fa-check text-green-600"></i>
+            </div>
+            <div>
+              <p class="font-semibold text-green-800">테스트 계정 활성화됨</p>
+              <p class="text-sm text-green-600" id="testAccountExpiry">만료일: -</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Cart Sidebar -->
 <div id="cartSidebar" class="fixed inset-0 z-[90] hidden">
   <div class="absolute inset-0 bg-black/50 modal-overlay" onclick="closeCart()"></div>
@@ -1541,8 +2091,18 @@ async function openMyPage(tab) {
   const content = document.getElementById('myPageContent');
   const activeTab = tab || 'enrollments';
   
+  // Check test account status
+  let testAccountBadge = '';
+  try {
+    const testRes = await fetch('/api/user/' + currentUser.id + '/test-status');
+    const testData = await testRes.json();
+    if (testData.isTestAccount) {
+      testAccountBadge = \`<span class="inline-block mt-1 ml-1 px-2 py-0.5 bg-purple-100 text-purple-600 text-xs font-semibold rounded-full"><i class="fas fa-flask mr-1"></i>테스트</span>\`;
+    }
+  } catch(e) {}
+
   content.innerHTML = \`
-    <div class="flex items-center gap-3 mb-6 pb-4 border-b border-gray-100">
+    <div class="flex items-center gap-3 mb-4 pb-4 border-b border-gray-100">
       <div class="w-14 h-14 bg-primary-100 rounded-full flex items-center justify-center">
         <span class="text-xl font-bold text-primary-600">\${currentUser.name?.charAt(0) || 'U'}</span>
       </div>
@@ -1550,8 +2110,12 @@ async function openMyPage(tab) {
         <p class="font-bold text-dark-900">\${currentUser.name}</p>
         <p class="text-sm text-gray-500">\${currentUser.email}</p>
         \${currentUser.subscription_plan ? \`<span class="inline-block mt-1 px-2 py-0.5 bg-primary-100 text-primary-600 text-xs font-semibold rounded-full">\${currentUser.subscription_plan === 'annual' ? '연간' : '월간'} 구독중</span>\` : ''}
+        \${testAccountBadge}
       </div>
     </div>
+    <button onclick="openTestCodeModal(); closeMyPage();" class="w-full mb-4 py-3 bg-purple-50 hover:bg-purple-100 text-purple-700 font-medium rounded-xl transition-all flex items-center justify-center gap-2 border border-purple-200">
+      <i class="fas fa-flask"></i>테스트 코드 입력
+    </button>
     <div class="flex gap-1 mb-4 bg-gray-100 rounded-xl p-1">
       <button onclick="loadMyPageTab('enrollments')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='enrollments'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강중</button>
       <button onclick="loadMyPageTab('subscriptions')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='subscriptions'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}"><i class="fas fa-sync-alt mr-0.5 text-[9px]"></i>구독</button>
@@ -1563,6 +2127,102 @@ async function openMyPage(tab) {
   loadMyPageTab(activeTab);
 }
 function closeMyPage() { document.getElementById('myPageSidebar').classList.add('hidden'); }
+
+// Test Code Functions
+function openTestCodeModal() {
+  if (!currentUser) { openAuthModal('login'); return; }
+  document.getElementById('testCodeModal').classList.remove('hidden');
+  document.getElementById('testCodeError').classList.add('hidden');
+  document.getElementById('testCodeSuccess').classList.add('hidden');
+  checkTestAccountStatus();
+}
+
+function closeTestCodeModal() {
+  document.getElementById('testCodeModal').classList.add('hidden');
+}
+
+async function checkTestAccountStatus() {
+  if (!currentUser) return;
+  try {
+    const res = await fetch('/api/user/' + currentUser.id + '/test-status');
+    const data = await res.json();
+    const statusDiv = document.getElementById('testAccountStatus');
+    if (data.isTestAccount) {
+      statusDiv.classList.remove('hidden');
+      document.getElementById('testAccountExpiry').textContent = '만료일: ' + new Date(data.expiresAt).toLocaleDateString('ko-KR');
+    } else {
+      statusDiv.classList.add('hidden');
+    }
+  } catch (e) {}
+}
+
+async function activateTestCode() {
+  if (!currentUser) { openAuthModal('login'); return; }
+  const code = document.getElementById('testCodeInput').value.trim().toUpperCase();
+  const errorEl = document.getElementById('testCodeError');
+  const successEl = document.getElementById('testCodeSuccess');
+
+  errorEl.classList.add('hidden');
+  successEl.classList.add('hidden');
+
+  if (!code) {
+    errorEl.textContent = '테스트 코드를 입력해주세요.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/test-account/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: currentUser.id, accessCode: code })
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      successEl.textContent = data.message;
+      successEl.classList.remove('hidden');
+      document.getElementById('testCodeInput').value = '';
+      checkTestAccountStatus();
+      // Refresh user data
+      currentUser.is_test_account = true;
+      localStorage.setItem('classin_user', JSON.stringify(currentUser));
+    } else {
+      errorEl.textContent = data.error || '활성화에 실패했습니다.';
+      errorEl.classList.remove('hidden');
+    }
+  } catch (e) {
+    errorEl.textContent = '서버 오류가 발생했습니다.';
+    errorEl.classList.remove('hidden');
+  }
+}
+
+async function testEnroll(classId) {
+  if (!currentUser) { openAuthModal('login'); return; }
+
+  try {
+    const res = await fetch('/api/test-account/enroll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: currentUser.id, classId: classId })
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      alert(data.message);
+      if (data.classinSession && data.classinSession.joinUrl) {
+        if (confirm('ClassIn 수업방으로 이동하시겠습니까?')) {
+          window.open(data.classinSession.joinUrl, '_blank');
+        }
+      }
+      loadMyPage();
+    } else {
+      alert(data.error || '수강신청에 실패했습니다.');
+    }
+  } catch (e) {
+    alert('서버 오류가 발생했습니다.');
+  }
+}
 
 async function loadMyPageTab(tab) {
   document.querySelectorAll('.mypage-tab').forEach((b,i) => {
@@ -2820,5 +3480,289 @@ function classCardTemplate(cls: any): string {
     </a>
   `
 }
+
+// ==================== Admin Page - Virtual Account Management ====================
+
+app.get('/admin', async (c) => {
+  return c.html(`
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClassIn Live 관리자 - 가상 계정 관리</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.0/css/all.min.css" rel="stylesheet">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap');
+    * { font-family: 'Noto Sans KR', sans-serif; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <!-- Header -->
+  <nav class="bg-gray-900 text-white shadow-lg">
+    <div class="max-w-7xl mx-auto px-4 py-4">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <a href="/" class="text-xl font-bold text-rose-400">ClassIn Live</a>
+          <span class="text-gray-400">|</span>
+          <span class="text-gray-300">관리자 대시보드</span>
+        </div>
+        <a href="/" class="text-sm text-gray-400 hover:text-white"><i class="fas fa-arrow-left mr-1"></i>메인으로</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="max-w-7xl mx-auto px-4 py-8">
+    <!-- Stats Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8" id="statsCards">
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-users text-blue-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statTotal">0</p>
+            <p class="text-sm text-gray-500">전체 계정</p>
+          </div>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-check-circle text-green-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statAvailable">0</p>
+            <p class="text-sm text-gray-500">사용 가능</p>
+          </div>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-user-check text-purple-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statAssigned">0</p>
+            <p class="text-sm text-gray-500">할당됨</p>
+          </div>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-rose-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-cloud-upload-alt text-rose-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statRegistered">0</p>
+            <p class="text-sm text-gray-500">ClassIn 등록됨</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Initialize Accounts Section -->
+    <div class="bg-white rounded-xl p-6 shadow-sm mb-8">
+      <h2 class="text-lg font-bold text-gray-800 mb-4"><i class="fas fa-plus-circle text-blue-500 mr-2"></i>가상 계정 일괄 생성</h2>
+      <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">시작 UID</label>
+          <input type="text" id="startUid" value="0065-20000532100" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">끝 UID</label>
+          <input type="text" id="endUid" value="0065-20000532599" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">SID (학교 ID)</label>
+          <input type="text" id="sid" value="67411940" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">만료일</label>
+          <input type="datetime-local" id="expiresAt" value="2028-03-11T00:00" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div class="flex items-end">
+          <button onclick="initAccounts()" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg transition-all">
+            <i class="fas fa-database mr-1"></i>계정 생성
+          </button>
+        </div>
+      </div>
+      <p class="text-xs text-gray-400 mt-3"><i class="fas fa-info-circle mr-1"></i>범위 내의 모든 UID를 데이터베이스에 등록합니다. 이미 존재하는 UID는 건너뜁니다.</p>
+    </div>
+
+    <!-- Account List -->
+    <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+      <div class="p-6 border-b border-gray-100">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-bold text-gray-800"><i class="fas fa-list text-purple-500 mr-2"></i>가상 계정 목록</h2>
+          <div class="flex items-center gap-2">
+            <select id="filterStatus" onchange="loadAccounts()" class="px-3 py-2 border border-gray-200 rounded-lg text-sm">
+              <option value="">전체</option>
+              <option value="available">사용 가능</option>
+              <option value="assigned">할당됨</option>
+              <option value="expired">만료됨</option>
+            </select>
+            <button onclick="loadAccounts()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg transition-all">
+              <i class="fas fa-sync-alt"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase">계정 UID</th>
+              <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase">상태</th>
+              <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase">ClassIn 등록</th>
+              <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase">할당된 사용자</th>
+              <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase">비밀번호</th>
+              <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase">만료일</th>
+              <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase">작업</th>
+            </tr>
+          </thead>
+          <tbody id="accountsTable" class="divide-y divide-gray-100">
+            <tr><td colspan="7" class="px-6 py-8 text-center text-gray-400">로딩 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="p-4 border-t border-gray-100 flex items-center justify-between">
+        <p class="text-sm text-gray-500" id="paginationInfo">-</p>
+        <div class="flex items-center gap-2">
+          <button onclick="prevPage()" class="px-3 py-1 border border-gray-200 rounded text-sm hover:bg-gray-50">이전</button>
+          <button onclick="nextPage()" class="px-3 py-1 border border-gray-200 rounded text-sm hover:bg-gray-50">다음</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Result Modal -->
+  <div id="resultModal" class="fixed inset-0 z-50 hidden">
+    <div class="absolute inset-0 bg-black/50" onclick="closeModal()"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
+      <h3 class="text-lg font-bold mb-3" id="modalTitle">결과</h3>
+      <p class="text-gray-600" id="modalMessage"></p>
+      <button onclick="closeModal()" class="mt-4 w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-2 rounded-lg">확인</button>
+    </div>
+  </div>
+
+  <script>
+    const ADMIN_KEY = 'classin-admin-2024';
+    let currentPage = 0;
+    const pageSize = 50;
+
+    async function loadStats() {
+      const res = await fetch('/api/admin/virtual-accounts?limit=1');
+      const data = await res.json();
+      if (data.stats) {
+        document.getElementById('statTotal').textContent = data.stats.total || 0;
+        document.getElementById('statAvailable').textContent = data.stats.available || 0;
+        document.getElementById('statAssigned').textContent = data.stats.assigned || 0;
+        document.getElementById('statRegistered').textContent = data.stats.registered || 0;
+      }
+    }
+
+    async function loadAccounts() {
+      const status = document.getElementById('filterStatus').value;
+      const url = '/api/admin/virtual-accounts?limit=' + pageSize + '&offset=' + (currentPage * pageSize) + (status ? '&status=' + status : '');
+      const res = await fetch(url);
+      const data = await res.json();
+
+      const tbody = document.getElementById('accountsTable');
+      if (!data.accounts || data.accounts.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="px-6 py-8 text-center text-gray-400">계정이 없습니다.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = data.accounts.map(acc => \`
+        <tr class="hover:bg-gray-50">
+          <td class="px-6 py-4 font-mono text-sm">\${acc.account_uid}</td>
+          <td class="px-6 py-4">
+            <span class="px-2 py-1 rounded-full text-xs font-medium \${
+              acc.status === 'available' ? 'bg-green-100 text-green-700' :
+              acc.status === 'assigned' ? 'bg-purple-100 text-purple-700' :
+              'bg-gray-100 text-gray-600'
+            }">\${acc.status === 'available' ? '사용 가능' : acc.status === 'assigned' ? '할당됨' : acc.status}</span>
+          </td>
+          <td class="px-6 py-4">
+            \${acc.is_registered
+              ? '<span class="text-green-500"><i class="fas fa-check-circle"></i> 등록됨</span>'
+              : '<span class="text-gray-400"><i class="far fa-circle"></i> 미등록</span>'
+            }
+          </td>
+          <td class="px-6 py-4 text-sm">\${acc.assigned_name || '-'}</td>
+          <td class="px-6 py-4 font-mono text-xs">\${acc.account_password || '-'}</td>
+          <td class="px-6 py-4 text-sm text-gray-500">\${acc.expires_at ? new Date(acc.expires_at).toLocaleDateString('ko-KR') : '-'}</td>
+          <td class="px-6 py-4">
+            \${!acc.is_registered && acc.status === 'assigned' ?
+              \`<button onclick="registerAccount(\${acc.id})" class="text-blue-500 hover:text-blue-700 text-sm"><i class="fas fa-cloud-upload-alt mr-1"></i>등록</button>\`
+              : '-'
+            }
+          </td>
+        </tr>
+      \`).join('');
+
+      document.getElementById('paginationInfo').textContent = \`페이지 \${currentPage + 1} (총 \${data.stats?.total || 0}개)\`;
+      loadStats();
+    }
+
+    async function initAccounts() {
+      const startUid = document.getElementById('startUid').value;
+      const endUid = document.getElementById('endUid').value;
+      const sid = document.getElementById('sid').value;
+      const expiresAt = document.getElementById('expiresAt').value.replace('T', ' ') + ':00';
+
+      const res = await fetch('/api/admin/virtual-accounts/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ startUid, endUid, sid, expiresAt, adminKey: ADMIN_KEY })
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        showModal('성공', data.message);
+        loadAccounts();
+      } else {
+        showModal('오류', data.error || '생성 실패');
+      }
+    }
+
+    async function registerAccount(accountId) {
+      const res = await fetch('/api/virtual-accounts/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId })
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        showModal('성공', 'ClassIn에 계정이 등록되었습니다.');
+        loadAccounts();
+      } else {
+        showModal('오류', data.error || '등록 실패');
+      }
+    }
+
+    function showModal(title, message) {
+      document.getElementById('modalTitle').textContent = title;
+      document.getElementById('modalMessage').textContent = message;
+      document.getElementById('resultModal').classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('resultModal').classList.add('hidden');
+    }
+
+    function prevPage() { if (currentPage > 0) { currentPage--; loadAccounts(); } }
+    function nextPage() { currentPage++; loadAccounts(); }
+
+    // Initial load
+    loadAccounts();
+  </script>
+</body>
+</html>
+  `)
+})
 
 export default app

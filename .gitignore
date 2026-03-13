@@ -28,3 +28,4 @@ logs/
 *.bak
 *.tar.gz
 *.zip
+.claude/
