@@ -4664,6 +4664,7 @@ app.get('/admin', async (c) => {
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">클래스명</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">강사</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">가격</th>
+              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">라이브 시작</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">ClassIn</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">예약 시간</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">강사입장</th>
@@ -4672,7 +4673,7 @@ app.get('/admin', async (c) => {
             </tr>
           </thead>
           <tbody id="classesTable" class="divide-y divide-gray-100">
-            <tr><td colspan="9" class="px-6 py-8 text-center text-gray-400">로딩 중...</td></tr>
+            <tr><td colspan="10" class="px-6 py-8 text-center text-gray-400">로딩 중...</td></tr>
           </tbody>
         </table>
       </div>
@@ -5075,7 +5076,7 @@ app.get('/admin', async (c) => {
 
       const tbody = document.getElementById('classesTable');
       if (!data.classes || data.classes.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" class="px-6 py-8 text-center text-gray-400">클래스가 없습니다.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="px-6 py-8 text-center text-gray-400">클래스가 없습니다.</td></tr>';
         return;
       }
 
@@ -5119,6 +5120,9 @@ app.get('/admin', async (c) => {
             </td>
             <td class="px-3 py-2 text-sm">\${cls.instructor_name}</td>
             <td class="px-3 py-2 text-sm">\${(cls.price || 0).toLocaleString()}원</td>
+            <td class="px-3 py-2 text-xs">
+              \${cls.schedule_start ? \`<span class="\${new Date(cls.schedule_start).getTime() < now ? 'text-gray-400' : 'text-blue-600 font-medium'}">\${new Date(cls.schedule_start).toLocaleString('ko-KR', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span>\` : '-'}
+            </td>
             <td class="px-3 py-2">\${statusBadge}</td>
             <td class="px-3 py-2 text-xs text-gray-500">
               \${cls.classin_scheduled_at ? new Date(cls.classin_scheduled_at).toLocaleString('ko-KR', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-'}
