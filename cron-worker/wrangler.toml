@@ -1,0 +1,12 @@
+name = "classin-cron"
+main = "index.js"
+compatibility_date = "2026-02-13"
+
+# 매일 자정 (UTC) 실행 - 한국시간 오전 9시
+# 매시간 실행하려면: "0 * * * *"
+[triggers]
+crons = ["0 0 * * *"]
+
+[vars]
+ADMIN_KEY = "classin-admin-2024"
+API_BASE_URL = "https://classin-live.pages.dev"
