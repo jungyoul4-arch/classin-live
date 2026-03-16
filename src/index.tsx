@@ -604,7 +604,7 @@ async function registerInstructorWithClassIn(
 }
 
 // Assign virtual account to enrollment (수강 신청 시 가상 계정 할당)
-// ClassIn API에서 반환하는 실제 UID를 저장
+// 1인 1계정 원칙: 이미 할당된 계정이 있으면 재사용
 async function assignVirtualAccountToEnrollment(
   db: D1Database,
   enrollmentId: number,
@@ -612,7 +612,31 @@ async function assignVirtualAccountToEnrollment(
   userName: string,
   classInConfig: ClassInConfig | null
 ): Promise<{ success: boolean; accountUid?: string; classInUid?: string; password?: string; isRegistered?: boolean; error?: string }> {
-  // Find available virtual account
+  // 1. 먼저 사용자에게 이미 할당된 가상 계정이 있는지 확인
+  const existingAccount = await db.prepare(`
+    SELECT * FROM classin_virtual_accounts
+    WHERE user_id = ? AND status = 'assigned'
+    ORDER BY assigned_at DESC LIMIT 1
+  `).first() as any
+
+  if (existingAccount) {
+    // 이미 할당된 계정이 있으면 재사용
+    await db.prepare(`
+      UPDATE enrollments
+      SET classin_account_uid = ?, classin_account_password = ?, classin_assigned_at = datetime('now')
+      WHERE id = ?
+    `).bind(existingAccount.account_uid, existingAccount.account_password, enrollmentId).run()
+
+    return {
+      success: true,
+      accountUid: existingAccount.account_uid,
+      classInUid: existingAccount.account_uid,
+      password: existingAccount.account_password,
+      isRegistered: existingAccount.is_registered === 1
+    }
+  }
+
+  // 2. 할당된 계정이 없으면 새 계정 할당
   const availableAccount = await db.prepare(`
     SELECT * FROM classin_virtual_accounts
     WHERE status = 'available' AND (expires_at IS NULL OR expires_at > datetime('now'))
@@ -625,18 +649,18 @@ async function assignVirtualAccountToEnrollment(
 
   const password = generateDefaultPassword()
   let isRegistered = false
-  let classInUid = availableAccount.account_uid // 기본값은 가상 계정 UID
+  let classInUid = availableAccount.account_uid
 
   // Register with ClassIn API if configured
   if (classInConfig) {
     const regResult = await registerVirtualAccount(classInConfig, availableAccount.account_uid, userName, password)
     isRegistered = regResult.success
     if (regResult.success && regResult.uid) {
-      classInUid = regResult.uid // ClassIn API에서 반환한 실제 UID 사용
+      classInUid = regResult.uid
     }
   }
 
-  // Update virtual account status (save both account_uid and classin_uid)
+  // Update virtual account status
   await db.prepare(`
     UPDATE classin_virtual_accounts
     SET user_id = ?, assigned_at = datetime('now'), assigned_name = ?,
@@ -644,7 +668,7 @@ async function assignVirtualAccountToEnrollment(
     WHERE id = ?
   `).bind(userId, userName, password, isRegistered ? 1 : 0, availableAccount.id).run()
 
-  // Update enrollment with ClassIn UID (실제 ClassIn UID 저장)
+  // Update enrollment with ClassIn UID
   await db.prepare(`
     UPDATE enrollments
     SET classin_account_uid = ?, classin_account_password = ?, classin_assigned_at = datetime('now')
@@ -661,33 +685,58 @@ async function assignVirtualAccountToEnrollment(
 }
 
 // Return virtual account from enrollment (수강 종료 시 가상 계정 반납)
+// 사용자의 다른 활성 수강권이나 구독이 있으면 반납하지 않음
 async function returnVirtualAccountFromEnrollment(
   db: D1Database,
   enrollmentId: number
-): Promise<{ success: boolean; error?: string }> {
-  // Get enrollment with virtual account
+): Promise<{ success: boolean; error?: string; keptForOtherEnrollments?: boolean }> {
+  // Get enrollment with user info
   const enrollment = await db.prepare(`
-    SELECT classin_account_uid FROM enrollments WHERE id = ? AND classin_account_uid != ''
+    SELECT e.user_id, e.classin_account_uid, e.subscription_id
+    FROM enrollments e
+    WHERE e.id = ? AND e.classin_account_uid != ''
   `).bind(enrollmentId).first() as any
 
   if (!enrollment || !enrollment.classin_account_uid) {
     return { success: false, error: '해당 수강에 할당된 가상 계정이 없습니다.' }
   }
 
-  // Return virtual account to available pool
+  // Clear this enrollment's virtual account info first
+  await db.prepare(`
+    UPDATE enrollments
+    SET classin_account_uid = '', classin_account_password = '', classin_returned_at = datetime('now')
+    WHERE id = ?
+  `).bind(enrollmentId).run()
+
+  // Check if user has any other active enrollments using the same account
+  const otherActiveEnrollments = await db.prepare(`
+    SELECT COUNT(*) as cnt FROM enrollments
+    WHERE user_id = ? AND id != ? AND status = 'active' AND classin_account_uid != ''
+  `).bind(enrollment.user_id, enrollmentId).first() as any
+
+  if (otherActiveEnrollments && otherActiveEnrollments.cnt > 0) {
+    // 다른 활성 수강권이 있으면 계정 유지
+    return { success: true, keptForOtherEnrollments: true }
+  }
+
+  // Check if user has any active subscriptions
+  const activeSubscription = await db.prepare(`
+    SELECT COUNT(*) as cnt FROM subscriptions
+    WHERE user_id = ? AND status = 'active'
+  `).bind(enrollment.user_id).first() as any
+
+  if (activeSubscription && activeSubscription.cnt > 0) {
+    // 활성 구독이 있으면 계정 유지
+    return { success: true, keptForOtherEnrollments: true }
+  }
+
+  // No other active enrollments or subscriptions - return the account
   await db.prepare(`
     UPDATE classin_virtual_accounts
     SET user_id = NULL, assigned_at = NULL, assigned_name = '',
         account_password = '', is_registered = 0, status = 'available', updated_at = datetime('now')
     WHERE account_uid = ?
   `).bind(enrollment.classin_account_uid).run()
-
-  // Clear enrollment virtual account info
-  await db.prepare(`
-    UPDATE enrollments
-    SET classin_account_uid = '', classin_account_password = '', classin_returned_at = datetime('now')
-    WHERE id = ?
-  `).bind(enrollmentId).run()
 
   return { success: true }
 }
@@ -2428,7 +2477,12 @@ app.post('/api/subscription/create', async (c) => {
   // If class subscription, also enroll in class + create ClassIn session
   let classinSession: ClassInSessionResult | null = null
   if (classId) {
-    await c.env.DB.prepare('INSERT OR IGNORE INTO enrollments (user_id, class_id) VALUES (?, ?)').bind(userId, classId).run()
+    // Insert or update enrollment with subscription_id
+    await c.env.DB.prepare(`
+      INSERT INTO enrollments (user_id, class_id, subscription_id)
+      VALUES (?, ?, ?)
+      ON CONFLICT(user_id, class_id) DO UPDATE SET subscription_id = ?, status = 'active', updated_at = datetime('now')
+    `).bind(userId, classId, subscriptionId, subscriptionId).run()
     const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, classId).first() as any
     await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, classId).run()
     await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(classId).run()
