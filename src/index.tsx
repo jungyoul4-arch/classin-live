@@ -978,11 +978,18 @@ app.post('/api/payment/process', async (c) => {
 
   // If class purchase, create enrollment + assign virtual account + ClassIn session
   if (classId) {
-    // Get user info for virtual account assignment
+    // Get user and class info
     const user = await c.env.DB.prepare('SELECT name FROM users WHERE id = ?').bind(userId).first() as any
     const userName = user?.name || 'Student'
+    const classInfo = await c.env.DB.prepare('SELECT schedule_end FROM classes WHERE id = ?').bind(classId).first() as any
 
-    await c.env.DB.prepare('INSERT OR IGNORE INTO enrollments (user_id, class_id) VALUES (?, ?)').bind(userId, classId).run()
+    // Create enrollment with expires_at (based on class end date)
+    const expiresAt = classInfo?.schedule_end || null
+    await c.env.DB.prepare(`
+      INSERT INTO enrollments (user_id, class_id, expires_at, status)
+      VALUES (?, ?, ?, 'active')
+      ON CONFLICT(user_id, class_id) DO UPDATE SET expires_at = COALESCE(?, expires_at), status = 'active', updated_at = datetime('now')
+    `).bind(userId, classId, expiresAt, expiresAt).run()
 
     // Get enrollment ID
     const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, classId).first() as any
@@ -1147,8 +1154,16 @@ app.post('/api/test-account/enroll', async (c) => {
     return c.json({ error: '테스트 계정이 아니거나 만료되었습니다.' }, 403)
   }
 
-  // Create enrollment
-  await c.env.DB.prepare('INSERT OR IGNORE INTO enrollments (user_id, class_id) VALUES (?, ?)').bind(userId, classId).run()
+  // Get class info for expires_at
+  const classInfo = await c.env.DB.prepare('SELECT schedule_end FROM classes WHERE id = ?').bind(classId).first() as any
+  const expiresAt = classInfo?.schedule_end || null
+
+  // Create enrollment with expires_at
+  await c.env.DB.prepare(`
+    INSERT INTO enrollments (user_id, class_id, expires_at, status)
+    VALUES (?, ?, ?, 'active')
+    ON CONFLICT(user_id, class_id) DO UPDATE SET expires_at = COALESCE(?, expires_at), status = 'active', updated_at = datetime('now')
+  `).bind(userId, classId, expiresAt, expiresAt).run()
   const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, classId).first() as any
 
   // Create test order (amount = 0)
@@ -6870,5 +6885,50 @@ app.get('/admin/enrollments', async (c) => {
 </html>
   `)
 })
+
+// Scheduled handler for cron trigger (매일 자정 만료된 수강권 처리)
+async function processExpiredEnrollments(db: D1Database) {
+  // Find expired enrollments with assigned virtual accounts
+  const { results: expiredEnrollments } = await db.prepare(`
+    SELECT id, user_id, classin_account_uid FROM enrollments
+    WHERE classin_account_uid != '' AND classin_returned_at IS NULL
+    AND status = 'active' AND expires_at IS NOT NULL AND expires_at < datetime('now')
+  `).all() as any
+
+  let returnedCount = 0
+  for (const enrollment of expiredEnrollments) {
+    // Check if user has active subscriptions
+    const activeSubscription = await db.prepare(`
+      SELECT COUNT(*) as cnt FROM subscriptions WHERE user_id = ? AND status = 'active'
+    `).bind(enrollment.user_id).first() as any
+
+    // Check if user has other active enrollments
+    const otherActiveEnrollments = await db.prepare(`
+      SELECT COUNT(*) as cnt FROM enrollments
+      WHERE user_id = ? AND id != ? AND status = 'active' AND classin_account_uid != ''
+    `).bind(enrollment.user_id, enrollment.id).first() as any
+
+    // Clear enrollment's virtual account reference
+    await db.prepare(`
+      UPDATE enrollments
+      SET classin_account_uid = '', classin_account_password = '', classin_returned_at = datetime('now'), status = 'expired', updated_at = datetime('now')
+      WHERE id = ?
+    `).bind(enrollment.id).run()
+
+    // Return account only if no other active enrollments or subscriptions
+    if ((!activeSubscription || activeSubscription.cnt === 0) &&
+        (!otherActiveEnrollments || otherActiveEnrollments.cnt === 0)) {
+      await db.prepare(`
+        UPDATE classin_virtual_accounts
+        SET user_id = NULL, assigned_at = NULL, assigned_name = '',
+            account_password = '', is_registered = 0, status = 'available', updated_at = datetime('now')
+        WHERE account_uid = ?
+      `).bind(enrollment.classin_account_uid).run()
+      returnedCount++
+    }
+  }
+
+  return { processed: expiredEnrollments.length, returned: returnedCount }
+}
 
 export default app
