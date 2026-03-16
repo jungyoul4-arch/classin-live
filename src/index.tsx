@@ -1787,6 +1787,207 @@ app.delete('/api/admin/instructors/:id', async (c) => {
   return c.json({ success: true, message: '강사가 삭제되었습니다.' })
 })
 
+// ============================================
+// 관리자: 회원 관리
+// ============================================
+
+// 회원 목록 조회
+app.get('/api/admin/users', async (c) => {
+  const search = c.req.query('search') || ''
+  const limit = parseInt(c.req.query('limit') || '50')
+  const offset = parseInt(c.req.query('offset') || '0')
+
+  let query = `
+    SELECT id, email, name, phone, role, is_test_account, test_expires_at, created_at
+    FROM users
+  `
+  const params: any[] = []
+
+  if (search) {
+    query += ` WHERE name LIKE ? OR email LIKE ? OR phone LIKE ?`
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`)
+  }
+
+  query += ` ORDER BY id DESC LIMIT ? OFFSET ?`
+  params.push(limit, offset)
+
+  const { results } = await c.env.DB.prepare(query).bind(...params).all()
+
+  // 전체 회원 수 (검색 조건 적용)
+  let countQuery = 'SELECT COUNT(*) as total FROM users'
+  if (search) {
+    countQuery += ` WHERE name LIKE ? OR email LIKE ? OR phone LIKE ?`
+  }
+  const countResult = search
+    ? await c.env.DB.prepare(countQuery).bind(`%${search}%`, `%${search}%`, `%${search}%`).first() as any
+    : await c.env.DB.prepare(countQuery).first() as any
+
+  // 전체 통계 (검색 조건 무관)
+  const statsResult = await c.env.DB.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN role = 'student' THEN 1 ELSE 0 END) as students,
+      SUM(CASE WHEN role = 'instructor' THEN 1 ELSE 0 END) as instructors,
+      SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) as admins,
+      SUM(CASE WHEN is_test_account = 1 THEN 1 ELSE 0 END) as test_accounts
+    FROM users
+  `).first() as any
+
+  return c.json({
+    users: results,
+    total: countResult?.total || 0,
+    stats: {
+      total: statsResult?.total || 0,
+      students: statsResult?.students || 0,
+      instructors: statsResult?.instructors || 0,
+      admins: statsResult?.admins || 0,
+      testAccounts: statsResult?.test_accounts || 0
+    }
+  })
+})
+
+// 회원 상세 조회
+app.get('/api/admin/users/:id', async (c) => {
+  const userId = parseInt(c.req.param('id'))
+  const user = await c.env.DB.prepare(`
+    SELECT id, email, name, phone, role, is_test_account, test_expires_at, created_at
+    FROM users WHERE id = ?
+  `).bind(userId).first()
+
+  if (!user) {
+    return c.json({ error: '회원을 찾을 수 없습니다.' }, 404)
+  }
+
+  return c.json({ user })
+})
+
+// 회원 정보 수정
+app.put('/api/admin/users/:id', async (c) => {
+  const userId = parseInt(c.req.param('id'))
+  const { name, phone, role, is_test_account } = await c.req.json()
+
+  const user = await c.env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(userId).first()
+  if (!user) {
+    return c.json({ error: '회원을 찾을 수 없습니다.' }, 404)
+  }
+
+  await c.env.DB.prepare(`
+    UPDATE users SET
+      name = COALESCE(?, name),
+      phone = COALESCE(?, phone),
+      role = COALESCE(?, role),
+      is_test_account = COALESCE(?, is_test_account),
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(name, phone, role, is_test_account ? 1 : 0, userId).run()
+
+  return c.json({ success: true, message: '회원 정보가 수정되었습니다.' })
+})
+
+// 회원 삭제
+app.delete('/api/admin/users/:id', async (c) => {
+  const userId = parseInt(c.req.param('id'))
+
+  const user = await c.env.DB.prepare('SELECT id, role FROM users WHERE id = ?').bind(userId).first() as any
+  if (!user) {
+    return c.json({ error: '회원을 찾을 수 없습니다.' }, 404)
+  }
+
+  // 강사인 경우 강사 레코드도 삭제
+  if (user.role === 'instructor') {
+    await c.env.DB.prepare('DELETE FROM instructors WHERE user_id = ?').bind(userId).run()
+  }
+
+  // 관련 데이터 삭제
+  await c.env.DB.prepare('DELETE FROM enrollments WHERE user_id = ?').bind(userId).run()
+  await c.env.DB.prepare('DELETE FROM wishlist WHERE user_id = ?').bind(userId).run()
+  await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ?').bind(userId).run()
+  await c.env.DB.prepare('DELETE FROM orders WHERE user_id = ?').bind(userId).run()
+  await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId).run()
+
+  return c.json({ success: true, message: '회원이 삭제되었습니다.' })
+})
+
+// ============================================
+// 관리자: 클래스별 수강신청자 관리
+// ============================================
+
+// 클래스별 수강신청자 목록
+app.get('/api/admin/classes/:classId/enrollments', async (c) => {
+  const classId = parseInt(c.req.param('classId'))
+
+  const { results } = await c.env.DB.prepare(`
+    SELECT e.*, u.name as user_name, u.email as user_email, u.phone as user_phone
+    FROM enrollments e
+    JOIN users u ON e.user_id = u.id
+    WHERE e.class_id = ?
+    ORDER BY e.enrolled_at DESC
+  `).bind(classId).all()
+
+  return c.json({ enrollments: results })
+})
+
+// 전체 수강신청자 목록 (클래스 정보 포함)
+app.get('/api/admin/enrollments', async (c) => {
+  const classId = c.req.query('classId')
+  const status = c.req.query('status')
+  const limit = parseInt(c.req.query('limit') || '50')
+  const offset = parseInt(c.req.query('offset') || '0')
+
+  let query = `
+    SELECT e.*,
+           u.name as user_name, u.email as user_email, u.phone as user_phone,
+           c.title as class_title
+    FROM enrollments e
+    JOIN users u ON e.user_id = u.id
+    JOIN classes c ON e.class_id = c.id
+    WHERE 1=1
+  `
+  const params: any[] = []
+
+  if (classId) {
+    query += ` AND e.class_id = ?`
+    params.push(parseInt(classId))
+  }
+  if (status) {
+    query += ` AND e.status = ?`
+    params.push(status)
+  }
+
+  query += ` ORDER BY e.enrolled_at DESC LIMIT ? OFFSET ?`
+  params.push(limit, offset)
+
+  const { results } = await c.env.DB.prepare(query).bind(...params).all()
+
+  return c.json({ enrollments: results })
+})
+
+// 수강 상태 변경 (활성/종료)
+app.put('/api/admin/enrollments/:id/status', async (c) => {
+  const enrollmentId = parseInt(c.req.param('id'))
+  const { status } = await c.req.json()
+
+  if (!['active', 'ended', 'expired'].includes(status)) {
+    return c.json({ error: '유효하지 않은 상태입니다.' }, 400)
+  }
+
+  const enrollment = await c.env.DB.prepare('SELECT id, classin_account_uid FROM enrollments WHERE id = ?').bind(enrollmentId).first() as any
+  if (!enrollment) {
+    return c.json({ error: '수강 정보를 찾을 수 없습니다.' }, 404)
+  }
+
+  // 종료 시 가상 계정 반납
+  if (status === 'ended' && enrollment.classin_account_uid) {
+    await returnVirtualAccountFromEnrollment(c.env.DB, enrollmentId)
+  }
+
+  await c.env.DB.prepare(`
+    UPDATE enrollments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+  `).bind(status, enrollmentId).run()
+
+  return c.json({ success: true, message: '수강 상태가 변경되었습니다.' })
+})
+
 // Assign virtual account to user (사용자에게 가상 계정 할당)
 app.post('/api/virtual-accounts/assign', async (c) => {
   const { userId, userName } = await c.req.json()
@@ -4445,9 +4646,235 @@ function classCardTemplate(cls: any): string {
   `
 }
 
+// ==================== Admin Authentication ====================
+
+// Simple hash function for password (in production, use bcrypt)
+function simpleHash(str: string): string {
+  let hash = 0
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i)
+    hash = ((hash << 5) - hash) + char
+    hash = hash & hash
+  }
+  return hash.toString(16)
+}
+
+// Generate session token
+function generateSessionToken(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+  let token = ''
+  for (let i = 0; i < 64; i++) {
+    token += chars.charAt(Math.floor(Math.random() * chars.length))
+  }
+  return token
+}
+
+// Check admin session
+async function checkAdminSession(db: D1Database, sessionToken: string | undefined): Promise<boolean> {
+  if (!sessionToken) return false
+
+  const session = await db.prepare(`
+    SELECT id FROM admin_sessions
+    WHERE session_token = ? AND expires_at > datetime('now')
+  `).bind(sessionToken).first()
+
+  return !!session
+}
+
+// Get session token from cookie
+function getSessionToken(c: any): string | undefined {
+  const cookie = c.req.header('Cookie') || ''
+  const match = cookie.match(/admin_session=([^;]+)/)
+  return match ? match[1] : undefined
+}
+
+// Admin login page
+app.get('/admin/login', async (c) => {
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+
+  if (isLoggedIn) {
+    return c.redirect('/admin')
+  }
+
+  const error = c.req.query('error')
+
+  return c.html(`
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>관리자 로그인 - ClassIn Live</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.0/css/all.min.css" rel="stylesheet">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap');
+    * { font-family: 'Noto Sans KR', sans-serif; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center">
+  <div class="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md">
+    <div class="text-center mb-8">
+      <h1 class="text-2xl font-bold text-rose-500 mb-2">ClassIn Live</h1>
+      <p class="text-gray-500">관리자 로그인</p>
+    </div>
+
+    ${error ? `<div class="bg-red-50 text-red-600 px-4 py-3 rounded-lg mb-6 text-sm"><i class="fas fa-exclamation-circle mr-2"></i>${error === 'invalid' ? '아이디 또는 비밀번호가 올바르지 않습니다.' : '로그인이 필요합니다.'}</div>` : ''}
+
+    <form action="/api/admin/login" method="POST">
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-2">아이디</label>
+        <div class="relative">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"><i class="fas fa-user"></i></span>
+          <input type="text" name="username" required class="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-rose-500 focus:border-transparent" placeholder="enter id">
+        </div>
+      </div>
+      <div class="mb-6">
+        <label class="block text-sm font-medium text-gray-700 mb-2">비밀번호</label>
+        <div class="relative">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"><i class="fas fa-lock"></i></span>
+          <input type="password" name="password" required class="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-rose-500 focus:border-transparent" placeholder="••••••••">
+        </div>
+      </div>
+      <button type="submit" class="w-full bg-rose-500 hover:bg-rose-600 text-white py-3 rounded-xl font-medium transition-all">
+        <i class="fas fa-sign-in-alt mr-2"></i>로그인
+      </button>
+    </form>
+
+    <p class="text-center text-sm text-gray-400 mt-6">
+      <a href="/" class="hover:text-gray-600"><i class="fas fa-arrow-left mr-1"></i>메인으로 돌아가기</a>
+    </p>
+  </div>
+</body>
+</html>
+  `)
+})
+
+// Admin login API
+app.post('/api/admin/login', async (c) => {
+  const formData = await c.req.parseBody()
+  const username = formData.username as string
+  const password = formData.password as string
+
+  // Get stored credentials
+  const storedUsername = await c.env.DB.prepare(
+    "SELECT setting_value FROM admin_settings WHERE setting_key = 'admin_username'"
+  ).first() as any
+
+  const storedPassword = await c.env.DB.prepare(
+    "SELECT setting_value FROM admin_settings WHERE setting_key = 'admin_password_hash'"
+  ).first() as any
+
+  if (!storedUsername || !storedPassword) {
+    return c.redirect('/admin/login?error=invalid')
+  }
+
+  // Check credentials (compare plain text for initial, hash for changed password)
+  const isValidPassword = password === storedPassword.setting_value ||
+                          simpleHash(password) === storedPassword.setting_value
+
+  if (username !== storedUsername.setting_value || !isValidPassword) {
+    return c.redirect('/admin/login?error=invalid')
+  }
+
+  // Create session
+  const sessionToken = generateSessionToken()
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours
+
+  await c.env.DB.prepare(`
+    INSERT INTO admin_sessions (session_token, expires_at) VALUES (?, ?)
+  `).bind(sessionToken, expiresAt).run()
+
+  // Clean up old sessions
+  await c.env.DB.prepare(`
+    DELETE FROM admin_sessions WHERE expires_at < datetime('now')
+  `).run()
+
+  // Set cookie and redirect
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'Location': '/admin',
+      'Set-Cookie': `admin_session=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`
+    }
+  })
+})
+
+// Admin logout
+app.get('/admin/logout', async (c) => {
+  const sessionToken = getSessionToken(c)
+
+  if (sessionToken) {
+    await c.env.DB.prepare('DELETE FROM admin_sessions WHERE session_token = ?').bind(sessionToken).run()
+  }
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'Location': '/admin/login',
+      'Set-Cookie': 'admin_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'
+    }
+  })
+})
+
+// Change admin password API
+app.post('/api/admin/change-password', async (c) => {
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+
+  if (!isLoggedIn) {
+    return c.json({ error: '로그인이 필요합니다.' }, 401)
+  }
+
+  const { currentPassword, newPassword } = await c.req.json()
+
+  if (!currentPassword || !newPassword) {
+    return c.json({ error: '현재 비밀번호와 새 비밀번호를 입력해주세요.' }, 400)
+  }
+
+  if (newPassword.length < 6) {
+    return c.json({ error: '새 비밀번호는 6자 이상이어야 합니다.' }, 400)
+  }
+
+  // Verify current password
+  const storedPassword = await c.env.DB.prepare(
+    "SELECT setting_value FROM admin_settings WHERE setting_key = 'admin_password_hash'"
+  ).first() as any
+
+  const isValidPassword = currentPassword === storedPassword.setting_value ||
+                          simpleHash(currentPassword) === storedPassword.setting_value
+
+  if (!isValidPassword) {
+    return c.json({ error: '현재 비밀번호가 올바르지 않습니다.' }, 400)
+  }
+
+  // Update password (store as hash)
+  await c.env.DB.prepare(`
+    UPDATE admin_settings SET setting_value = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE setting_key = 'admin_password_hash'
+  `).bind(simpleHash(newPassword)).run()
+
+  return c.json({ success: true, message: '비밀번호가 변경되었습니다.' })
+})
+
 // ==================== Admin Page - Virtual Account Management ====================
 
+// Auth check helper for admin pages
+async function requireAdminAuth(c: any): Promise<Response | null> {
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+
+  if (!isLoggedIn) {
+    return c.redirect('/admin/login?error=required')
+  }
+  return null
+}
+
 app.get('/admin', async (c) => {
+  const authRedirect = await requireAdminAuth(c)
+  if (authRedirect) return authRedirect
+
   return c.html(`
 <!DOCTYPE html>
 <html lang="ko">
@@ -4472,7 +4899,10 @@ app.get('/admin', async (c) => {
           <span class="text-gray-400">|</span>
           <span class="text-gray-300">관리자 대시보드</span>
         </div>
-        <a href="/" class="text-sm text-gray-400 hover:text-white"><i class="fas fa-arrow-left mr-1"></i>메인으로</a>
+        <div class="flex items-center gap-4">
+          <button onclick="openSettingsModal()" class="text-sm text-gray-400 hover:text-white"><i class="fas fa-cog mr-1"></i>설정</button>
+          <a href="/admin/logout" class="text-sm text-gray-400 hover:text-white"><i class="fas fa-sign-out-alt mr-1"></i>로그아웃</a>
+        </div>
       </div>
     </div>
   </nav>
@@ -4606,6 +5036,38 @@ app.get('/admin', async (c) => {
       </div>
     </div>
 
+    <!-- Quick Links -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-8">
+      <a href="/admin/users" class="bg-white rounded-xl p-6 shadow-sm hover:shadow-md transition-all group">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 bg-emerald-100 rounded-xl flex items-center justify-center group-hover:bg-emerald-200 transition-all">
+              <i class="fas fa-users text-emerald-500 text-2xl"></i>
+            </div>
+            <div>
+              <h3 class="text-lg font-bold text-gray-800">회원 관리</h3>
+              <p class="text-sm text-gray-500">회원 조회, 검색, 삭제</p>
+            </div>
+          </div>
+          <i class="fas fa-chevron-right text-gray-300 group-hover:text-emerald-500 transition-all"></i>
+        </div>
+      </a>
+      <a href="/admin/enrollments" class="bg-white rounded-xl p-6 shadow-sm hover:shadow-md transition-all group">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 bg-orange-100 rounded-xl flex items-center justify-center group-hover:bg-orange-200 transition-all">
+              <i class="fas fa-user-graduate text-orange-500 text-2xl"></i>
+            </div>
+            <div>
+              <h3 class="text-lg font-bold text-gray-800">수강신청자 관리</h3>
+              <p class="text-sm text-gray-500">클래스별 수강생 관리, 수강 종료</p>
+            </div>
+          </div>
+          <i class="fas fa-chevron-right text-gray-300 group-hover:text-orange-500 transition-all"></i>
+        </div>
+      </a>
+    </div>
+
     <!-- Instructor Management Section -->
     <div class="bg-white rounded-xl shadow-sm overflow-hidden mt-8">
       <div class="p-6 border-b border-gray-100">
@@ -4677,6 +5139,38 @@ app.get('/admin', async (c) => {
           </tbody>
         </table>
       </div>
+    </div>
+
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settingsModal" class="fixed inset-0 z-50 hidden">
+    <div class="absolute inset-0 bg-black/50" onclick="closeSettingsModal()"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
+      <h3 class="text-lg font-bold mb-4"><i class="fas fa-cog text-gray-500 mr-2"></i>관리자 설정</h3>
+      <div class="space-y-4">
+        <div>
+          <h4 class="text-sm font-semibold text-gray-700 mb-3"><i class="fas fa-lock text-gray-400 mr-2"></i>비밀번호 변경</h4>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">현재 비밀번호</label>
+              <input type="password" id="currentPassword" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">새 비밀번호</label>
+              <input type="password" id="newPassword" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" placeholder="6자 이상">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">새 비밀번호 확인</label>
+              <input type="password" id="confirmPassword" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+            </div>
+            <button onclick="changePassword()" class="w-full bg-rose-500 hover:bg-rose-600 text-white py-2 rounded-lg text-sm transition-all">
+              비밀번호 변경
+            </button>
+          </div>
+        </div>
+      </div>
+      <button onclick="closeSettingsModal()" class="mt-4 w-full bg-gray-100 hover:bg-gray-200 text-gray-700 py-2 rounded-lg text-sm">닫기</button>
     </div>
   </div>
 
@@ -5357,10 +5851,588 @@ app.get('/admin', async (c) => {
       }
     }
 
+    // Settings modal functions
+    function openSettingsModal() {
+      document.getElementById('currentPassword').value = '';
+      document.getElementById('newPassword').value = '';
+      document.getElementById('confirmPassword').value = '';
+      document.getElementById('settingsModal').classList.remove('hidden');
+    }
+
+    function closeSettingsModal() {
+      document.getElementById('settingsModal').classList.add('hidden');
+    }
+
+    async function changePassword() {
+      const currentPassword = document.getElementById('currentPassword').value;
+      const newPassword = document.getElementById('newPassword').value;
+      const confirmPassword = document.getElementById('confirmPassword').value;
+
+      if (!currentPassword || !newPassword || !confirmPassword) {
+        showModal('오류', '모든 필드를 입력해주세요.');
+        return;
+      }
+
+      if (newPassword !== confirmPassword) {
+        showModal('오류', '새 비밀번호가 일치하지 않습니다.');
+        return;
+      }
+
+      if (newPassword.length < 6) {
+        showModal('오류', '새 비밀번호는 6자 이상이어야 합니다.');
+        return;
+      }
+
+      const res = await fetch('/api/admin/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword, newPassword })
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        closeSettingsModal();
+        showModal('성공', data.message);
+      } else {
+        showModal('오류', data.error || '비밀번호 변경 실패');
+      }
+    }
+
     // Initial load
     loadAccounts();
     loadInstructors();
     loadClasses();
+  </script>
+</body>
+</html>
+  `)
+})
+
+// ==================== Admin Page - User Management ====================
+app.get('/admin/users', async (c) => {
+  const authRedirect = await requireAdminAuth(c)
+  if (authRedirect) return authRedirect
+
+  return c.html(`
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>회원 관리 - ClassIn Live 관리자</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.0/css/all.min.css" rel="stylesheet">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap');
+    * { font-family: 'Noto Sans KR', sans-serif; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <nav class="bg-gray-900 text-white shadow-lg">
+    <div class="max-w-7xl mx-auto px-4 py-4">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <a href="/" class="text-xl font-bold text-rose-400">ClassIn Live</a>
+          <span class="text-gray-400">|</span>
+          <span class="text-gray-300">회원 관리</span>
+        </div>
+        <a href="/admin" class="text-sm text-gray-400 hover:text-white"><i class="fas fa-arrow-left mr-1"></i>관리자 대시보드</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="max-w-7xl mx-auto px-4 py-8">
+    <!-- Stats -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-emerald-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-users text-emerald-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statTotal">0</p>
+            <p class="text-sm text-gray-500">전체 회원</p>
+          </div>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-user-graduate text-blue-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statStudents">0</p>
+            <p class="text-sm text-gray-500">학생</p>
+          </div>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-indigo-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-chalkboard-teacher text-indigo-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statInstructors">0</p>
+            <p class="text-sm text-gray-500">강사</p>
+          </div>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-yellow-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-flask text-yellow-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statTest">0</p>
+            <p class="text-sm text-gray-500">테스트 계정</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- User List -->
+    <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+      <div class="p-6 border-b border-gray-100">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-bold text-gray-800"><i class="fas fa-users text-emerald-500 mr-2"></i>회원 목록</h2>
+          <div class="flex items-center gap-2">
+            <input type="text" id="userSearch" placeholder="이름/이메일/전화번호 검색" class="px-3 py-2 border border-gray-200 rounded-lg text-sm w-64" onkeyup="if(event.key==='Enter'){currentPage=0;loadUsers();}">
+            <button onclick="currentPage=0;loadUsers()" class="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-lg transition-all text-sm">
+              <i class="fas fa-search mr-1"></i>검색
+            </button>
+            <button onclick="document.getElementById('userSearch').value='';currentPage=0;loadUsers()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg transition-all">
+              <i class="fas fa-times"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">ID</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">이름</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">이메일</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">전화번호</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">역할</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">테스트</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">가입일</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">작업</th>
+            </tr>
+          </thead>
+          <tbody id="usersTable" class="divide-y divide-gray-100">
+            <tr><td colspan="8" class="px-6 py-8 text-center text-gray-400">로딩 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="p-4 border-t border-gray-100 flex items-center justify-between">
+        <p class="text-sm text-gray-500" id="paginationInfo">-</p>
+        <div class="flex items-center gap-2">
+          <button onclick="prevPage()" class="px-3 py-1 border border-gray-200 rounded text-sm hover:bg-gray-50 disabled:opacity-50" id="prevBtn">이전</button>
+          <span class="text-sm text-gray-600" id="pageInfo">1</span>
+          <button onclick="nextPage()" class="px-3 py-1 border border-gray-200 rounded text-sm hover:bg-gray-50 disabled:opacity-50" id="nextBtn">다음</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Result Modal -->
+  <div id="resultModal" class="fixed inset-0 z-50 hidden">
+    <div class="absolute inset-0 bg-black/50" onclick="closeModal()"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
+      <h3 class="text-lg font-bold mb-2" id="modalTitle">알림</h3>
+      <p class="text-gray-600 whitespace-pre-wrap" id="modalMessage"></p>
+      <button onclick="closeModal()" class="mt-4 w-full bg-gray-100 hover:bg-gray-200 text-gray-700 py-2 rounded-lg">확인</button>
+    </div>
+  </div>
+
+  <script>
+    const pageSize = 50;
+    let currentPage = 0;
+    let totalUsers = 0;
+
+    function showModal(title, message) {
+      document.getElementById('modalTitle').textContent = title;
+      document.getElementById('modalMessage').textContent = message;
+      document.getElementById('resultModal').classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('resultModal').classList.add('hidden');
+    }
+
+    async function loadUsers() {
+      const search = document.getElementById('userSearch').value.trim();
+      const res = await fetch('/api/admin/users?limit=' + pageSize + '&offset=' + (currentPage * pageSize) + (search ? '&search=' + encodeURIComponent(search) : ''));
+      const data = await res.json();
+      totalUsers = data.total || 0;
+
+      // Update stats from API
+      if (data.stats) {
+        document.getElementById('statTotal').textContent = data.stats.total;
+        document.getElementById('statStudents').textContent = data.stats.students;
+        document.getElementById('statInstructors').textContent = data.stats.instructors;
+        document.getElementById('statTest').textContent = data.stats.testAccounts;
+      }
+
+      const tbody = document.getElementById('usersTable');
+      if (!data.users || data.users.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" class="px-6 py-8 text-center text-gray-400">회원이 없습니다.</td></tr>';
+        document.getElementById('paginationInfo').textContent = '총 0명';
+        updatePagination();
+        return;
+      }
+
+      tbody.innerHTML = data.users.map(user => {
+        const roleLabel = user.role === 'admin' ? '관리자' : user.role === 'instructor' ? '강사' : '학생';
+        const roleColor = user.role === 'admin' ? 'bg-red-100 text-red-700' : user.role === 'instructor' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600';
+        return \`
+          <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 text-sm">\${user.id}</td>
+            <td class="px-4 py-3 font-medium">\${user.name}</td>
+            <td class="px-4 py-3 text-sm text-gray-500">\${user.email}</td>
+            <td class="px-4 py-3 text-sm text-gray-500">\${user.phone || '-'}</td>
+            <td class="px-4 py-3"><span class="px-2 py-0.5 rounded text-xs \${roleColor}">\${roleLabel}</span></td>
+            <td class="px-4 py-3">\${user.is_test_account ? '<span class="px-2 py-0.5 rounded text-xs bg-yellow-100 text-yellow-700">테스트</span>' : '-'}</td>
+            <td class="px-4 py-3 text-xs text-gray-500">\${new Date(user.created_at).toLocaleDateString('ko-KR')}</td>
+            <td class="px-4 py-3">
+              <div class="flex items-center gap-2">
+                <a href="/admin/enrollments?userId=\${user.id}" class="text-blue-500 hover:text-blue-700 text-sm" title="수강 내역"><i class="fas fa-book"></i></a>
+                <button onclick="deleteUser(\${user.id}, '\${user.name.replace(/'/g, "\\\\'")}')" class="text-gray-400 hover:text-red-500 text-sm" title="삭제"><i class="fas fa-trash-alt"></i></button>
+              </div>
+            </td>
+          </tr>
+        \`;
+      }).join('');
+
+      const start = currentPage * pageSize + 1;
+      const end = Math.min(start + data.users.length - 1, totalUsers);
+      document.getElementById('paginationInfo').textContent = \`총 \${totalUsers}명 중 \${start}-\${end}\`;
+      updatePagination();
+    }
+
+    function updatePagination() {
+      const totalPages = Math.ceil(totalUsers / pageSize);
+      document.getElementById('pageInfo').textContent = (currentPage + 1) + ' / ' + Math.max(totalPages, 1);
+      document.getElementById('prevBtn').disabled = currentPage === 0;
+      document.getElementById('nextBtn').disabled = (currentPage + 1) >= totalPages;
+    }
+
+    function prevPage() { if (currentPage > 0) { currentPage--; loadUsers(); } }
+    function nextPage() { if ((currentPage + 1) * pageSize < totalUsers) { currentPage++; loadUsers(); } }
+
+    async function deleteUser(userId, userName) {
+      if (!confirm(userName + ' 회원을 삭제하시겠습니까?\\n관련된 수강, 주문 내역이 모두 삭제됩니다.')) return;
+
+      const res = await fetch('/api/admin/users/' + userId, { method: 'DELETE' });
+      const data = await res.json();
+
+      if (data.success) {
+        showModal('성공', data.message);
+        loadUsers();
+      } else {
+        showModal('오류', data.error || '삭제 실패');
+      }
+    }
+
+    // Initial load
+    loadUsers();
+  </script>
+</body>
+</html>
+  `)
+})
+
+// ==================== Admin Page - Enrollment Management ====================
+app.get('/admin/enrollments', async (c) => {
+  const authRedirect = await requireAdminAuth(c)
+  if (authRedirect) return authRedirect
+
+  return c.html(`
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>수강신청자 관리 - ClassIn Live 관리자</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.0/css/all.min.css" rel="stylesheet">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap');
+    * { font-family: 'Noto Sans KR', sans-serif; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <nav class="bg-gray-900 text-white shadow-lg">
+    <div class="max-w-7xl mx-auto px-4 py-4">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <a href="/" class="text-xl font-bold text-rose-400">ClassIn Live</a>
+          <span class="text-gray-400">|</span>
+          <span class="text-gray-300">수강신청자 관리</span>
+        </div>
+        <a href="/admin" class="text-sm text-gray-400 hover:text-white"><i class="fas fa-arrow-left mr-1"></i>관리자 대시보드</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="max-w-7xl mx-auto px-4 py-8">
+    <!-- Stats -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-orange-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-user-graduate text-orange-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statTotal">0</p>
+            <p class="text-sm text-gray-500">전체 수강</p>
+          </div>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-play-circle text-green-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statActive">0</p>
+            <p class="text-sm text-gray-500">수강중</p>
+          </div>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-gray-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-stop-circle text-gray-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statEnded">0</p>
+            <p class="text-sm text-gray-500">종료</p>
+          </div>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-id-card text-purple-500 text-xl"></i>
+          </div>
+          <div>
+            <p class="text-2xl font-bold text-gray-800" id="statAssigned">0</p>
+            <p class="text-sm text-gray-500">ClassIn 할당</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Enrollment List -->
+    <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+      <div class="p-6 border-b border-gray-100">
+        <div class="flex items-center justify-between flex-wrap gap-3">
+          <h2 class="text-lg font-bold text-gray-800"><i class="fas fa-user-graduate text-orange-500 mr-2"></i>수강신청자 목록</h2>
+          <div class="flex items-center gap-2 flex-wrap">
+            <select id="classFilter" onchange="currentPage=0;loadEnrollments()" class="px-3 py-2 border border-gray-200 rounded-lg text-sm">
+              <option value="">전체 클래스</option>
+            </select>
+            <select id="statusFilter" onchange="currentPage=0;loadEnrollments()" class="px-3 py-2 border border-gray-200 rounded-lg text-sm">
+              <option value="">전체 상태</option>
+              <option value="active">수강중</option>
+              <option value="ended">종료</option>
+              <option value="expired">만료</option>
+            </select>
+            <input type="text" id="searchInput" placeholder="이름/이메일 검색" class="px-3 py-2 border border-gray-200 rounded-lg text-sm w-48" onkeyup="if(event.key==='Enter'){currentPage=0;loadEnrollments();}">
+            <button onclick="currentPage=0;loadEnrollments()" class="bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg transition-all text-sm">
+              <i class="fas fa-search"></i>
+            </button>
+            <button onclick="resetFilters()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg transition-all">
+              <i class="fas fa-times"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">ID</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">클래스</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">수강생</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">이메일</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">전화번호</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">상태</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">ClassIn UID</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">수강일</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">작업</th>
+            </tr>
+          </thead>
+          <tbody id="enrollmentsTable" class="divide-y divide-gray-100">
+            <tr><td colspan="9" class="px-6 py-8 text-center text-gray-400">로딩 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="p-4 border-t border-gray-100 flex items-center justify-between">
+        <p class="text-sm text-gray-500" id="paginationInfo">-</p>
+        <div class="flex items-center gap-2">
+          <button onclick="prevPage()" class="px-3 py-1 border border-gray-200 rounded text-sm hover:bg-gray-50 disabled:opacity-50" id="prevBtn">이전</button>
+          <span class="text-sm text-gray-600" id="pageInfo">1</span>
+          <button onclick="nextPage()" class="px-3 py-1 border border-gray-200 rounded text-sm hover:bg-gray-50 disabled:opacity-50" id="nextBtn">다음</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Result Modal -->
+  <div id="resultModal" class="fixed inset-0 z-50 hidden">
+    <div class="absolute inset-0 bg-black/50" onclick="closeModal()"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
+      <h3 class="text-lg font-bold mb-2" id="modalTitle">알림</h3>
+      <p class="text-gray-600 whitespace-pre-wrap" id="modalMessage"></p>
+      <button onclick="closeModal()" class="mt-4 w-full bg-gray-100 hover:bg-gray-200 text-gray-700 py-2 rounded-lg">확인</button>
+    </div>
+  </div>
+
+  <script>
+    const pageSize = 50;
+    let currentPage = 0;
+    let totalEnrollments = 0;
+    let allEnrollments = [];
+
+    // Get URL params
+    const urlParams = new URLSearchParams(window.location.search);
+    const initialUserId = urlParams.get('userId');
+
+    function showModal(title, message) {
+      document.getElementById('modalTitle').textContent = title;
+      document.getElementById('modalMessage').textContent = message;
+      document.getElementById('resultModal').classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('resultModal').classList.add('hidden');
+    }
+
+    async function loadClassOptions() {
+      const res = await fetch('/api/admin/classes');
+      const data = await res.json();
+      const select = document.getElementById('classFilter');
+      select.innerHTML = '<option value="">전체 클래스</option>' +
+        (data.classes || []).map(c => \`<option value="\${c.id}">\${c.title}</option>\`).join('');
+    }
+
+    async function loadEnrollments() {
+      const classId = document.getElementById('classFilter').value;
+      const status = document.getElementById('statusFilter').value;
+      const search = document.getElementById('searchInput').value.trim().toLowerCase();
+
+      // Fetch all enrollments (API doesn't have search, so we filter client-side)
+      let url = '/api/admin/enrollments?limit=1000';
+      if (classId) url += '&classId=' + classId;
+      if (status) url += '&status=' + status;
+
+      const res = await fetch(url);
+      const data = await res.json();
+
+      // Filter by search and userId
+      allEnrollments = (data.enrollments || []).filter(e => {
+        if (initialUserId && e.user_id !== parseInt(initialUserId)) return false;
+        if (search) {
+          return e.user_name.toLowerCase().includes(search) ||
+                 e.user_email.toLowerCase().includes(search);
+        }
+        return true;
+      });
+
+      totalEnrollments = allEnrollments.length;
+
+      // Update stats
+      document.getElementById('statTotal').textContent = totalEnrollments;
+      document.getElementById('statActive').textContent = allEnrollments.filter(e => e.status === 'active').length;
+      document.getElementById('statEnded').textContent = allEnrollments.filter(e => e.status === 'ended').length;
+      document.getElementById('statAssigned').textContent = allEnrollments.filter(e => e.classin_account_uid).length;
+
+      renderTable();
+    }
+
+    function renderTable() {
+      const tbody = document.getElementById('enrollmentsTable');
+      const start = currentPage * pageSize;
+      const pageData = allEnrollments.slice(start, start + pageSize);
+
+      if (pageData.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="9" class="px-6 py-8 text-center text-gray-400">수강 신청자가 없습니다.</td></tr>';
+        document.getElementById('paginationInfo').textContent = '총 0건';
+        updatePagination();
+        return;
+      }
+
+      tbody.innerHTML = pageData.map(e => {
+        const statusLabel = e.status === 'active' ? '수강중' : e.status === 'ended' ? '종료' : e.status === 'expired' ? '만료' : e.status || '-';
+        const statusColor = e.status === 'active' ? 'bg-green-100 text-green-700' : e.status === 'ended' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700';
+        return \`
+          <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 text-sm">\${e.id}</td>
+            <td class="px-4 py-3 text-sm font-medium max-w-[200px] truncate" title="\${e.class_title}">\${e.class_title}</td>
+            <td class="px-4 py-3 font-medium">\${e.user_name}</td>
+            <td class="px-4 py-3 text-sm text-gray-500">\${e.user_email}</td>
+            <td class="px-4 py-3 text-sm text-gray-500">\${e.user_phone || '-'}</td>
+            <td class="px-4 py-3"><span class="px-2 py-0.5 rounded text-xs \${statusColor}">\${statusLabel}</span></td>
+            <td class="px-4 py-3 font-mono text-xs text-gray-500">\${e.classin_account_uid || '-'}</td>
+            <td class="px-4 py-3 text-xs text-gray-500">\${new Date(e.enrolled_at).toLocaleDateString('ko-KR')}</td>
+            <td class="px-4 py-3">
+              \${e.status === 'active' ? \`<button onclick="endEnrollment(\${e.id})" class="text-orange-500 hover:text-orange-700 text-xs px-2 py-1 border border-orange-200 rounded hover:bg-orange-50">종료</button>\` : '-'}
+            </td>
+          </tr>
+        \`;
+      }).join('');
+
+      const end = Math.min(start + pageData.length, totalEnrollments);
+      document.getElementById('paginationInfo').textContent = \`총 \${totalEnrollments}건 중 \${start + 1}-\${end}\`;
+      updatePagination();
+    }
+
+    function updatePagination() {
+      const totalPages = Math.ceil(totalEnrollments / pageSize);
+      document.getElementById('pageInfo').textContent = (currentPage + 1) + ' / ' + Math.max(totalPages, 1);
+      document.getElementById('prevBtn').disabled = currentPage === 0;
+      document.getElementById('nextBtn').disabled = (currentPage + 1) >= totalPages;
+    }
+
+    function prevPage() { if (currentPage > 0) { currentPage--; renderTable(); } }
+    function nextPage() { if ((currentPage + 1) * pageSize < totalEnrollments) { currentPage++; renderTable(); } }
+
+    function resetFilters() {
+      document.getElementById('classFilter').value = '';
+      document.getElementById('statusFilter').value = '';
+      document.getElementById('searchInput').value = '';
+      currentPage = 0;
+      // Clear userId param
+      if (initialUserId) {
+        window.history.replaceState({}, '', '/admin/enrollments');
+      }
+      loadEnrollments();
+    }
+
+    async function endEnrollment(enrollmentId) {
+      if (!confirm('이 수강을 종료하시겠습니까? 할당된 ClassIn 가상 계정이 반납됩니다.')) return;
+
+      const res = await fetch('/api/admin/enrollments/' + enrollmentId + '/status', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'ended' })
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        showModal('성공', data.message);
+        loadEnrollments();
+      } else {
+        showModal('오류', data.error || '상태 변경 실패');
+      }
+    }
+
+    // Initial load
+    loadClassOptions();
+    loadEnrollments();
   </script>
 </body>
 </html>
