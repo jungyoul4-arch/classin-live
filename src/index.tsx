@@ -3498,8 +3498,8 @@ async function openMyPage(tab) {
     </button>
     <div class="flex gap-1 mb-4 bg-gray-100 rounded-xl p-1">
       <button onclick="loadMyPageTab('enrollments')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='enrollments'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강중</button>
+      <button onclick="loadMyPageTab('completed')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab===completed'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강완료</button>
       <button onclick="loadMyPageTab('subscriptions')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='subscriptions'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}"><i class="fas fa-sync-alt mr-0.5 text-[9px]"></i>구독</button>
-      <button onclick="loadMyPageTab('wishlist')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='wishlist'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">찜</button>
       <button onclick="loadMyPageTab('orders')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='orders'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">결제내역</button>
     </div>
     <div id="myPageTabContent"></div>
@@ -3606,7 +3606,7 @@ async function testEnroll(classId) {
 
 async function loadMyPageTab(tab) {
   document.querySelectorAll('.mypage-tab').forEach((b,i) => {
-    const tabs = ['enrollments','subscriptions','wishlist','orders'];
+    const tabs = ['enrollments','completed','subscriptions','orders'];
     b.classList.toggle('bg-white', tabs[i]===tab);
     b.classList.toggle('text-dark-900', tabs[i]===tab);
     b.classList.toggle('shadow-sm', tabs[i]===tab);
@@ -3655,6 +3655,51 @@ async function loadMyPageTab(tab) {
             </div>
           </div>
           \` : ''}
+        </div>
+      \`}).join('');
+  } else if (tab === 'completed') {
+    const res = await fetch('/api/user/'+currentUser.id+'/enrollments');
+    const items = await res.json();
+    const sessRes = await fetch('/api/user/'+currentUser.id+'/classin-sessions');
+    const sessions = await sessRes.json();
+    const sessionMap = {};
+    if (Array.isArray(sessions)) sessions.forEach(s => { sessionMap[s.class_id] = s; });
+
+    const completedItems = items.filter(e => {
+      const session = sessionMap[e.class_id];
+      return session && session.status === 'ended';
+    });
+
+    container.innerHTML = completedItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-check-circle text-3xl mb-2"></i><p>수강 완료된 클래스가 없습니다</p></div>'
+      : completedItems.map(e => {
+        const session = sessionMap[e.class_id];
+        return \`
+        <div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100">
+          <a href="/class/\${e.slug}" class="flex gap-3">
+            <div class="relative flex-shrink-0">
+              <img src="\${e.thumbnail}" class="w-20 h-14 rounded-lg object-cover">
+              <span class="absolute -top-1 -right-1 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center"><i class="fas fa-check text-white text-[8px]"></i></span>
+            </div>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-dark-800 line-clamp-1">\${e.title}</p>
+              <p class="text-xs text-gray-500">\${e.instructor_name}</p>
+              <div class="w-full bg-green-200 rounded-full h-1.5 mt-2"><div class="bg-green-500 h-1.5 rounded-full" style="width:100%"></div></div>
+            </div>
+          </a>
+          <div class="mt-2 pt-2 border-t border-gray-50">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="px-1.5 py-0.5 bg-green-100 text-green-700 text-[10px] font-bold rounded">수업 완료</span>
+              <span class="text-[11px] text-gray-400">\${session.scheduled_at ? new Date(session.scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric'}) : ''}</span>
+            </div>
+            <div class="flex gap-2">
+              <a href="\${session.classin_join_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-green-500 hover:bg-green-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all">
+                <i class="fas fa-play-circle"></i> 다시 보기
+              </a>
+              <a href="/classroom/\${session.id}" onclick="event.stopPropagation()" class="h-8 px-3 border border-gray-200 text-dark-600 text-xs font-medium rounded-lg flex items-center justify-center gap-1 hover:bg-gray-50 transition-all">
+                <i class="fas fa-info-circle"></i> 상세
+              </a>
+            </div>
+          </div>
         </div>
       \`}).join('');
   } else if (tab === 'subscriptions') {
@@ -4669,6 +4714,13 @@ ${navHTML}
             ${scheduledDate.toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit'})}
           </p>
         </div>
+        ` : session.status === 'ended' ? `
+        <div class="bg-gray-500/10 backdrop-blur-sm rounded-2xl p-4 mb-6 border border-gray-500/20">
+          <div class="flex items-center gap-2">
+            <span class="w-5 h-5 bg-green-500 rounded-full flex items-center justify-center"><i class="fas fa-check text-white text-[10px]"></i></span>
+            <p class="text-sm font-semibold text-gray-300">수업이 완료되었습니다. 아래 버튼을 눌러 다시 보기하세요.</p>
+          </div>
+        </div>
         ` : `
         <div class="bg-green-500/10 backdrop-blur-sm rounded-2xl p-4 mb-6 border border-green-500/20">
           <div class="flex items-center gap-2">
@@ -4679,11 +4731,11 @@ ${navHTML}
         `}
         
         <!-- Join Button -->
-        <a href="${session.classin_join_url}" target="_blank" rel="noopener" class="w-full h-14 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-2xl transition-all shadow-lg shadow-blue-500/30 flex items-center justify-center gap-3 text-lg mb-3">
-          <i class="fas fa-door-open"></i>
-          ClassIn 수업방 입장하기
+        <a href="${session.classin_join_url}" target="_blank" rel="noopener" class="w-full h-14 ${session.status === 'ended' ? 'bg-green-500 hover:bg-green-600 shadow-green-500/30' : 'bg-blue-500 hover:bg-blue-600 shadow-blue-500/30'} text-white font-bold rounded-2xl transition-all shadow-lg flex items-center justify-center gap-3 text-lg mb-3">
+          <i class="fas ${session.status === 'ended' ? 'fa-play-circle' : 'fa-door-open'}"></i>
+          ${session.status === 'ended' ? 'ClassIn 수업 다시보기' : 'ClassIn 수업방 입장하기'}
         </a>
-        <p class="text-center text-xs text-gray-500">ClassIn 앱 또는 웹 브라우저에서 수업이 열립니다</p>
+        <p class="text-center text-xs text-gray-500">${session.status === 'ended' ? '녹화된 수업 영상을 다시 볼 수 있습니다' : 'ClassIn 앱 또는 웹 브라우저에서 수업이 열립니다'}</p>
       </div>
       
       <!-- Right side: Session Info Card -->
