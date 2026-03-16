@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 
 type Bindings = {
   DB: D1Database
+  IMAGES: R2Bucket
   CLASSIN_SID?: string
   CLASSIN_SECRET?: string
 }
@@ -5040,6 +5041,81 @@ app.post('/api/admin/change-password', async (c) => {
   return c.json({ success: true, message: '비밀번호가 변경되었습니다.' })
 })
 
+// ==================== Image Upload API ====================
+
+app.post('/api/admin/upload-image', async (c) => {
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+
+  if (!isLoggedIn) {
+    return c.json({ error: '로그인이 필요합니다.' }, 401)
+  }
+
+  try {
+    const formData = await c.req.formData()
+    const file = formData.get('image') as File
+
+    if (!file) {
+      return c.json({ error: '이미지 파일이 필요합니다.' }, 400)
+    }
+
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+    if (!allowedTypes.includes(file.type)) {
+      return c.json({ error: '지원하지 않는 이미지 형식입니다. (JPEG, PNG, GIF, WebP만 가능)' }, 400)
+    }
+
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      return c.json({ error: '이미지 크기는 5MB 이하여야 합니다.' }, 400)
+    }
+
+    // Generate unique filename
+    const ext = file.name.split('.').pop() || 'jpg'
+    const timestamp = Date.now()
+    const randomStr = Math.random().toString(36).substring(2, 8)
+    const filename = 'thumbnails/' + timestamp + '-' + randomStr + '.' + ext
+
+    // Upload to R2
+    const arrayBuffer = await file.arrayBuffer()
+    await c.env.IMAGES.put(filename, arrayBuffer, {
+      httpMetadata: {
+        contentType: file.type,
+      },
+    })
+
+    // Return the URL
+    const imageUrl = '/api/images/' + filename
+
+    return c.json({ success: true, url: imageUrl, filename })
+  } catch (error) {
+    console.error('Image upload error:', error)
+    return c.json({ error: '이미지 업로드 중 오류가 발생했습니다.' }, 500)
+  }
+})
+
+// Serve images from R2
+app.get('/api/images/*', async (c) => {
+  const path = c.req.path.replace('/api/images/', '')
+
+  try {
+    const object = await c.env.IMAGES.get(path)
+
+    if (!object) {
+      return c.json({ error: 'Image not found' }, 404)
+    }
+
+    const headers = new Headers()
+    headers.set('Content-Type', object.httpMetadata?.contentType || 'image/jpeg')
+    headers.set('Cache-Control', 'public, max-age=31536000')
+
+    return new Response(object.body, { headers })
+  } catch (error) {
+    console.error('Image serve error:', error)
+    return c.json({ error: 'Failed to serve image' }, 500)
+  }
+})
+
 // ==================== Admin Page - Virtual Account Management ====================
 
 // Auth check helper for admin pages
@@ -5472,10 +5548,26 @@ app.get('/admin', async (c) => {
           </select>
         </div>
         <div class="col-span-2">
-          <label class="block text-sm font-medium text-gray-700 mb-1">썸네일 이미지 URL</label>
-          <input type="text" id="classThumbnail" placeholder="https://..." class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-          <div id="thumbnailPreview" class="mt-2 hidden">
-            <img id="thumbnailImg" src="" alt="미리보기" class="w-32 h-20 object-cover rounded-lg border">
+          <label class="block text-sm font-medium text-gray-700 mb-1">썸네일 이미지</label>
+          <input type="hidden" id="classThumbnail" value="">
+          <div id="thumbnailDropZone" class="relative border-2 border-dashed border-gray-300 rounded-lg p-4 text-center hover:border-blue-400 transition-colors cursor-pointer"
+               ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)" onclick="document.getElementById('thumbnailFileInput').click()">
+            <input type="file" id="thumbnailFileInput" accept="image/*" class="hidden" onchange="handleFileSelect(event)">
+            <div id="thumbnailUploadPlaceholder">
+              <i class="fas fa-cloud-upload-alt text-3xl text-gray-400 mb-2"></i>
+              <p class="text-sm text-gray-500">클릭하거나 이미지를 드래그하세요</p>
+              <p class="text-xs text-gray-400 mt-1">JPEG, PNG, GIF, WebP (최대 5MB)</p>
+            </div>
+            <div id="thumbnailPreview" class="hidden">
+              <img id="thumbnailImg" src="" alt="미리보기" class="max-w-full h-32 object-contain mx-auto rounded-lg">
+              <button type="button" onclick="event.stopPropagation(); removeThumbnail()" class="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-red-600">
+                <i class="fas fa-times text-xs"></i>
+              </button>
+            </div>
+            <div id="thumbnailUploading" class="hidden">
+              <i class="fas fa-spinner fa-spin text-2xl text-blue-500"></i>
+              <p class="text-sm text-gray-500 mt-2">업로드 중...</p>
+            </div>
           </div>
         </div>
       </div>
@@ -5878,6 +5970,9 @@ app.get('/admin', async (c) => {
       document.getElementById('classLevel').value = 'all';
       document.getElementById('classThumbnail').value = '';
       document.getElementById('thumbnailPreview').classList.add('hidden');
+      document.getElementById('thumbnailUploadPlaceholder').classList.remove('hidden');
+      document.getElementById('thumbnailUploading').classList.add('hidden');
+      document.getElementById('thumbnailFileInput').value = '';
 
       loadInstructorsForSelect();
       loadCategoriesForSelect();
@@ -5914,11 +6009,15 @@ app.get('/admin', async (c) => {
         document.getElementById('classScheduleStart').value = '';
       }
 
+      document.getElementById('thumbnailUploading').classList.add('hidden');
+      document.getElementById('thumbnailFileInput').value = '';
       if (cls.thumbnail) {
         document.getElementById('thumbnailImg').src = cls.thumbnail;
         document.getElementById('thumbnailPreview').classList.remove('hidden');
+        document.getElementById('thumbnailUploadPlaceholder').classList.add('hidden');
       } else {
         document.getElementById('thumbnailPreview').classList.add('hidden');
+        document.getElementById('thumbnailUploadPlaceholder').classList.remove('hidden');
       }
 
       await loadInstructorsForSelect();
@@ -5993,16 +6092,89 @@ app.get('/admin', async (c) => {
       }
     }
 
-    // Thumbnail preview
-    document.getElementById('classThumbnail')?.addEventListener('input', function(e) {
-      const url = e.target.value.trim();
-      if (url) {
-        document.getElementById('thumbnailImg').src = url;
-        document.getElementById('thumbnailPreview').classList.remove('hidden');
-      } else {
-        document.getElementById('thumbnailPreview').classList.add('hidden');
+    // Thumbnail upload functions
+    function handleDragOver(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      document.getElementById('thumbnailDropZone').classList.add('border-blue-500', 'bg-blue-50');
+    }
+
+    function handleDragLeave(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      document.getElementById('thumbnailDropZone').classList.remove('border-blue-500', 'bg-blue-50');
+    }
+
+    function handleDrop(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      document.getElementById('thumbnailDropZone').classList.remove('border-blue-500', 'bg-blue-50');
+      
+      const files = e.dataTransfer.files;
+      if (files.length > 0) {
+        uploadThumbnail(files[0]);
       }
-    });
+    }
+
+    function handleFileSelect(e) {
+      const files = e.target.files;
+      if (files.length > 0) {
+        uploadThumbnail(files[0]);
+      }
+    }
+
+    async function uploadThumbnail(file) {
+      // Validate file type
+      const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+      if (!allowedTypes.includes(file.type)) {
+        showModal('오류', '지원하지 않는 이미지 형식입니다. (JPEG, PNG, GIF, WebP만 가능)');
+        return;
+      }
+
+      // Validate file size (5MB)
+      if (file.size > 5 * 1024 * 1024) {
+        showModal('오류', '이미지 크기는 5MB 이하여야 합니다.');
+        return;
+      }
+
+      // Show uploading state
+      document.getElementById('thumbnailUploadPlaceholder').classList.add('hidden');
+      document.getElementById('thumbnailPreview').classList.add('hidden');
+      document.getElementById('thumbnailUploading').classList.remove('hidden');
+
+      try {
+        const formData = new FormData();
+        formData.append('image', file);
+
+        const res = await fetch('/api/admin/upload-image', {
+          method: 'POST',
+          body: formData
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          document.getElementById('classThumbnail').value = data.url;
+          document.getElementById('thumbnailImg').src = data.url;
+          document.getElementById('thumbnailUploading').classList.add('hidden');
+          document.getElementById('thumbnailPreview').classList.remove('hidden');
+        } else {
+          throw new Error(data.error || '업로드 실패');
+        }
+      } catch (error) {
+        document.getElementById('thumbnailUploading').classList.add('hidden');
+        document.getElementById('thumbnailUploadPlaceholder').classList.remove('hidden');
+        showModal('오류', '이미지 업로드 실패: ' + error.message);
+      }
+    }
+
+    function removeThumbnail() {
+      document.getElementById('classThumbnail').value = '';
+      document.getElementById('thumbnailImg').src = '';
+      document.getElementById('thumbnailPreview').classList.add('hidden');
+      document.getElementById('thumbnailUploadPlaceholder').classList.remove('hidden');
+      document.getElementById('thumbnailFileInput').value = '';
+    }
 
     function openCreateSession(classId, className, instructorName, scheduleStart) {
       selectedClassId = classId;
