@@ -3498,7 +3498,7 @@ async function openMyPage(tab) {
     </button>
     <div class="flex gap-1 mb-4 bg-gray-100 rounded-xl p-1">
       <button onclick="loadMyPageTab('enrollments')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='enrollments'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강중</button>
-      <button onclick="loadMyPageTab('completed')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab===completed'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강완료</button>
+      <button onclick="loadMyPageTab('completed')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='completed'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강완료</button>
       <button onclick="loadMyPageTab('subscriptions')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='subscriptions'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}"><i class="fas fa-sync-alt mr-0.5 text-[9px]"></i>구독</button>
       <button onclick="loadMyPageTab('orders')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='orders'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">결제내역</button>
     </div>
