@@ -34,6 +34,11 @@ function translateClassInError(error: string): string {
   const translations: { [key: string]: string } = {
     '开课时间至少一分钟以后': '수업 시작 시간은 최소 1분 후여야 합니다.',
     '手机号码已注册': '이미 등록된 전화번호입니다.',
+    '手机号码不合法': '전화번호 형식이 올바르지 않습니다.',
+    '超出机构老师最大启用数量': '기관 교사 최대 수를 초과했습니다. ClassIn 관리자에게 문의하세요.',
+    '参数不全或错误': '파라미터가 불완전하거나 잘못되었습니다.',
+    '请求数据不合法': '요청 데이터가 유효하지 않습니다.',
+    '机构下面没有该老师，请在机构下添加该老师': '기관에 해당 교사가 없습니다. 강사 관리에서 재등록해주세요.',
     '班主任不是本机构的老师': '강사가 이 기관에 등록되지 않았습니다.',
     '课程不存在': '코스가 존재하지 않습니다.',
     '课节不存在': '수업이 존재하지 않습니다.',
@@ -46,12 +51,13 @@ function translateClassInError(error: string): string {
     '课程名称不能为空': '코스명을 입력해주세요.',
   }
 
+  let result = error
   for (const [cn, kr] of Object.entries(translations)) {
-    if (error.includes(cn)) {
-      return error.replace(cn, kr)
+    if (result.includes(cn)) {
+      result = result.replace(cn, kr)
     }
   }
-  return error
+  return result
 }
 
 // ClassIn API helper - generate safeKey (MD5 of SECRET + timestamp)
@@ -76,27 +82,44 @@ async function generateSafeKey(secret: string, timestamp: number): Promise<strin
 async function createClassInCourse(config: ClassInConfig, courseName: string, teacherUid?: string): Promise<{ courseId?: string; error?: string }> {
   const timestamp = Math.floor(Date.now() / 1000)
   const safeKey = await generateSafeKey(config.SECRET, timestamp)
-  
+
+  // 코스명에서 특수문자 제거 (ClassIn API 호환성)
+  const cleanCourseName = courseName.replace(/[\[\]]/g, '').trim() || 'Course'
+
   const formData = new URLSearchParams()
   formData.set('SID', config.SID)
   formData.set('safeKey', safeKey)
   formData.set('timeStamp', timestamp.toString())
-  formData.set('courseName', courseName)
-  if (teacherUid) formData.set('mainTeacherUid', teacherUid)
-  
+  formData.set('courseName', cleanCourseName)
+  // mainTeacherUid는 수업(addClass) 생성 시 설정하므로 여기서는 생략
+
+  console.log('createClassInCourse request:', { courseName: cleanCourseName, SID: config.SID })
+
   try {
     const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addCourse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: formData.toString()
     })
-    const data = await res.json() as any
-    console.log('createClassInCourse response:', JSON.stringify(data))
+    const text = await res.text()
+    console.log('createClassInCourse response text:', text)
+
+    if (!text) {
+      return { error: 'ClassIn API 응답이 비어있습니다.' }
+    }
+
+    let data: any
+    try {
+      data = JSON.parse(text)
+    } catch {
+      return { error: 'ClassIn API 응답 파싱 실패: ' + text.substring(0, 200) }
+    }
+
     if (data.error_info?.errno === 1) {
       // API returns: { data: courseId } (number directly)
       return { courseId: data.data?.toString() }
     }
-    return { error: translateClassInError(data.error_info?.error || 'Failed to create course') }
+    return { error: translateClassInError(data.error_info?.error || JSON.stringify(data)) }
   } catch (e: any) {
     return { error: e.message || 'Network error' }
   }
@@ -468,11 +491,11 @@ async function registerInstructorWithClassIn(
   db: D1Database,
   instructorId: number,
   config: ClassInConfig,
-  phoneNumber?: string  // 선택적 전화번호 - 제공 시 전화번호로 등록
+  accountInput?: string  // 전화번호 또는 이메일
 ): Promise<{ uid?: string; error?: string }> {
   // Get instructor info
   const instructor = await db.prepare(`
-    SELECT i.*, u.email FROM instructors i
+    SELECT i.*, u.email, u.name as user_name FROM instructors i
     JOIN users u ON i.user_id = u.id
     WHERE i.id = ?
   `).bind(instructorId).first() as any
@@ -486,94 +509,94 @@ async function registerInstructorWithClassIn(
     return { uid: instructor.classin_uid }
   }
 
-  // Register with ClassIn API using telephone (전화번호로 등록)
-  const timestamp = Math.floor(Date.now() / 1000)
-  const safeKey = await generateSafeKey(config.SECRET, timestamp)
-  const password = generateDefaultPassword()
-
-  const formData = new URLSearchParams()
-  formData.set('SID', config.SID)
-  formData.set('safeKey', safeKey)
-  formData.set('timeStamp', timestamp.toString())
-
-  // 전화번호가 제공되면 전화번호로 등록, 아니면 이메일로 등록
-  if (phoneNumber) {
-    formData.set('telephone', phoneNumber)
-  } else {
-    formData.set('email', instructor.email)
-  }
-  formData.set('password', password)
+  // 이메일인지 전화번호인지 판단
+  const account = accountInput || instructor.email
+  const isEmail = account.includes('@')
+  const accountValue = isEmail ? account : formatKoreanPhoneForClassIn(account)
+  const teacherName = instructor.display_name || instructor.user_name || 'Teacher'
 
   try {
-    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=register`, {
+    // Step 1: register API로 UID 조회 (addToSchoolMember 없이 - 기존 계정도 UID 반환)
+    const timestamp1 = Math.floor(Date.now() / 1000)
+    const safeKey1 = await generateSafeKey(config.SECRET, timestamp1)
+
+    const registerForm = new URLSearchParams()
+    registerForm.set('SID', config.SID)
+    registerForm.set('safeKey', safeKey1)
+    registerForm.set('timeStamp', timestamp1.toString())
+    if (isEmail) {
+      registerForm.set('email', accountValue)
+    } else {
+      registerForm.set('telephone', accountValue)
+    }
+    registerForm.set('password', generateDefaultPassword())
+
+    const registerRes = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: formData.toString()
+      body: registerForm.toString()
     })
-    const data = await res.json() as any
-    console.log('Instructor register response:', JSON.stringify(data))
+    const registerText = await registerRes.text()
+    console.log('Instructor register response:', registerText)
 
-    // 성공적으로 등록된 경우
-    if (data.error_info?.errno === 1 && data.data) {
-      const classInUid = data.data.toString()
+    let registerData: any
+    try {
+      registerData = JSON.parse(registerText)
+    } catch {
+      return { error: 'register API 응답 파싱 실패' }
+    }
+
+    // register 응답에서 UID 추출 (신규 등록 또는 "이미 등록됨" 모두 data에 UID 반환)
+    const classInUid = registerData.data?.toString()
+    if (!classInUid) {
+      const errorMsg = registerData.error_info?.error || JSON.stringify(registerData)
+      return { error: translateClassInError(errorMsg) }
+    }
+
+    // Step 2: addTeacher API로 기관 교사로 등록
+    const timestamp2 = Math.floor(Date.now() / 1000)
+    const safeKey2 = await generateSafeKey(config.SECRET, timestamp2)
+
+    const teacherForm = new URLSearchParams()
+    teacherForm.set('SID', config.SID)
+    teacherForm.set('safeKey', safeKey2)
+    teacherForm.set('timeStamp', timestamp2.toString())
+    teacherForm.set('teacherAccount', accountValue)
+    teacherForm.set('teacherName', teacherName)
+
+    const teacherRes = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addTeacher`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: teacherForm.toString()
+    })
+    const teacherText = await teacherRes.text()
+    console.log('addTeacher response:', teacherText)
+
+    let teacherData: any
+    try {
+      teacherData = JSON.parse(teacherText)
+    } catch {
+      // addTeacher 실패해도 UID는 있으므로 계속 진행
+    }
+
+    const teacherErrno = teacherData?.error_info?.errno
+    const teacherError = teacherData?.error_info?.error || ''
+    const alreadyExists = teacherError.includes('已经存在')
+
+    // addTeacher 성공 또는 이미 존재하면 성공
+    if (teacherErrno === 1 || alreadyExists) {
       await db.prepare(`
         UPDATE instructors SET classin_uid = ?, classin_registered_at = datetime('now') WHERE id = ?
       `).bind(classInUid, instructorId).run()
       return { uid: classInUid }
     }
 
-    // 이미 등록된 경우 - getUser API로 UID 조회 시도
-    if (data.error_info?.error?.includes('已注册') || data.error_info?.error?.includes('already')) {
-      try {
-        // getUser API로 UID 조회 시도
-        const getUserFormData = new URLSearchParams()
-        getUserFormData.set('SID', config.SID)
-        getUserFormData.set('safeKey', safeKey)
-        getUserFormData.set('timeStamp', timestamp.toString())
-        getUserFormData.set('telephone', phoneNumber || '')
+    // addTeacher 실패해도 UID는 저장 (나중에 재등록으로 기관 교사 추가 가능)
+    await db.prepare(`
+      UPDATE instructors SET classin_uid = ?, classin_registered_at = datetime('now') WHERE id = ?
+    `).bind(classInUid, instructorId).run()
 
-        const getUserRes = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=getUser`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: getUserFormData.toString()
-        })
-        const getUserText = await getUserRes.text()
-        console.log('GetUser response text:', getUserText)
-
-        if (getUserText) {
-          try {
-            const getUserData = JSON.parse(getUserText)
-            console.log('GetUser response:', JSON.stringify(getUserData))
-
-            // getUser가 UID를 반환하면 저장
-            if (getUserData.data?.uid || getUserData.data) {
-              const classInUid = (getUserData.data?.uid || getUserData.data).toString()
-              await db.prepare(`
-                UPDATE instructors SET classin_uid = ?, classin_registered_at = datetime('now') WHERE id = ?
-              `).bind(classInUid, instructorId).run()
-              return { uid: classInUid }
-            }
-          } catch (parseErr) {
-            console.log('Failed to parse getUser response')
-          }
-        }
-      } catch (getUserErr: any) {
-        console.log('GetUser API error:', getUserErr.message)
-      }
-
-      // 원본 응답에 UID가 있는지 확인
-      if (data.data) {
-        const classInUid = data.data.toString()
-        await db.prepare(`
-          UPDATE instructors SET classin_uid = ?, classin_registered_at = datetime('now') WHERE id = ?
-        `).bind(classInUid, instructorId).run()
-        return { uid: classInUid }
-      }
-
-      return { error: '이미 등록된 전화번호입니다. ClassIn 관리자에게 UID를 문의하세요. (response: ' + JSON.stringify(data) + ')' }
-    }
-
-    return { error: translateClassInError(data.error_info?.error || 'Failed to register instructor') }
+    return { uid: classInUid, error: translateClassInError(teacherError) + ' (UID는 저장됨, 재등록 필요)' }
   } catch (e: any) {
     return { error: e.message || 'Network error' }
   }
@@ -1438,10 +1461,17 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
 
   const teacherUid = cls.instructor_classin_uid
 
-  // 1. 코스 생성
-  const courseResult = await createClassInCourse(config, cls.title, teacherUid)
-  if (!courseResult.courseId) {
-    return c.json({ error: '코스 생성 실패: ' + courseResult.error }, 500)
+  // 1. 코스 - 기존 코스가 있으면 재사용, 없으면 새로 생성
+  let courseId = cls.classin_course_id
+  let isNewCourse = false
+
+  if (!courseId) {
+    const courseResult = await createClassInCourse(config, cls.title, teacherUid)
+    if (!courseResult.courseId) {
+      return c.json({ error: '코스 생성 실패: ' + courseResult.error }, 500)
+    }
+    courseId = courseResult.courseId
+    isNewCourse = true
   }
 
   // 2. 수업(레슨) 생성 - 지정된 시간으로
@@ -1450,7 +1480,7 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
 
   const lessonResult = await createClassInLesson(
     config,
-    courseResult.courseId,
+    courseId,
     cls.title,
     beginTime,
     endTime,
@@ -1463,9 +1493,9 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
   }
 
   // 3. 강사 입장 URL 생성
-  const instructorUrlResult = await getClassInLoginUrl(config, teacherUid, courseResult.courseId, lessonResult.classId, 1)
+  const instructorUrlResult = await getClassInLoginUrl(config, teacherUid, courseId, lessonResult.classId, 1)
   const instructorUrl = instructorUrlResult.url ||
-    `https://www.eeo.cn/client/invoke/index.html?uid=${teacherUid}&classId=${lessonResult.classId}&courseId=${courseResult.courseId}&schoolId=${config.SID}`
+    `https://www.eeo.cn/client/invoke/index.html?uid=${teacherUid}&classId=${lessonResult.classId}&courseId=${courseId}&schoolId=${config.SID}`
 
   // 4. DB에 저장
   await c.env.DB.prepare(`
@@ -1473,15 +1503,18 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
     SET classin_course_id = ?, classin_class_id = ?, classin_instructor_url = ?,
         classin_status = 'scheduled', classin_scheduled_at = ?, classin_created_at = datetime('now')
     WHERE id = ?
-  `).bind(courseResult.courseId, lessonResult.classId, instructorUrl, scheduledAt, classId).run()
+  `).bind(courseId, lessonResult.classId, instructorUrl, scheduledAt, classId).run()
 
   return c.json({
     success: true,
-    message: 'ClassIn 수업이 생성되었습니다.',
-    courseId: courseResult.courseId,
+    message: isNewCourse
+      ? `ClassIn 수업이 생성되었습니다! 코스 ID: ${courseId} 수업 ID: ${lessonResult.classId}`
+      : `ClassIn 수업이 생성되었습니다! (기존 코스 재사용) 수업 ID: ${lessonResult.classId}`,
+    courseId,
     classId: lessonResult.classId,
     instructorUrl,
-    scheduledAt
+    scheduledAt,
+    isNewCourse
   })
 })
 
@@ -1633,13 +1666,32 @@ app.get('/api/admin/classes/:classId/session', async (c) => {
   })
 })
 
+// 한국 전화번호 형식 변환: 010xxxxyyyy 또는 010-xxxx-yyyy → 0082-10xxxxyyyy
+function formatKoreanPhoneForClassIn(phone: string): string {
+  // 하이픈, 공백 제거
+  const cleaned = phone.replace(/[-\s]/g, '')
+
+  // 010으로 시작하면 국제 형식으로 변환
+  if (cleaned.startsWith('010') && cleaned.length >= 10) {
+    // 010 → 0082-10 (앞의 0을 제거하고 국가코드 추가)
+    return '0082-' + cleaned.substring(1)
+  }
+
+  // 이미 국제 형식이면 그대로 반환
+  return phone
+}
+
 // Register instructor with ClassIn using phone number (관리자: 강사 ClassIn 등록)
 app.post('/api/admin/instructors/register-classin', async (c) => {
-  const { instructorId, phoneNumber } = await c.req.json()
+  const { instructorId, phoneNumber: rawInput } = await c.req.json()
 
-  if (!instructorId || !phoneNumber) {
-    return c.json({ error: 'instructorId와 phoneNumber가 필요합니다.' }, 400)
+  if (!instructorId || !rawInput) {
+    return c.json({ error: 'instructorId와 전화번호/이메일이 필요합니다.' }, 400)
   }
+
+  // 이메일인지 전화번호인지 판단
+  const isEmail = rawInput.includes('@')
+  const accountValue = isEmail ? rawInput.trim() : formatKoreanPhoneForClassIn(rawInput)
 
   // Get ClassIn config
   const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
@@ -1670,7 +1722,7 @@ app.post('/api/admin/instructors/register-classin', async (c) => {
   }
 
   // Register with ClassIn
-  const result = await registerInstructorWithClassIn(c.env.DB, instructorId, config, phoneNumber)
+  const result = await registerInstructorWithClassIn(c.env.DB, instructorId, config, accountValue)
 
   if (result.error) {
     return c.json({ error: result.error }, 500)
@@ -1682,6 +1734,136 @@ app.post('/api/admin/instructors/register-classin', async (c) => {
     classInUid: result.uid,
     instructor: { ...instructor, classin_uid: result.uid }
   })
+})
+
+// Re-register instructor as school teacher (기존 강사를 기관 교사로 재등록)
+app.post('/api/admin/instructors/re-register-classin', async (c) => {
+  const { instructorId, classInUid, phoneNumber: rawPhoneNumber } = await c.req.json()
+
+  if (!instructorId || !classInUid || !rawPhoneNumber) {
+    return c.json({ error: 'instructorId, classInUid, phoneNumber가 필요합니다.' }, 400)
+  }
+
+  // Get ClassIn config
+  const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+  if (!config) {
+    return c.json({ error: 'ClassIn API가 설정되지 않았습니다.' }, 500)
+  }
+
+  // Get instructor info from DB
+  const instructor = await c.env.DB.prepare(`
+    SELECT i.*, u.phone as user_phone, u.email as user_email
+    FROM instructors i
+    JOIN users u ON i.user_id = u.id
+    WHERE i.id = ?
+  `).bind(instructorId).first() as any
+
+  if (!instructor) {
+    return c.json({ error: '강사를 찾을 수 없습니다.' }, 404)
+  }
+
+  const teacherName = instructor.display_name || instructor.user_name || 'Teacher'
+
+  // 이메일인지 전화번호인지 판단
+  const isEmail = rawPhoneNumber.includes('@')
+  const accountValue = isEmail ? rawPhoneNumber.trim() : formatKoreanPhoneForClassIn(rawPhoneNumber)
+
+  try {
+    // Step 1: register API로 실제 UID 조회 (이미 등록된 경우에도 UID 반환)
+    const timestamp1 = Math.floor(Date.now() / 1000)
+    const safeKey1 = await generateSafeKey(config.SECRET, timestamp1)
+
+    const registerForm = new URLSearchParams()
+    registerForm.set('SID', config.SID)
+    registerForm.set('safeKey', safeKey1)
+    registerForm.set('timeStamp', timestamp1.toString())
+    // 이메일이면 email, 전화번호면 telephone 파라미터 사용
+    if (isEmail) {
+      registerForm.set('email', accountValue)
+    } else {
+      registerForm.set('telephone', accountValue)
+    }
+    registerForm.set('password', 'Classin123!')
+    // addToSchoolMember 제거 - UID 조회 목적으로만 사용
+
+    const registerRes = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: registerForm.toString()
+    })
+    const registerText = await registerRes.text()
+    console.log('register response text:', registerText)
+
+    let registerData: any
+    try {
+      registerData = JSON.parse(registerText)
+    } catch {
+      return c.json({ error: 'register API 응답 파싱 실패: ' + registerText.substring(0, 200) }, 500)
+    }
+
+    // register 응답에서 UID 추출 (성공 또는 "이미 등록됨" 모두 data에 UID 반환)
+    const realUid = registerData.data?.toString()
+    console.log('register response - errno:', registerData.error_info?.errno, 'realUid:', realUid)
+
+    if (!realUid) {
+      return c.json({ error: translateClassInError(registerData.error_info?.error || JSON.stringify(registerData)) }, 500)
+    }
+
+    // Step 2: addTeacher API로 기관 교사로 등록
+    const timestamp2 = Math.floor(Date.now() / 1000)
+    const safeKey2 = await generateSafeKey(config.SECRET, timestamp2)
+
+    const teacherForm = new URLSearchParams()
+    teacherForm.set('SID', config.SID)
+    teacherForm.set('safeKey', safeKey2)
+    teacherForm.set('timeStamp', timestamp2.toString())
+    teacherForm.set('teacherAccount', accountValue)
+    teacherForm.set('teacherName', teacherName)
+
+    const teacherRes = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addTeacher`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: teacherForm.toString()
+    })
+    const teacherText = await teacherRes.text()
+    console.log('addTeacher response text:', teacherText)
+
+    let teacherData: any
+    try {
+      teacherData = JSON.parse(teacherText)
+    } catch {
+      return c.json({ error: 'addTeacher API 응답 파싱 실패: ' + teacherText.substring(0, 200) }, 500)
+    }
+
+    const teacherErrno = teacherData.error_info?.errno
+    const teacherError = teacherData.error_info?.error || ''
+    const alreadyExists = teacherError.includes('已经存在')
+
+    // addTeacher 성공 또는 이미 존재
+    if (teacherErrno === 1 || alreadyExists) {
+      // DB 업데이트 - 실제 UID로 갱신
+      await c.env.DB.prepare(`
+        UPDATE instructors SET classin_uid = ? WHERE id = ?
+      `).bind(realUid, instructorId).run()
+
+      // 이메일 또는 전화번호를 users 테이블의 phone 필드에 저장 (ClassIn 계정 정보로 사용)
+      await c.env.DB.prepare(`
+        UPDATE users SET phone = ? WHERE id = ?
+      `).bind(rawPhoneNumber, instructor.user_id).run()
+
+      return c.json({
+        success: true,
+        message: `기관 교사로 등록되었습니다. (UID: ${realUid})`,
+        classInUid: realUid
+      })
+    }
+
+    return c.json({ error: translateClassInError(teacherError || JSON.stringify(teacherData)) }, 500)
+  } catch (e: any) {
+    return c.json({ error: e.message || 'Network error' }, 500)
+  }
 })
 
 // Get all instructors for admin (관리자: 강사 목록)
@@ -5090,7 +5272,7 @@ app.get('/admin', async (c) => {
               <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">ID</th>
               <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">이름</th>
               <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">이메일</th>
-              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">전화번호</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">전화번호/Email</th>
               <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">ClassIn UID</th>
               <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">ClassIn 등록</th>
               <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">작업</th>
@@ -5225,9 +5407,9 @@ app.get('/admin', async (c) => {
           <input type="email" id="newInstructorEmail" placeholder="instructor@example.com" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
         </div>
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">전화번호 (ClassIn 등록용)</label>
-          <input type="text" id="newInstructorPhone" placeholder="0082-1012345678" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
-          <p class="text-xs text-gray-500 mt-1">전화번호 입력 시 ClassIn에 자동 등록됩니다. (국가코드-전화번호)</p>
+          <label class="block text-sm font-medium text-gray-700 mb-1">전화번호 or Email (ClassIn 등록용)</label>
+          <input type="text" id="newInstructorPhone" placeholder="010-1234-5678 또는 email@example.com" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+          <p class="text-xs text-gray-500 mt-1">전화번호(010-xxxx-xxxx)는 자동으로 국제형식으로 변환됩니다. 이메일도 사용 가능합니다.</p>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">프로필 이미지 URL</label>
@@ -5461,12 +5643,17 @@ app.get('/admin', async (c) => {
           <td class="px-4 py-3">
             \${!inst.classin_uid ?
               \`<div class="flex items-center gap-2">
-                <input type="text" id="phone_\${inst.id}" placeholder="0082-..." class="px-2 py-1 border border-gray-200 rounded text-xs w-28" value="\${inst.user_phone || ''}">
-                <button onclick="registerInstructor(\${inst.id})" class="text-indigo-500 hover:text-indigo-700 text-xs whitespace-nowrap">
+                <input type="text" id="phone_\${inst.id}" placeholder="전화번호/이메일" class="px-2 py-1 border border-gray-200 rounded text-xs w-32" value="\${inst.user_phone || inst.user_email || ''}">
+                <button onclick="registerInstructor(\${inst.id})" class="text-indigo-500 hover:text-indigo-700 text-xs whitespace-nowrap" title="ClassIn 등록">
                   <i class="fas fa-cloud-upload-alt"></i>
                 </button>
               </div>\`
-              : '<span class="text-green-500 text-xs"><i class="fas fa-check-circle mr-1"></i>완료</span>'
+              : \`<div class="flex items-center gap-2">
+                  <span class="text-green-500 text-xs"><i class="fas fa-check-circle mr-1"></i>완료</span>
+                  <button onclick="reRegisterInstructor(\${inst.id}, '\${inst.classin_uid}')" class="text-orange-500 hover:text-orange-700 text-xs" title="기관 교사로 재등록">
+                    <i class="fas fa-sync-alt"></i>
+                  </button>
+                </div>\`
             }
           </td>
           <td class="px-4 py-3">
@@ -5539,7 +5726,7 @@ app.get('/admin', async (c) => {
       const phoneNumber = phoneInput ? phoneInput.value.trim() : '';
 
       if (!phoneNumber) {
-        showModal('오류', '전화번호를 입력해주세요. (예: 0082-1012345678)');
+        showModal('오류', '전화번호를 입력해주세요. (예: 010-1234-5678)');
         return;
       }
 
@@ -5555,6 +5742,25 @@ app.get('/admin', async (c) => {
         loadInstructors();
       } else {
         showModal('오류', data.error || '등록 실패');
+      }
+    }
+
+    async function reRegisterInstructor(instructorId, classInUid) {
+      const phoneNumber = prompt('기관 교사로 재등록하려면 전화번호 또는 이메일을 입력하세요.\\n(예: 010-1234-5678 또는 email@example.com)\\n\\n기존 UID: ' + classInUid);
+      if (!phoneNumber) return;
+
+      const res = await fetch('/api/admin/instructors/re-register-classin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instructorId, classInUid, phoneNumber })
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        showModal('성공', data.message);
+        loadInstructors();
+      } else {
+        showModal('오류', data.error || '재등록 실패');
       }
     }
 
