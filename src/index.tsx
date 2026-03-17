@@ -861,7 +861,7 @@ app.get('/api/classes/:id/reviews', async (c) => {
 // Simple auth - login
 app.post('/api/auth/login', async (c) => {
   const { email, password } = await c.req.json()
-  const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, subscription_plan, subscription_expires_at FROM users WHERE email = ?').bind(email).first()
+  const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, subscription_plan, subscription_expires_at, is_test_account, test_expires_at FROM users WHERE email = ?').bind(email).first()
   if (!user) return c.json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' }, 401)
   // Simple password check for demo (in production, use proper hashing)
   return c.json({ user, token: `demo_token_${(user as any).id}` })
@@ -873,7 +873,7 @@ app.post('/api/auth/register', async (c) => {
   try {
     const result = await c.env.DB.prepare('INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)').bind(email, `hash_${password}`, name).run()
     const userId = result.meta.last_row_id
-    const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role FROM users WHERE id = ?').bind(userId).first() as any
+    const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, is_test_account, test_expires_at FROM users WHERE id = ?').bind(userId).first() as any
 
     return c.json({
       user,
@@ -3239,6 +3239,13 @@ function toggleWishlist() {
 let paymentData = {};
 function openPaymentModal(classData) {
   if (!currentUser) { openAuthModal('login'); return; }
+
+  // 테스트 계정은 결제 없이 바로 수강 등록
+  if (currentUser.is_test_account && classData.id) {
+    testEnroll(classData.id);
+    return;
+  }
+
   paymentData = classData;
   document.getElementById('paymentModal').classList.remove('hidden');
   document.getElementById('paymentOrderSummary').innerHTML = \`
@@ -3353,6 +3360,13 @@ let subscriptionData = {};
 
 function openSubscriptionModal(data) {
   if (!currentUser) { openAuthModal('login'); return; }
+
+  // 테스트 계정이 클래스 월간 구독 시도 시 바로 수강 등록
+  if (currentUser.is_test_account && data.classId) {
+    testEnroll(data.classId);
+    return;
+  }
+
   subscriptionData = data;
   document.getElementById('paymentModal').classList.remove('hidden');
   
