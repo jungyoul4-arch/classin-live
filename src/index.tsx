@@ -177,7 +177,7 @@ async function createClassInLesson(
     endTime: endTime,
     // 녹화/스트리밍 파라미터는 세트로 전달해야 함
     recordState: options?.record ?? 1,  // 1=녹화 활성화
-    recordType: 0,                       // 0=교실 전체 녹화
+    recordType: 2,                       // 2=클라우드 녹화
     liveState: options?.live ?? 0,       // 0=라이브 스트리밍 비활성화
     openState: 1,                        // 1=웹 다시보기 활성화
     seatNum: options?.seatNum ?? 7,
@@ -1636,7 +1636,7 @@ async function lmsCreateClassroom(
     endTime: params.endTime,
     // 녹화/스트리밍 파라미터는 세트로 전달해야 함
     recordState: params.recordState ?? 1,  // 1=녹화 활성화
-    recordType: 0,                          // 0=교실 전체 녹화
+    recordType: 2,                          // 2=클라우드 녹화
     liveState: params.liveState ?? 0,       // 0=라이브 스트리밍 비활성화
     openState: 1,                           // 1=웹 다시보기 활성화
     seatNum: params.seatNum ?? 7,
