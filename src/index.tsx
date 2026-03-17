@@ -3638,7 +3638,7 @@ async function testEnroll(classId) {
     const data = await res.json();
 
     if (data.success) {
-      showToast(data.message);
+      alert(data.message);
       if (data.classinSession && data.classinSession.joinUrl) {
         if (confirm('ClassIn 수업방으로 이동하시겠습니까?')) {
           window.open(data.classinSession.joinUrl, '_blank');
