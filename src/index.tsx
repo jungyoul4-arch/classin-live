@@ -3082,7 +3082,7 @@ function updateAuthUI() {
         <div class="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center">
           <span class="text-sm font-bold text-primary-600">\${currentUser.name?.charAt(0) || 'U'}</span>
         </div>
-        <span class="text-sm font-medium text-dark-700 hidden sm:block">마이페이지(\${currentUser.name})</span>
+        <span class="text-sm font-medium text-dark-700 hidden sm:block">마이페이지(\${currentUser.name}\${currentUser.is_test_account ? ',테스트' : ''})</span>
       </button>
       <button onclick="handleLogout()" class="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-50 transition-all">로그아웃</button>
     \`;
