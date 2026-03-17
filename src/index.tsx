@@ -3708,10 +3708,16 @@ async function loadMyPageTab(tab) {
     if (Array.isArray(sessions)) sessions.forEach(s => { sessionMap[s.class_id] = s; });
 
     // 진행중/예정된 수업만 표시 (종료된 수업은 수강완료 탭으로)
+    // 수업 종료 = 시작시간 + 수업시간(분)이 현재보다 과거
     const activeItems = items.filter(e => {
       const session = sessionMap[e.class_id];
       if (!session) return true; // 세션 없으면 표시
-      const isEnded = session.status === 'ended' || (session.scheduled_at && new Date(session.scheduled_at) < new Date());
+      if (session.status === 'ended') return false;
+      if (!session.scheduled_at) return true;
+      const startTime = new Date(session.scheduled_at).getTime();
+      const duration = (session.duration_minutes || 60) * 60 * 1000; // 기본 60분
+      const endTime = startTime + duration;
+      const isEnded = endTime < Date.now();
       return !isEnded;
     });
 
@@ -3757,12 +3763,16 @@ async function loadMyPageTab(tab) {
     const sessionMap = {};
     if (Array.isArray(sessions)) sessions.forEach(s => { sessionMap[s.class_id] = s; });
 
-    // 종료된 수업 (status가 ended이거나 예정 시간이 지난 경우)
+    // 종료된 수업 (status가 ended이거나 시작시간+수업시간이 현재보다 과거)
     const completedItems = items.filter(e => {
       const session = sessionMap[e.class_id];
       if (!session) return false;
-      const isEnded = session.status === 'ended' || (session.scheduled_at && new Date(session.scheduled_at) < new Date());
-      return isEnded;
+      if (session.status === 'ended') return true;
+      if (!session.scheduled_at) return false;
+      const startTime = new Date(session.scheduled_at).getTime();
+      const duration = (session.duration_minutes || 60) * 60 * 1000;
+      const endTime = startTime + duration;
+      return endTime < Date.now();
     });
 
     container.innerHTML = completedItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-check-circle text-3xl mb-2"></i><p>수강 완료된 클래스가 없습니다</p></div>'
@@ -4521,7 +4531,7 @@ ${navHTML}
             ${cls.schedule_start ? `
             <div class="flex items-center gap-2 px-3 py-2 bg-red-50 rounded-xl mb-3">
               <i class="fas fa-calendar-alt text-red-500"></i>
-              <span class="text-sm font-medium text-red-700">라이브 시작: ${new Date(cls.schedule_start).toLocaleDateString('ko-KR', {year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit'})}</span>
+              <span class="text-sm font-medium text-red-700">라이브 시작: ${new Date(new Date(cls.schedule_start).getTime() + 9 * 60 * 60 * 1000).toLocaleDateString('ko-KR', {year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit'})}</span>
             </div>
             ` : ''}
             
