@@ -1138,90 +1138,125 @@ app.get('/api/user/:userId/test-status', async (c) => {
 
 // Test account: Free enrollment (테스트 계정용 무료 수강신청)
 app.post('/api/test-account/enroll', async (c) => {
-  const { userId, classId } = await c.req.json()
+  try {
+    const { userId, classId } = await c.req.json()
 
-  if (!userId || !classId) {
-    return c.json({ error: 'userId와 classId가 필요합니다.' }, 400)
-  }
+    if (!userId || !classId) {
+      return c.json({ error: 'userId와 classId가 필요합니다.' }, 400)
+    }
 
-  // Check if user is test account
-  const user = await c.env.DB.prepare(`
-    SELECT * FROM users WHERE id = ? AND is_test_account = 1
-    AND (test_expires_at IS NULL OR test_expires_at > datetime('now'))
-  `).bind(userId).first() as any
+    // Check if user is test account
+    const user = await c.env.DB.prepare(`
+      SELECT * FROM users WHERE id = ? AND is_test_account = 1
+      AND (test_expires_at IS NULL OR test_expires_at > datetime('now'))
+    `).bind(userId).first() as any
 
-  if (!user) {
-    return c.json({ error: '테스트 계정이 아니거나 만료되었습니다.' }, 403)
-  }
+    if (!user) {
+      return c.json({ error: '테스트 계정이 아니거나 만료되었습니다.' }, 403)
+    }
 
-  // Get class info for expires_at
-  const classInfo = await c.env.DB.prepare('SELECT schedule_end FROM classes WHERE id = ?').bind(classId).first() as any
-  const expiresAt = classInfo?.schedule_end || null
+    // Get class info for expires_at
+    const classInfo = await c.env.DB.prepare('SELECT schedule_end FROM classes WHERE id = ?').bind(classId).first() as any
+    const expiresAt = classInfo?.schedule_end || null
 
-  // Create enrollment with expires_at
-  await c.env.DB.prepare(`
-    INSERT INTO enrollments (user_id, class_id, expires_at, status)
-    VALUES (?, ?, ?, 'active')
-    ON CONFLICT(user_id, class_id) DO UPDATE SET expires_at = COALESCE(?, expires_at), status = 'active', updated_at = datetime('now')
-  `).bind(userId, classId, expiresAt, expiresAt).run()
-  const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, classId).first() as any
+    // Check if already enrolled
+    const existingEnrollment = await c.env.DB.prepare(
+      'SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?'
+    ).bind(userId, classId).first() as any
 
-  // Create test order (amount = 0)
-  const txId = `TEST_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-  await c.env.DB.prepare(`
-    INSERT INTO orders (user_id, order_type, class_id, amount, payment_method, payment_status, transaction_id)
-    VALUES (?, 'class', ?, 0, 'test', 'completed', ?)
-  `).bind(userId, classId, txId).run()
+    if (existingEnrollment) {
+      // Already enrolled, just return success
+      const classinSession = await c.env.DB.prepare(
+        'SELECT * FROM classin_sessions WHERE class_id = ? AND user_id = ?'
+      ).bind(classId, userId).first() as any
 
-  // Remove from cart if exists
-  await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, classId).run()
+      return c.json({
+        success: true,
+        message: '이미 수강 중인 클래스입니다.',
+        classinSession: classinSession ? {
+          joinUrl: classinSession.classin_join_url,
+          classId: classinSession.classin_class_id,
+          isDemo: !c.env.CLASSIN_SID
+        } : null
+      })
+    }
 
-  // Update student count
-  await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(classId).run()
+    // Create enrollment with expires_at
+    await c.env.DB.prepare(`
+      INSERT INTO enrollments (user_id, class_id, expires_at, status)
+      VALUES (?, ?, ?, 'active')
+    `).bind(userId, classId, expiresAt).run()
+    const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, classId).first() as any
 
-  const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
-    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
-    : null
+    // Create test order (amount = 0)
+    const txId = `TEST_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    await c.env.DB.prepare(`
+      INSERT INTO orders (user_id, order_type, class_id, amount, payment_method, payment_status, transaction_id)
+      VALUES (?, 'class', ?, 0, 'test', 'completed', ?)
+    `).bind(userId, classId, txId).run()
 
-  // Assign virtual account to this enrollment
-  let virtualAccountInfo: { accountUid: string; password: string; isRegistered: boolean } | null = null
-  if (enrollment?.id) {
-    const assignResult = await assignVirtualAccountToEnrollment(
-      c.env.DB,
-      enrollment.id,
-      userId,
-      user.name || 'Student',
-      classInConfig
-    )
-    if (assignResult.success) {
-      virtualAccountInfo = {
-        accountUid: assignResult.accountUid!,
-        password: assignResult.password!,
-        isRegistered: assignResult.isRegistered || false
+    // Remove from cart if exists
+    await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, classId).run()
+
+    // Update student count
+    await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(classId).run()
+
+    const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+      ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+      : null
+
+    // Assign virtual account to this enrollment
+    let virtualAccountInfo: { accountUid: string; password: string; isRegistered: boolean } | null = null
+    if (enrollment?.id) {
+      try {
+        const assignResult = await assignVirtualAccountToEnrollment(
+          c.env.DB,
+          enrollment.id,
+          userId,
+          user.name || 'Student',
+          classInConfig
+        )
+        if (assignResult.success) {
+          virtualAccountInfo = {
+            accountUid: assignResult.accountUid!,
+            password: assignResult.password!,
+            isRegistered: assignResult.isRegistered || false
+          }
+        }
+      } catch (e) {
+        console.error('Virtual account assignment error:', e)
       }
     }
+
+    // Create ClassIn session
+    let classinSession = null
+    try {
+      classinSession = await createClassInSession(
+        c.env.DB,
+        classId,
+        userId,
+        enrollment?.id || 0,
+        classInConfig || undefined
+      )
+    } catch (e) {
+      console.error('ClassIn session creation error:', e)
+    }
+
+    return c.json({
+      success: true,
+      message: '테스트 수강신청이 완료되었습니다!',
+      transactionId: txId,
+      virtualAccount: virtualAccountInfo,
+      classinSession: classinSession ? {
+        joinUrl: classinSession.joinUrl,
+        classId: classinSession.classId,
+        isDemo: !c.env.CLASSIN_SID
+      } : null
+    })
+  } catch (e: any) {
+    console.error('Test enroll error:', e)
+    return c.json({ error: e.message || '수강신청 처리 중 오류가 발생했습니다.' }, 500)
   }
-
-  // Create ClassIn session
-  const classinSession = await createClassInSession(
-    c.env.DB,
-    classId,
-    userId,
-    enrollment?.id || 0,
-    classInConfig || undefined
-  )
-
-  return c.json({
-    success: true,
-    message: '테스트 수강신청이 완료되었습니다!',
-    transactionId: txId,
-    virtualAccount: virtualAccountInfo,
-    classinSession: classinSession ? {
-      joinUrl: classinSession.joinUrl,
-      classId: classinSession.classId,
-      isDemo: !c.env.CLASSIN_SID
-    } : null
-  })
 })
 
 // Admin: Create test access code
