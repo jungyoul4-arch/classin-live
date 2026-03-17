@@ -349,6 +349,10 @@ async function createClassInSession(
             } else {
               result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?uid=${studentUid}&classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
             }
+          } else if (existingClassId && !studentUid) {
+            // 가상 계정이 없는 경우 - 일반 입장 URL 사용
+            result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
+            console.log('No studentUid, using general join URL:', result.joinUrl)
           } else if (!result.success) {
             const lessonError = result.error
             result = generateDemoClassInSession(cls, userId)
@@ -2423,7 +2427,7 @@ app.get('/api/user/:userId/classin-account', async (c) => {
 app.get('/api/user/:userId/classin-sessions', async (c) => {
   const userId = c.req.param('userId')
   const { results } = await c.env.DB.prepare(`
-    SELECT cs.*, c.title as class_title, c.slug as class_slug, c.thumbnail as class_thumbnail, 
+    SELECT cs.*, c.title as class_title, c.slug as class_slug, c.thumbnail as class_thumbnail,
            c.schedule_start, c.class_type, c.level,
            i.display_name as instructor_name, i.profile_image as instructor_image
     FROM classin_sessions cs
@@ -2432,6 +2436,35 @@ app.get('/api/user/:userId/classin-sessions', async (c) => {
     WHERE cs.user_id = ?
     ORDER BY cs.scheduled_at ASC
   `).bind(userId).all()
+
+  // join URL이 비어있는 세션이 있으면 재생성 시도
+  const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  for (const session of results as any[]) {
+    if (!session.classin_join_url && session.classin_class_id && session.classin_course_id) {
+      // 빈 URL이면 재생성
+      const enrollment = await c.env.DB.prepare(
+        'SELECT classin_account_uid FROM enrollments WHERE id = ?'
+      ).bind(session.enrollment_id).first() as any
+      const studentUid = enrollment?.classin_account_uid || ''
+
+      let newUrl = ''
+      if (classInConfig && studentUid) {
+        const loginUrlResult = await getClassInLoginUrl(classInConfig, studentUid, session.classin_course_id, session.classin_class_id, 1)
+        newUrl = loginUrlResult.url || `https://www.eeo.cn/client/invoke/index.html?uid=${studentUid}&classId=${session.classin_class_id}&courseId=${session.classin_course_id}&schoolId=${classInConfig.SID}`
+      } else if (classInConfig) {
+        newUrl = `https://www.eeo.cn/client/invoke/index.html?classId=${session.classin_class_id}&courseId=${session.classin_course_id}&schoolId=${classInConfig.SID}`
+      }
+
+      if (newUrl) {
+        await c.env.DB.prepare('UPDATE classin_sessions SET classin_join_url = ? WHERE id = ?').bind(newUrl, session.id).run()
+        session.classin_join_url = newUrl
+      }
+    }
+  }
+
   return c.json(results)
 })
 
