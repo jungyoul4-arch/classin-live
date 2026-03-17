@@ -2346,6 +2346,63 @@ app.post('/api/admin/instructors', async (c) => {
   })
 })
 
+// Update instructor (관리자: 강사 수정)
+app.put('/api/admin/instructors/:id', async (c) => {
+  const instructorId = parseInt(c.req.param('id'))
+  const { name, email, phone, profileImage } = await c.req.json()
+
+  // 강사 정보 조회
+  const instructor = await c.env.DB.prepare(`
+    SELECT i.*, u.id as user_id, u.phone as user_phone FROM instructors i
+    JOIN users u ON i.user_id = u.id
+    WHERE i.id = ?
+  `).bind(instructorId).first() as any
+
+  if (!instructor) {
+    return c.json({ error: '강사를 찾을 수 없습니다.' }, 404)
+  }
+
+  // instructors 테이블 업데이트
+  await c.env.DB.prepare(`
+    UPDATE instructors SET display_name = COALESCE(?, display_name), profile_image = COALESCE(?, profile_image)
+    WHERE id = ?
+  `).bind(name || null, profileImage || null, instructorId).run()
+
+  // users 테이블 업데이트
+  await c.env.DB.prepare(`
+    UPDATE users SET name = COALESCE(?, name), email = COALESCE(?, email), phone = COALESCE(?, phone)
+    WHERE id = ?
+  `).bind(name || null, email || null, phone || null, instructor.user_id).run()
+
+  // 전화번호가 변경되었고 ClassIn 설정이 있으면 재등록
+  let classInResult = null
+  const phoneChanged = phone && phone !== instructor.user_phone
+  if (phoneChanged && c.env.CLASSIN_SID && c.env.CLASSIN_SECRET) {
+    const config = {
+      SID: c.env.CLASSIN_SID,
+      SECRET: c.env.CLASSIN_SECRET,
+      API_BASE: 'https://api.eeo.cn'
+    }
+
+    // 기존 UID 초기화
+    await c.env.DB.prepare(`
+      UPDATE instructors SET classin_uid = NULL, classin_registered_at = NULL WHERE id = ?
+    `).bind(instructorId).run()
+
+    // 새 전화번호로 ClassIn 재등록
+    classInResult = await registerInstructorWithClassIn(c.env.DB, instructorId, config, phone)
+  }
+
+  return c.json({
+    success: true,
+    message: classInResult?.uid
+      ? `강사 정보가 수정되었습니다. ClassIn UID: ${classInResult.uid}`
+      : classInResult?.error
+        ? `강사 정보가 수정되었습니다. (ClassIn 등록 실패: ${classInResult.error})`
+        : '강사 정보가 수정되었습니다.'
+  })
+})
+
 // Delete instructor (관리자: 강사 삭제)
 app.delete('/api/admin/instructors/:id', async (c) => {
   const instructorId = parseInt(c.req.param('id'))
@@ -6090,6 +6147,37 @@ app.get('/admin', async (c) => {
     </div>
   </div>
 
+  <!-- Edit Instructor Modal -->
+  <div id="editInstructorModal" class="fixed inset-0 z-50 hidden">
+    <div class="absolute inset-0 bg-black/50" onclick="closeEditInstructorModal()"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl">
+      <h3 class="text-lg font-bold mb-4"><i class="fas fa-user-edit text-blue-500 mr-2"></i>강사 수정</h3>
+      <input type="hidden" id="editInstructorId" value="">
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">이름 <span class="text-red-500">*</span></label>
+          <input type="text" id="editInstructorName" placeholder="강사 이름" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">이메일 <span class="text-red-500">*</span></label>
+          <input type="email" id="editInstructorEmail" placeholder="instructor@example.com" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">전화번호 (ClassIn 등록용)</label>
+          <input type="text" id="editInstructorPhone" placeholder="010-1234-5678" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">프로필 이미지 URL</label>
+          <input type="text" id="editInstructorImage" placeholder="https://..." class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+        </div>
+      </div>
+      <div class="flex gap-3 mt-6">
+        <button onclick="closeEditInstructorModal()" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg">취소</button>
+        <button onclick="confirmEditInstructor()" class="flex-1 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg">저장</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Add/Edit Class Modal -->
   <div id="classModal" class="fixed inset-0 z-50 hidden overflow-y-auto">
     <div class="absolute inset-0 bg-black/50" onclick="closeClassModal()"></div>
@@ -6340,9 +6428,14 @@ app.get('/admin', async (c) => {
             }
           </td>
           <td class="px-4 py-3">
-            <button onclick="deleteInstructor(\${inst.id}, '\${inst.display_name.replace(/'/g, "\\\\'")}')" class="text-red-500 hover:text-red-700 text-sm">
-              <i class="fas fa-trash-alt"></i>
-            </button>
+            <div class="flex items-center gap-2">
+              <button onclick="openEditInstructorModal(\${inst.id}, '\${inst.display_name.replace(/'/g, "\\\\'")}', '\${(inst.user_email || '').replace(/'/g, "\\\\'")}', '\${(inst.user_phone || '').replace(/'/g, "\\\\'")}', '\${(inst.profile_image || '').replace(/'/g, "\\\\'")}')" class="text-blue-500 hover:text-blue-700 text-sm" title="수정">
+                <i class="fas fa-edit"></i>
+              </button>
+              <button onclick="deleteInstructor(\${inst.id}, '\${inst.display_name.replace(/'/g, "\\\\'")}')" class="text-red-500 hover:text-red-700 text-sm" title="삭제">
+                <i class="fas fa-trash-alt"></i>
+              </button>
+            </div>
           </td>
         </tr>
       \`).join('');
@@ -6358,6 +6451,47 @@ app.get('/admin', async (c) => {
 
     function closeAddInstructorModal() {
       document.getElementById('addInstructorModal').classList.add('hidden');
+    }
+
+    function openEditInstructorModal(id, name, email, phone, profileImage) {
+      document.getElementById('editInstructorId').value = id;
+      document.getElementById('editInstructorName').value = name || '';
+      document.getElementById('editInstructorEmail').value = email || '';
+      document.getElementById('editInstructorPhone').value = phone || '';
+      document.getElementById('editInstructorImage').value = profileImage || '';
+      document.getElementById('editInstructorModal').classList.remove('hidden');
+    }
+
+    function closeEditInstructorModal() {
+      document.getElementById('editInstructorModal').classList.add('hidden');
+    }
+
+    async function confirmEditInstructor() {
+      const id = document.getElementById('editInstructorId').value;
+      const name = document.getElementById('editInstructorName').value.trim();
+      const email = document.getElementById('editInstructorEmail').value.trim();
+      const phone = document.getElementById('editInstructorPhone').value.trim();
+      const profileImage = document.getElementById('editInstructorImage').value.trim();
+
+      if (!name || !email) {
+        showModal('오류', '이름과 이메일은 필수입니다.');
+        return;
+      }
+
+      const res = await fetch('/api/admin/instructors/' + id, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, phone, profileImage })
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        closeEditInstructorModal();
+        showModal('성공', data.message);
+        loadInstructors();
+      } else {
+        showModal('오류', data.error || '수정 실패');
+      }
     }
 
     async function confirmAddInstructor() {
