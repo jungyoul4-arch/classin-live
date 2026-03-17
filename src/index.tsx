@@ -3603,18 +3603,20 @@ async function testEnroll(classId) {
     const data = await res.json();
 
     if (data.success) {
-      alert(data.message);
+      showToast(data.message);
       if (data.classinSession && data.classinSession.joinUrl) {
         if (confirm('ClassIn 수업방으로 이동하시겠습니까?')) {
           window.open(data.classinSession.joinUrl, '_blank');
         }
       }
-      loadMyPage();
+      // Refresh page to show enrollment
+      window.location.reload();
     } else {
       alert(data.error || '수강신청에 실패했습니다.');
     }
   } catch (e) {
-    alert('서버 오류가 발생했습니다.');
+    console.error('testEnroll error:', e);
+    alert('서버 오류가 발생했습니다: ' + (e.message || e));
   }
 }
 
