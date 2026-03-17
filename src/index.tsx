@@ -1223,9 +1223,8 @@ app.post('/api/test-account/enroll', async (c) => {
         const newSession = await createClassInSession(
           c.env.DB,
           classId,
-          existingEnrollment.id,
           userId,
-          user.name || 'Student',
+          existingEnrollment.id,
           classInConfig
         )
 
