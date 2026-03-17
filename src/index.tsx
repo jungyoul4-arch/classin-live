@@ -2695,7 +2695,7 @@ app.get('/api/user/:userId/classin-sessions', async (c) => {
 // Get specific ClassIn session detail (for classroom entry page)
 app.get('/api/classin-session/:sessionId', async (c) => {
   const sessionId = c.req.param('sessionId')
-  const session = await c.env.DB.prepare(`
+  const session: any = await c.env.DB.prepare(`
     SELECT cs.*, c.title as class_title, c.slug as class_slug, c.thumbnail as class_thumbnail,
            c.description as class_description, c.schedule_start, c.duration_minutes as class_duration,
            c.total_lessons, c.class_type, c.level,
@@ -2707,6 +2707,32 @@ app.get('/api/classin-session/:sessionId', async (c) => {
     WHERE cs.id = ?
   `).bind(sessionId).first()
   if (!session) return c.json({ error: 'Session not found' }, 404)
+
+  // 종료된 수업의 경우 replay_url 설정 (다시보기용)
+  const startTime = session.scheduled_at ? new Date(session.scheduled_at).getTime() : 0
+  const duration = (session.duration_minutes || 60) * 60 * 1000
+  const isEnded = session.status === 'ended' || (startTime > 0 && (startTime + duration) < Date.now())
+
+  if (isEnded) {
+    // classin_live_url이 없으면 webcast API 호출
+    if (!session.classin_live_url && session.classin_course_id && session.classin_class_id) {
+      const classInConfig = await getClassInConfig(c.env.DB)
+      if (classInConfig) {
+        const webcastResult = await getClassInWebcastUrl(classInConfig, session.classin_course_id, session.classin_class_id)
+        if (webcastResult.url) {
+          await c.env.DB.prepare('UPDATE classin_sessions SET classin_live_url = ?, status = ? WHERE id = ?')
+            .bind(webcastResult.url, 'ended', session.id).run()
+          session.classin_live_url = webcastResult.url
+          session.status = 'ended'
+        }
+      }
+    }
+    // replay_url 설정
+    if (session.classin_live_url) {
+      session.replay_url = session.classin_live_url
+    }
+  }
+
   return c.json(session)
 })
 
@@ -5060,7 +5086,7 @@ ${navHTML}
         `}
         
         <!-- Join Button -->
-        <a href="${session.status === 'ended' && session.replay_url ? session.replay_url : session.classin_join_url}" target="_blank" rel="noopener" class="w-full h-14 ${session.status === 'ended' ? 'bg-green-500 hover:bg-green-600 shadow-green-500/30' : 'bg-blue-500 hover:bg-blue-600 shadow-blue-500/30'} text-white font-bold rounded-2xl transition-all shadow-lg flex items-center justify-center gap-3 text-lg mb-3">
+        <a href="${session.status === 'ended' && session.classin_live_url ? session.classin_live_url : session.classin_join_url}" target="_blank" rel="noopener" class="w-full h-14 ${session.status === 'ended' ? 'bg-green-500 hover:bg-green-600 shadow-green-500/30' : 'bg-blue-500 hover:bg-blue-600 shadow-blue-500/30'} text-white font-bold rounded-2xl transition-all shadow-lg flex items-center justify-center gap-3 text-lg mb-3">
           <i class="fas ${session.status === 'ended' ? 'fa-play-circle' : 'fa-door-open'}"></i>
           ${session.status === 'ended' ? 'ClassIn 수업 다시보기' : 'ClassIn 수업방 입장하기'}
         </a>
