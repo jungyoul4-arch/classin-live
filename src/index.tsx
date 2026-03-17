@@ -173,6 +173,40 @@ async function createClassInLesson(
   }
 }
 
+// ClassIn API: Get webcast/replay URL for a class
+async function getClassInWebcastUrl(
+  config: ClassInConfig,
+  courseId: string,
+  classId?: string
+): Promise<{ url?: string; error?: string }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('courseId', courseId)
+  if (classId) formData.set('classId', classId)
+
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=getWebcastUrl`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const data = await res.json() as any
+    console.log('getWebcastUrl response:', JSON.stringify(data))
+
+    if (data.error_info?.errno === 1 && data.data) {
+      return { url: data.data }
+    }
+    return { error: translateClassInError(data.error_info?.error || 'Failed to get webcast URL') }
+  } catch (e: any) {
+    return { error: e.message || 'Network error' }
+  }
+}
+
 // ClassIn API: Get login linked URL for classroom entry
 async function getClassInLoginUrl(
   config: ClassInConfig,
@@ -1645,6 +1679,32 @@ app.post('/api/admin/debug/lms-classroom', async (c) => {
   })
 })
 
+// Debug: 녹화 재생 URL 조회 테스트
+app.post('/api/admin/debug/webcast-url', async (c) => {
+  const { courseId, classId } = await c.req.json()
+
+  const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  if (!config) {
+    return c.json({ error: 'ClassIn API not configured' }, 500)
+  }
+
+  if (!courseId) {
+    return c.json({ error: 'courseId is required' }, 400)
+  }
+
+  const result = await getClassInWebcastUrl(config, courseId, classId)
+
+  return c.json({
+    api: 'getWebcastUrl',
+    endpoint: '/partner/api/course.api.php?action=getWebcastUrl',
+    params: { courseId, classId },
+    result
+  })
+})
+
 // ==================== ClassIn 수업 관리 API ====================
 
 // 관리자: ClassIn 수업 생성 (시간 지정)
@@ -2586,8 +2646,8 @@ app.get('/api/user/:userId/classin-sessions', async (c) => {
     : null
 
   for (const session of results as any[]) {
+    // join URL이 비어있으면 재생성
     if (!session.classin_join_url && session.classin_class_id && session.classin_course_id) {
-      // 빈 URL이면 재생성
       const enrollment = await c.env.DB.prepare(
         'SELECT classin_account_uid FROM enrollments WHERE id = ?'
       ).bind(session.enrollment_id).first() as any
@@ -2605,6 +2665,27 @@ app.get('/api/user/:userId/classin-sessions', async (c) => {
         await c.env.DB.prepare('UPDATE classin_sessions SET classin_join_url = ? WHERE id = ?').bind(newUrl, session.id).run()
         session.classin_join_url = newUrl
       }
+    }
+
+    // 종료된 수업의 경우 webcast URL 가져오기 (다시보기용)
+    const startTime = session.scheduled_at ? new Date(session.scheduled_at).getTime() : 0
+    const duration = (session.duration_minutes || 60) * 60 * 1000
+    const isEnded = session.status === 'ended' || (startTime > 0 && (startTime + duration) < Date.now())
+
+    if (isEnded && !session.classin_live_url && session.classin_course_id && session.classin_class_id && classInConfig) {
+      // 다시보기 URL(webcast) 가져오기
+      const webcastResult = await getClassInWebcastUrl(classInConfig, session.classin_course_id, session.classin_class_id)
+      if (webcastResult.url) {
+        await c.env.DB.prepare('UPDATE classin_sessions SET classin_live_url = ?, status = ? WHERE id = ?')
+          .bind(webcastResult.url, 'ended', session.id).run()
+        session.classin_live_url = webcastResult.url
+        session.status = 'ended'
+      }
+    }
+
+    // 종료된 수업은 다시보기 URL 사용
+    if (isEnded && session.classin_live_url) {
+      session.replay_url = session.classin_live_url
     }
   }
 
@@ -3940,7 +4021,7 @@ async function loadMyPageTab(tab) {
               <span class="text-[11px] text-gray-400">\${session.scheduled_at ? new Date(session.scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric'}) : ''}</span>
             </div>
             <div class="flex gap-2">
-              <a href="\${session.classin_join_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-green-500 hover:bg-green-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all">
+              <a href="\${session.replay_url || session.classin_join_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-green-500 hover:bg-green-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all">
                 <i class="fas fa-play-circle"></i> 다시 보기
               </a>
               <a href="/classroom/\${session.id}" onclick="event.stopPropagation()" class="h-8 px-3 border border-gray-200 text-dark-600 text-xs font-medium rounded-lg flex items-center justify-center gap-1 hover:bg-gray-50 transition-all">
@@ -4979,7 +5060,7 @@ ${navHTML}
         `}
         
         <!-- Join Button -->
-        <a href="${session.classin_join_url}" target="_blank" rel="noopener" class="w-full h-14 ${session.status === 'ended' ? 'bg-green-500 hover:bg-green-600 shadow-green-500/30' : 'bg-blue-500 hover:bg-blue-600 shadow-blue-500/30'} text-white font-bold rounded-2xl transition-all shadow-lg flex items-center justify-center gap-3 text-lg mb-3">
+        <a href="${session.status === 'ended' && session.replay_url ? session.replay_url : session.classin_join_url}" target="_blank" rel="noopener" class="w-full h-14 ${session.status === 'ended' ? 'bg-green-500 hover:bg-green-600 shadow-green-500/30' : 'bg-blue-500 hover:bg-blue-600 shadow-blue-500/30'} text-white font-bold rounded-2xl transition-all shadow-lg flex items-center justify-center gap-3 text-lg mb-3">
           <i class="fas ${session.status === 'ended' ? 'fa-play-circle' : 'fa-door-open'}"></i>
           ${session.status === 'ended' ? 'ClassIn 수업 다시보기' : 'ClassIn 수업방 입장하기'}
         </a>
