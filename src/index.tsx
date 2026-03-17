@@ -3693,9 +3693,19 @@ async function loadMyPageTab(tab) {
           \${session ? \`
           <div class="mt-2 pt-2 border-t border-gray-50">
             <div class="flex items-center gap-2 mb-2">
-              <span class="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-bold rounded">\${session.status === 'ready' ? 'ClassIn 준비됨' : session.status === 'live' ? 'LIVE 진행중' : session.status === 'ended' ? '수업 종료' : 'ClassIn'}</span>
+              <span class="px-1.5 py-0.5 \${session.status === 'ended' || (session.scheduled_at && new Date(session.scheduled_at) < new Date()) ? 'bg-gray-100 text-gray-600' : 'bg-blue-100 text-blue-700'} text-[10px] font-bold rounded">\${session.status === 'ended' || (session.scheduled_at && new Date(session.scheduled_at) < new Date()) ? '수업종료-미수강' : session.status === 'ready' ? 'ClassIn 준비됨' : session.status === 'live' ? 'LIVE 진행중' : 'ClassIn'}</span>
               <span class="text-[11px] text-gray-400">\${session.scheduled_at ? new Date(session.scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : ''}</span>
             </div>
+            \${session.status === 'ended' || (session.scheduled_at && new Date(session.scheduled_at) < new Date()) ? \`
+            <div class="flex gap-2">
+              <a href="\${session.classin_join_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-gray-400 hover:bg-gray-500 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all">
+                <i class="fas fa-play-circle"></i> 다시 보기
+              </a>
+              <a href="/classroom/\${session.id}" onclick="event.stopPropagation()" class="h-8 px-3 border border-gray-200 text-dark-600 text-xs font-medium rounded-lg flex items-center justify-center gap-1 hover:bg-gray-50 transition-all">
+                <i class="fas fa-info-circle"></i> 상세
+              </a>
+            </div>
+            \` : \`
             <div class="flex gap-2">
               <a href="\${session.classin_join_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all">
                 <i class="fas fa-door-open"></i> 수업 입장
@@ -3704,6 +3714,7 @@ async function loadMyPageTab(tab) {
                 <i class="fas fa-info-circle"></i> 상세
               </a>
             </div>
+            \`}
           </div>
           \` : ''}
         </div>
