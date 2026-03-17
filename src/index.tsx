@@ -126,7 +126,37 @@ async function createClassInCourse(config: ClassInConfig, courseName: string, te
   }
 }
 
-// ClassIn API: Create Class (Lesson) and get live URL
+// LMS API v2 서명 생성 (MD5 방식)
+async function generateLmsSignature(params: Record<string, any>, sid: string, secret: string, timestamp: number): Promise<string> {
+  // 1. sid와 timeStamp 추가
+  const allParams: Record<string, any> = { ...params, sid, timeStamp: timestamp }
+
+  // 2. 배열/객체 제외, 1024바이트 초과 제외
+  const filteredParams: Record<string, string> = {}
+  for (const [key, value] of Object.entries(allParams)) {
+    if (typeof value !== 'object' && String(value).length <= 1024) {
+      filteredParams[key] = String(value)
+    }
+  }
+
+  // 3. ASCII 오름차순 정렬 후 URL 형식으로 연결
+  const sortedKeys = Object.keys(filteredParams).sort()
+  const queryString = sortedKeys.map(k => `${k}=${filteredParams[k]}`).join('&')
+
+  // 4. &key=secret 추가
+  const signString = `${queryString}&key=${secret}`
+
+  // 5. MD5 해시 (32비트 소문자)
+  const encoder = new TextEncoder()
+  const data = encoder.encode(signString)
+  const hashBuffer = await crypto.subtle.digest('MD5', data)
+  const hashArray = Array.from(new Uint8Array(hashBuffer))
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+
+  return hashHex
+}
+
+// ClassIn API: Create Class (Lesson) via LMS API
 async function createClassInLesson(
   config: ClassInConfig,
   courseId: string,
@@ -136,38 +166,47 @@ async function createClassInLesson(
   teacherUid: string,
   options?: { live?: number; record?: number; seatNum?: number }
 ): Promise<ClassInSessionResult> {
+  // LMS API 사용 (가상계정 시스템용)
   const timestamp = Math.floor(Date.now() / 1000)
-  const safeKey = await generateSafeKey(config.SECRET, timestamp)
-  
-  const formData = new URLSearchParams()
-  formData.set('SID', config.SID)
-  formData.set('safeKey', safeKey)
-  formData.set('timeStamp', timestamp.toString())
-  formData.set('courseId', courseId)
-  formData.set('className', className)
-  formData.set('beginTime', beginTime.toString())
-  formData.set('endTime', endTime.toString())
-  formData.set('teacherUid', teacherUid)
-  if (options?.live !== undefined) formData.set('live', options.live.toString())
-  if (options?.record !== undefined) formData.set('record', options.record.toString())
-  if (options?.seatNum !== undefined) formData.set('seatNum', options.seatNum.toString())
-  
+
+  const bodyParams = {
+    courseId: parseInt(courseId),
+    name: className,
+    teacherUid: parseInt(teacherUid),
+    startTime: beginTime,
+    endTime: endTime,
+    recordState: options?.record ?? 1,  // 기본 녹화 활성화
+    liveState: options?.live ?? 0,      // 라이브 스트리밍
+    seatNum: options?.seatNum ?? 7,
+    isHd: 1
+  }
+
+  const signature = await generateLmsSignature(bodyParams, config.SID, config.SECRET, timestamp)
+
   try {
-    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addCourseClass`, {
+    const res = await fetch(`${config.API_BASE}/lms/activity/createClass`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: formData.toString()
+      headers: {
+        'Content-Type': 'application/json',
+        'X-EEO-SIGN': signature,
+        'X-EEO-UID': config.SID,
+        'X-EEO-TS': timestamp.toString()
+      },
+      body: JSON.stringify(bodyParams)
     })
+
     const data = await res.json() as any
-    if (data.error_info?.errno === 1) {
+    console.log('LMS createClass response:', JSON.stringify(data))
+
+    if (data.code === 1 && data.data) {
       return {
         success: true,
-        classId: data.data?.toString(),
-        liveUrl: data.live_url || '',
-        joinUrl: data.live_url || `https://www.classin.com/classroom?classId=${data.data}`
+        classId: data.data.classId?.toString(),
+        liveUrl: data.data.live_url || '',
+        joinUrl: data.data.live_url || `https://www.eeo.cn/client/invoke/index.html?classId=${data.data.classId}&courseId=${courseId}&schoolId=${config.SID}`
       }
     }
-    return { success: false, error: translateClassInError(data.error_info?.error || 'Failed to create lesson') }
+    return { success: false, error: data.msg || 'Failed to create lesson via LMS API' }
   } catch (e: any) {
     return { success: false, error: e.message || 'Network error' }
   }
@@ -1569,37 +1608,7 @@ app.post('/api/admin/debug/classin-session', async (c) => {
 
 // ==================== LMS API (createClassroom) 테스트 ====================
 
-// LMS API v2 서명 생성 (MD5 방식)
-async function generateLmsSignature(params: Record<string, any>, sid: string, secret: string, timestamp: number): Promise<string> {
-  // 1. sid와 timeStamp 추가
-  const allParams: Record<string, any> = { ...params, sid, timeStamp: timestamp }
-
-  // 2. 배열/객체 제외, 1024바이트 초과 제외
-  const filteredParams: Record<string, string> = {}
-  for (const [key, value] of Object.entries(allParams)) {
-    if (typeof value !== 'object' && String(value).length <= 1024) {
-      filteredParams[key] = String(value)
-    }
-  }
-
-  // 3. ASCII 오름차순 정렬 후 URL 형식으로 연결
-  const sortedKeys = Object.keys(filteredParams).sort()
-  const queryString = sortedKeys.map(k => `${k}=${filteredParams[k]}`).join('&')
-
-  // 4. &key=secret 추가
-  const signString = `${queryString}&key=${secret}`
-
-  // 5. MD5 해시 (32비트 소문자)
-  const encoder = new TextEncoder()
-  const data = encoder.encode(signString)
-  const hashBuffer = await crypto.subtle.digest('MD5', data)
-  const hashArray = Array.from(new Uint8Array(hashBuffer))
-  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
-
-  return hashHex
-}
-
-// LMS createClassroom API 호출
+// LMS createClassroom API 호출 (테스트/디버그용)
 async function lmsCreateClassroom(
   config: ClassInConfig,
   params: {
