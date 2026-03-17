@@ -1502,6 +1502,149 @@ app.post('/api/admin/debug/classin-session', async (c) => {
   })
 })
 
+// ==================== LMS API (createClassroom) 테스트 ====================
+
+// LMS API v2 서명 생성 (MD5 방식)
+async function generateLmsSignature(params: Record<string, any>, sid: string, secret: string, timestamp: number): Promise<string> {
+  // 1. sid와 timeStamp 추가
+  const allParams: Record<string, any> = { ...params, sid, timeStamp: timestamp }
+
+  // 2. 배열/객체 제외, 1024바이트 초과 제외
+  const filteredParams: Record<string, string> = {}
+  for (const [key, value] of Object.entries(allParams)) {
+    if (typeof value !== 'object' && String(value).length <= 1024) {
+      filteredParams[key] = String(value)
+    }
+  }
+
+  // 3. ASCII 오름차순 정렬 후 URL 형식으로 연결
+  const sortedKeys = Object.keys(filteredParams).sort()
+  const queryString = sortedKeys.map(k => `${k}=${filteredParams[k]}`).join('&')
+
+  // 4. &key=secret 추가
+  const signString = `${queryString}&key=${secret}`
+
+  // 5. MD5 해시 (32비트 소문자)
+  const encoder = new TextEncoder()
+  const data = encoder.encode(signString)
+  const hashBuffer = await crypto.subtle.digest('MD5', data)
+  const hashArray = Array.from(new Uint8Array(hashBuffer))
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+
+  return hashHex
+}
+
+// LMS createClassroom API 호출
+async function lmsCreateClassroom(
+  config: ClassInConfig,
+  params: {
+    courseId: number
+    name: string
+    teacherUid: number
+    startTime: number
+    endTime: number
+    recordState?: number  // 0=off, 1=on (녹화)
+    liveState?: number    // 0=off, 1=on (라이브 스트리밍)
+    seatNum?: number
+    isHd?: number
+  }
+): Promise<{ success: boolean; data?: any; error?: string; rawResponse?: any }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+
+  const bodyParams = {
+    courseId: params.courseId,
+    name: params.name,
+    teacherUid: params.teacherUid,
+    startTime: params.startTime,
+    endTime: params.endTime,
+    recordState: params.recordState ?? 1,  // 기본 녹화 활성화
+    liveState: params.liveState ?? 0,
+    seatNum: params.seatNum ?? 7,
+    isHd: params.isHd ?? 1
+  }
+
+  const signature = await generateLmsSignature(bodyParams, config.SID, config.SECRET, timestamp)
+
+  try {
+    const res = await fetch(`${config.API_BASE}/lms/activity/createClass`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-EEO-SIGN': signature,
+        'X-EEO-UID': config.SID,
+        'X-EEO-TS': timestamp.toString()
+      },
+      body: JSON.stringify(bodyParams)
+    })
+
+    const data = await res.json() as any
+    console.log('LMS createClassroom response:', JSON.stringify(data))
+
+    if (data.code === 1) {
+      return {
+        success: true,
+        data: {
+          activityId: data.data?.activityId,
+          classId: data.data?.classId,
+          name: data.data?.name,
+          liveUrl: data.data?.live_url,
+          liveInfo: data.data?.live_info
+        },
+        rawResponse: data
+      }
+    }
+
+    return { success: false, error: data.msg || 'Unknown error', rawResponse: data }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
+// Debug: LMS createClassroom API 테스트
+app.post('/api/admin/debug/lms-classroom', async (c) => {
+  const { courseId, name, teacherUid, startTime, endTime, recordState, liveState } = await c.req.json()
+
+  const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  if (!config) {
+    return c.json({ error: 'ClassIn API not configured' }, 500)
+  }
+
+  if (!courseId || !name || !teacherUid || !startTime || !endTime) {
+    return c.json({
+      error: 'Required parameters: courseId, name, teacherUid, startTime, endTime',
+      example: {
+        courseId: 12345,
+        name: '테스트 수업',
+        teacherUid: 67890,
+        startTime: Math.floor(Date.now() / 1000) + 300,  // 5분 후
+        endTime: Math.floor(Date.now() / 1000) + 3900,   // 65분 후
+        recordState: 1,  // 녹화 활성화
+        liveState: 0     // 라이브 스트리밍 비활성화
+      }
+    }, 400)
+  }
+
+  const result = await lmsCreateClassroom(config, {
+    courseId,
+    name,
+    teacherUid,
+    startTime,
+    endTime,
+    recordState: recordState ?? 1,
+    liveState: liveState ?? 0
+  })
+
+  return c.json({
+    api: 'LMS createClassroom',
+    endpoint: '/lms/activity/createClass',
+    params: { courseId, name, teacherUid, startTime, endTime, recordState, liveState },
+    result
+  })
+})
+
 // ==================== ClassIn 수업 관리 API ====================
 
 // 관리자: ClassIn 수업 생성 (시간 지정)
