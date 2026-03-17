@@ -175,8 +175,11 @@ async function createClassInLesson(
     teacherUid: parseInt(teacherUid),
     startTime: beginTime,
     endTime: endTime,
-    recordState: options?.record ?? 1,  // 기본 녹화 활성화
-    liveState: options?.live ?? 0,      // 라이브 스트리밍
+    // 녹화/스트리밍 파라미터는 세트로 전달해야 함
+    recordState: options?.record ?? 1,  // 1=녹화 활성화
+    recordType: 0,                       // 0=교실 전체 녹화
+    liveState: options?.live ?? 0,       // 0=라이브 스트리밍 비활성화
+    openState: 1,                        // 1=웹 다시보기 활성화
     seatNum: options?.seatNum ?? 7,
     isHd: 1
   }
@@ -1631,8 +1634,11 @@ async function lmsCreateClassroom(
     teacherUid: params.teacherUid,
     startTime: params.startTime,
     endTime: params.endTime,
-    recordState: params.recordState ?? 1,  // 기본 녹화 활성화
-    liveState: params.liveState ?? 0,
+    // 녹화/스트리밍 파라미터는 세트로 전달해야 함
+    recordState: params.recordState ?? 1,  // 1=녹화 활성화
+    recordType: 0,                          // 0=교실 전체 녹화
+    liveState: params.liveState ?? 0,       // 0=라이브 스트리밍 비활성화
+    openState: 1,                           // 1=웹 다시보기 활성화
     seatNum: params.seatNum ?? 7,
     isHd: params.isHd ?? 1
   }
