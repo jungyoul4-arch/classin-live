@@ -3861,7 +3861,7 @@ function showToast(msg) {
   toast.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 z-[200] px-5 py-3 bg-dark-800 text-white text-sm font-medium rounded-xl shadow-lg fade-in';
   toast.textContent = msg;
   document.body.appendChild(toast);
-  setTimeout(() => toast.remove(), 2500);
+  setTimeout(() => toast.remove(), 4000);
 }
 
 function formatPrice(price) { return price?.toLocaleString() + '원'; }
