@@ -746,7 +746,7 @@ async function assignVirtualAccountToEnrollment(
     SELECT * FROM classin_virtual_accounts
     WHERE user_id = ? AND status = 'assigned'
     ORDER BY assigned_at DESC LIMIT 1
-  `).first() as any
+  `).bind(userId).first() as any
 
   if (existingAccount) {
     // 이미 할당된 계정이 있으면 재사용
