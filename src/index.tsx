@@ -417,32 +417,34 @@ async function createClassInSession(
               }
             }
           } else {
-            // 기존 수업 사용 - studentUid가 있으면 포함, 없으면 일반 URL
-            const baseUrl = `https://www.eeo.cn/client/invoke/index.html?classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
+            // 기존 수업 사용
             result = {
               success: true,
               courseId: courseId,
               classId: existingClassId,
-              joinUrl: studentUid ? `${baseUrl}&uid=${studentUid}` : baseUrl,
+              joinUrl: '',
               liveUrl: ''
             }
             console.log('Using existing ClassIn course/class:', courseId, existingClassId, 'studentUid:', studentUid)
           }
 
-          // [TEST] getLoginLinked API 대신 수업 생성 시 받은 URL 형식 사용 (uid 포함)
-          // 학생 전용 입장 URL 생성 - 주석 처리
-          // if (existingClassId && studentUid) {
-          //   const loginUrlResult = await getClassInLoginUrl(config, studentUid, courseId, existingClassId, 1)
-          //   if (loginUrlResult.url) {
-          //     result.joinUrl = loginUrlResult.url
-          //   } else {
-          //     result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?uid=${studentUid}&classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
-          //   }
-          // } else if (existingClassId && !studentUid) {
-          //   // 가상 계정이 없는 경우 - 일반 입장 URL 사용
-          //   result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
-          //   console.log('No studentUid, using general join URL:', result.joinUrl)
-          // } else
+          // getLoginLinked API로 로그인 토큰 포함된 URL 생성
+          if (existingClassId && studentUid) {
+            const loginUrlResult = await getClassInLoginUrl(config, studentUid, courseId, existingClassId, 1)
+            if (loginUrlResult.url) {
+              result.joinUrl = loginUrlResult.url
+              console.log('Got loginLinked URL for student:', studentUid)
+            } else {
+              // fallback URL
+              result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?uid=${studentUid}&classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
+              console.log('getLoginLinked failed, using fallback URL:', loginUrlResult.error)
+            }
+          } else if (existingClassId && !studentUid) {
+            // 가상 계정이 없는 경우 - 일반 입장 URL 사용
+            result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
+            console.log('No studentUid, using general join URL:', result.joinUrl)
+          }
+
           if (!result.success) {
             const lessonError = result.error
             result = generateDemoClassInSession(cls, userId)
@@ -749,17 +751,19 @@ async function assignVirtualAccountToEnrollment(
   `).bind(userId).first() as any
 
   if (existingAccount) {
-    // 이미 할당된 계정이 있으면 재사용
+    // 이미 할당된 계정이 있으면 재사용 (classin_uid 사용)
+    const existingClassInUid = existingAccount.classin_uid || existingAccount.account_uid
     await db.prepare(`
       UPDATE enrollments
       SET classin_account_uid = ?, classin_account_password = ?, classin_assigned_at = datetime('now')
       WHERE id = ?
-    `).bind(existingAccount.account_uid, existingAccount.account_password, enrollmentId).run()
+    `).bind(existingClassInUid, existingAccount.account_password, enrollmentId).run()
 
+    console.log('Reusing existing account, ClassIn UID:', existingClassInUid)
     return {
       success: true,
       accountUid: existingAccount.account_uid,
-      classInUid: existingAccount.account_uid,
+      classInUid: existingClassInUid,
       password: existingAccount.account_password,
       isRegistered: existingAccount.is_registered === 1
     }
@@ -801,20 +805,22 @@ async function assignVirtualAccountToEnrollment(
     }
   }
 
-  // Update virtual account status
+  // Update virtual account status (classin_uid도 저장)
   await db.prepare(`
     UPDATE classin_virtual_accounts
     SET user_id = ?, assigned_at = datetime('now'), assigned_name = ?,
-        account_password = ?, is_registered = ?, status = 'assigned', updated_at = datetime('now')
+        account_password = ?, is_registered = ?, classin_uid = ?, status = 'assigned', updated_at = datetime('now')
     WHERE id = ?
-  `).bind(userId, userName, password, isRegistered ? 1 : 0, availableAccount.id).run()
+  `).bind(userId, userName, password, isRegistered ? 1 : 0, classInUid, availableAccount.id).run()
 
-  // Update enrollment with ClassIn UID
+  // Update enrollment with ClassIn UID (실제 ClassIn UID 사용)
   await db.prepare(`
     UPDATE enrollments
     SET classin_account_uid = ?, classin_account_password = ?, classin_assigned_at = datetime('now')
     WHERE id = ?
   `).bind(classInUid, password, enrollmentId).run()
+
+  console.log('Saved ClassIn UID to enrollment:', classInUid, 'for enrollmentId:', enrollmentId)
 
   return {
     success: true,
