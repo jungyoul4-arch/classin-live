@@ -181,7 +181,9 @@ async function createClassInLesson(
     liveState: options?.live ?? 0,       // 0=라이브 스트리밍 비활성화
     openState: 1,                        // 1=웹 다시보기 활성화
     seatNum: options?.seatNum ?? 7,
-    isHd: 1
+    isHd: 1,
+    cameraHide: 0,       // 0=좌석 영역 표시 (학생 카메라 보임)
+    isAutoOnstage: 1     // 1=학생 자동 무대 입장
   }
 
   const signature = await generateLmsSignature(bodyParams, config.SID, config.SECRET, timestamp)
