@@ -782,16 +782,23 @@ async function assignVirtualAccountToEnrollment(
 
   const password = availableAccount.account_password || generateDefaultPassword()
   let isRegistered = availableAccount.is_registered === 1
-  let classInUid = availableAccount.account_uid
+  // 기존에 저장된 classin_uid가 있으면 사용, 없으면 account_uid로 초기화
+  let classInUid = availableAccount.classin_uid || availableAccount.account_uid
 
   // Register or update nickname with ClassIn API if configured
   if (classInConfig) {
-    // 항상 registerVirtualAccount 호출 (이미 등록된 계정도 UID 반환됨)
+    // 항상 registerVirtualAccount 호출 시도
     const regResult = await registerVirtualAccount(classInConfig, availableAccount.account_uid, userName, password)
     if (regResult.success && regResult.uid) {
       classInUid = regResult.uid
       isRegistered = true
-      console.log('Got ClassIn UID:', classInUid, 'for account:', availableAccount.account_uid)
+      console.log('Got ClassIn UID from register:', classInUid, 'for account:', availableAccount.account_uid)
+    } else if (availableAccount.classin_uid) {
+      // register 실패했지만 기존 classin_uid가 있으면 사용
+      classInUid = availableAccount.classin_uid
+      console.log('Register failed, using existing ClassIn UID:', classInUid)
+    } else {
+      console.log('Register failed and no existing ClassIn UID:', regResult.error)
     }
 
     // 이미 등록된 계정은 닉네임 업데이트 (register는 첫 등록 시에만 닉네임 적용)
