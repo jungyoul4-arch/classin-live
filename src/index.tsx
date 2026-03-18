@@ -375,7 +375,8 @@ async function createClassInSession(
         if (courseId) {
           // 학생을 코스에 추가 (이미 추가된 경우 무시됨)
           if (studentUid) {
-            await addStudentToCourse(config, courseId, studentUid)
+            const addResult = await addStudentToCourse(config, courseId, studentUid)
+            console.log('addStudentToCourse result:', JSON.stringify(addResult), 'studentUid:', studentUid, 'courseId:', courseId)
           }
 
           // 수업(레슨)이 없으면 새로 생성
@@ -590,6 +591,39 @@ async function editUserInfo(
   }
 }
 
+// ClassIn API: Add student to school/institution (기관에 학생 추가 - 필수!)
+async function addSchoolStudent(
+  config: ClassInConfig,
+  studentAccount: string,  // 전화번호 형식: 0065-20000531700
+  studentName: string
+): Promise<{ success: boolean; error?: string }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('studentAccount', studentAccount)
+  formData.set('studentName', studentName)
+
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addSchoolStudent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const data = await res.json() as any
+    console.log('addSchoolStudent response:', JSON.stringify(data))
+    if (data.error_info?.errno === 1) {
+      return { success: true }
+    }
+    return { success: false, error: translateClassInError(data.error_info?.error || 'Failed to add student to school') }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
 // ClassIn API: Add student to course (수강생을 코스에 추가)
 async function addStudentToCourse(
   config: ClassInConfig,
@@ -614,6 +648,7 @@ async function addStudentToCourse(
       body: formData.toString()
     })
     const data = await res.json() as any
+    console.log('addCourseStudent response:', JSON.stringify(data))
     if (data.error_info?.errno === 1) {
       return { success: true }
     }
@@ -810,6 +845,10 @@ async function assignVirtualAccountToEnrollment(
     } else {
       console.log('Register failed and no existing ClassIn UID:', regResult.error)
     }
+
+    // 기관(school)에 학생 추가 (필수! 이것이 없으면 수업 배정 불가)
+    const schoolResult = await addSchoolStudent(classInConfig, availableAccount.account_uid, userName)
+    console.log('addSchoolStudent result:', JSON.stringify(schoolResult))
 
     // 이미 등록된 계정은 닉네임 업데이트 (register는 첫 등록 시에만 닉네임 적용)
     if (isRegistered && classInUid) {
