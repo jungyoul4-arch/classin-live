@@ -406,32 +406,44 @@ async function createClassInSession(
                 UPDATE classes SET classin_course_id = ?, classin_class_id = ?, classin_created_at = datetime('now') WHERE id = ?
               `).bind(courseId, result.classId, classId).run()
               existingClassId = result.classId
+
+              // 새 수업 생성 시에도 studentUid를 URL에 포함
+              if (studentUid && result.joinUrl) {
+                result.joinUrl = result.joinUrl.includes('uid=')
+                  ? result.joinUrl
+                  : `${result.joinUrl}&uid=${studentUid}`
+              } else if (studentUid && !result.joinUrl) {
+                result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?classId=${result.classId}&courseId=${courseId}&schoolId=${config.SID}&uid=${studentUid}`
+              }
             }
           } else {
-            // 기존 수업 사용
+            // 기존 수업 사용 - studentUid가 있으면 포함, 없으면 일반 URL
+            const baseUrl = `https://www.eeo.cn/client/invoke/index.html?classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
             result = {
               success: true,
               courseId: courseId,
               classId: existingClassId,
-              joinUrl: '',
+              joinUrl: studentUid ? `${baseUrl}&uid=${studentUid}` : baseUrl,
               liveUrl: ''
             }
-            console.log('Using existing ClassIn course/class:', courseId, existingClassId)
+            console.log('Using existing ClassIn course/class:', courseId, existingClassId, 'studentUid:', studentUid)
           }
 
-          // 학생 전용 입장 URL 생성
-          if (existingClassId && studentUid) {
-            const loginUrlResult = await getClassInLoginUrl(config, studentUid, courseId, existingClassId, 1)
-            if (loginUrlResult.url) {
-              result.joinUrl = loginUrlResult.url
-            } else {
-              result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?uid=${studentUid}&classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
-            }
-          } else if (existingClassId && !studentUid) {
-            // 가상 계정이 없는 경우 - 일반 입장 URL 사용
-            result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
-            console.log('No studentUid, using general join URL:', result.joinUrl)
-          } else if (!result.success) {
+          // [TEST] getLoginLinked API 대신 수업 생성 시 받은 URL 형식 사용 (uid 포함)
+          // 학생 전용 입장 URL 생성 - 주석 처리
+          // if (existingClassId && studentUid) {
+          //   const loginUrlResult = await getClassInLoginUrl(config, studentUid, courseId, existingClassId, 1)
+          //   if (loginUrlResult.url) {
+          //     result.joinUrl = loginUrlResult.url
+          //   } else {
+          //     result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?uid=${studentUid}&classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
+          //   }
+          // } else if (existingClassId && !studentUid) {
+          //   // 가상 계정이 없는 경우 - 일반 입장 URL 사용
+          //   result.joinUrl = `https://www.eeo.cn/client/invoke/index.html?classId=${existingClassId}&courseId=${courseId}&schoolId=${config.SID}`
+          //   console.log('No studentUid, using general join URL:', result.joinUrl)
+          // } else
+          if (!result.success) {
             const lessonError = result.error
             result = generateDemoClassInSession(cls, userId)
             result.error = 'Lesson creation failed: ' + lessonError
@@ -508,6 +520,7 @@ async function registerVirtualAccount(
   formData.set('timeStamp', timestamp.toString())
   formData.set('telephone', accountUid)
   formData.set('password', password)
+  formData.set('nickname', studentName)  // 학생 이름 설정
 
   try {
     const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=register`, {
@@ -526,6 +539,40 @@ async function registerVirtualAccount(
       }
     }
     return { success: false, error: translateClassInError(data.error_info?.error || 'Failed to register account') }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
+// ClassIn API: Edit user info (사용자 닉네임 변경)
+async function editUserInfo(
+  config: ClassInConfig,
+  uid: string,
+  nickname: string
+): Promise<{ success: boolean; error?: string }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('uid', uid)
+  formData.set('nickname', nickname)
+
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=editUserInfo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const data = await res.json() as any
+    console.log('ClassIn editUserInfo response:', JSON.stringify(data))
+
+    if (data.error_info?.errno === 1) {
+      return { success: true }
+    }
+    return { success: false, error: translateClassInError(data.error_info?.error || 'Failed to edit user info') }
   } catch (e: any) {
     return { success: false, error: e.message || 'Network error' }
   }
@@ -729,16 +776,28 @@ async function assignVirtualAccountToEnrollment(
     return { success: false, error: '사용 가능한 가상 계정이 없습니다.' }
   }
 
-  const password = generateDefaultPassword()
-  let isRegistered = false
+  const password = availableAccount.account_password || generateDefaultPassword()
+  let isRegistered = availableAccount.is_registered === 1
   let classInUid = availableAccount.account_uid
 
-  // Register with ClassIn API if configured
+  // Register or update nickname with ClassIn API if configured
   if (classInConfig) {
+    // 항상 registerVirtualAccount 호출 (이미 등록된 계정도 UID 반환됨)
     const regResult = await registerVirtualAccount(classInConfig, availableAccount.account_uid, userName, password)
-    isRegistered = regResult.success
     if (regResult.success && regResult.uid) {
       classInUid = regResult.uid
+      isRegistered = true
+      console.log('Got ClassIn UID:', classInUid, 'for account:', availableAccount.account_uid)
+    }
+
+    // 이미 등록된 계정은 닉네임 업데이트 (register는 첫 등록 시에만 닉네임 적용)
+    if (isRegistered && classInUid) {
+      const editResult = await editUserInfo(classInConfig, classInUid, userName)
+      if (editResult.success) {
+        console.log('Updated nickname for account:', classInUid, '->', userName)
+      } else {
+        console.log('Failed to update nickname:', editResult.error)
+      }
     }
   }
 
@@ -1243,7 +1302,7 @@ app.post('/api/test-account/enroll', async (c) => {
 
     // Check if already enrolled
     const existingEnrollment = await c.env.DB.prepare(
-      'SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?'
+      'SELECT id, classin_account_uid FROM enrollments WHERE user_id = ? AND class_id = ?'
     ).bind(userId, classId).first() as any
 
     if (existingEnrollment) {
@@ -1283,11 +1342,27 @@ app.post('/api/test-account/enroll', async (c) => {
         })
       }
 
+      // joinUrl이 비어있으면 재생성
+      let joinUrl = classinSession?.classin_join_url || ''
+      const studentUid = existingEnrollment?.classin_account_uid || ''
+      if (!joinUrl && classinSession?.classin_class_id && classinSession?.classin_course_id) {
+        const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+          ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+          : null
+        if (classInConfig) {
+          const baseUrl = `https://www.eeo.cn/client/invoke/index.html?classId=${classinSession.classin_class_id}&courseId=${classinSession.classin_course_id}&schoolId=${classInConfig.SID}`
+          joinUrl = studentUid ? `${baseUrl}&uid=${studentUid}` : baseUrl
+          // DB 업데이트
+          await c.env.DB.prepare('UPDATE classin_sessions SET classin_join_url = ? WHERE id = ?')
+            .bind(joinUrl, classinSession.id).run()
+        }
+      }
+
       return c.json({
         success: true,
         message: '이미 수강 중인 클래스입니다.',
         classinSession: classinSession ? {
-          joinUrl: classinSession.classin_join_url,
+          joinUrl: joinUrl,
           classId: classinSession.classin_class_id,
           isDemo: !c.env.CLASSIN_SID
         } : null
@@ -4070,6 +4145,37 @@ async function activateTestCode() {
   }
 }
 
+function showEnrollSuccessModal(message, joinUrl, isDemo) {
+  // 기존 모달이 있으면 제거
+  const existingModal = document.getElementById('enrollSuccessModal');
+  if (existingModal) existingModal.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'enrollSuccessModal';
+  modal.className = 'fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4';
+  modal.innerHTML = \`
+    <div class="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 text-center">
+      <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+        <i class="fas fa-check text-green-500 text-3xl"></i>
+      </div>
+      <h3 class="text-xl font-bold text-dark-900 mb-2">수강신청 완료!</h3>
+      <p class="text-gray-600 mb-6">\${message}</p>
+      <a href="\${joinUrl}" target="_blank" rel="noopener"
+         onclick="setTimeout(() => { document.getElementById('enrollSuccessModal').remove(); window.location.reload(); }, 300);"
+         class="block w-full h-12 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl transition-all shadow-lg flex items-center justify-center gap-2 mb-3">
+        <i class="fas fa-door-open"></i>
+        ClassIn 수업방 입장하기
+      </a>
+      <button onclick="document.getElementById('enrollSuccessModal').remove(); window.location.reload();"
+              class="w-full h-10 text-gray-500 hover:text-gray-700 font-medium transition-all">
+        나중에 입장하기
+      </button>
+      \${isDemo ? '<p class="text-xs text-gray-400 mt-3"><i class="fas fa-info-circle mr-1"></i>DEMO MODE</p>' : ''}
+    </div>
+  \`;
+  document.body.appendChild(modal);
+}
+
 async function testEnroll(classId) {
   if (!currentUser) { openAuthModal('login'); return; }
 
@@ -4082,14 +4188,14 @@ async function testEnroll(classId) {
     const data = await res.json();
 
     if (data.success) {
-      alert(data.message);
       if (data.classinSession && data.classinSession.joinUrl) {
-        if (confirm('ClassIn 수업방으로 이동하시겠습니까?')) {
-          window.open(data.classinSession.joinUrl, '_blank');
-        }
+        const joinUrl = data.classinSession.joinUrl;
+        // 수강신청 완료 모달 표시
+        showEnrollSuccessModal(data.message, joinUrl, data.classinSession.isDemo);
+      } else {
+        alert(data.message);
+        window.location.reload();
       }
-      // Refresh page to show enrollment
-      window.location.reload();
     } else {
       alert(data.error || '수강신청에 실패했습니다.');
     }
@@ -4738,9 +4844,9 @@ ${navHTML}
   <!-- Filters -->
   <div class="flex flex-wrap items-center gap-3 mb-6">
     <select id="sortSelect" onchange="applyFilters()" class="h-9 px-3 bg-white border border-gray-200 rounded-lg text-sm text-dark-600 cursor-pointer">
+      <option value="newest">최신순</option>
       <option value="popular">인기순</option>
       <option value="rating">평점순</option>
-      <option value="newest">최신순</option>
       <option value="price_low">가격 낮은순</option>
       <option value="price_high">가격 높은순</option>
     </select>
@@ -4842,6 +4948,8 @@ function clearSearch() {
 document.addEventListener('DOMContentLoaded', () => {
   const urlParams = new URLSearchParams(window.location.search);
   const cat = urlParams.get('category') || '';
+  const sort = urlParams.get('sort') || 'newest';
+  document.getElementById('sortSelect').value = sort;
   if (cat) filterByCategory(cat);
   else loadClasses(false);
 });
