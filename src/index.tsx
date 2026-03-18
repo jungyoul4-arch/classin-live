@@ -533,13 +533,23 @@ async function registerVirtualAccount(
     const data = await res.json() as any
     console.log('ClassIn register response:', JSON.stringify(data))
 
-    if (data.error_info?.errno === 1) {
-      // API returns: { data: "UID값" }
-      const classInUid = data.data?.toString() || ''
+    const errno = data.error_info?.errno
+    const classInUid = data.data?.toString() || ''
+
+    // errno 1: 성공, errno 135: 이미 등록됨 (둘 다 UID 반환)
+    if (errno === 1 || errno === 135) {
       if (classInUid) {
-        return { success: true, uid: classInUid }
+        console.log('ClassIn register - errno:', errno, 'uid:', classInUid)
+        return { success: true, uid: classInUid, alreadyRegistered: errno === 135 }
       }
     }
+
+    // 다른 에러지만 data에 UID가 있으면 반환
+    if (classInUid) {
+      console.log('ClassIn register error but got UID - errno:', errno, 'uid:', classInUid)
+      return { success: true, uid: classInUid }
+    }
+
     return { success: false, error: translateClassInError(data.error_info?.error || 'Failed to register account') }
   } catch (e: any) {
     return { success: false, error: e.message || 'Network error' }
