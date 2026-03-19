@@ -983,7 +983,7 @@ app.get('/api/classes', async (c) => {
 
   if (sort === 'popular') query += ` ORDER BY c.current_students DESC`
   else if (sort === 'rating') query += ` ORDER BY c.rating DESC`
-  else if (sort === 'newest') query += ` ORDER BY c.created_at DESC`
+  else if (sort === 'newest') query += ` ORDER BY COALESCE((SELECT MAX(scheduled_at) FROM class_lessons WHERE class_id = c.id), c.created_at) DESC`
   else if (sort === 'price_low') query += ` ORDER BY c.price ASC`
   else if (sort === 'price_high') query += ` ORDER BY c.price DESC`
 
@@ -1023,7 +1023,7 @@ app.get('/api/classes/new', async (c) => {
 // Get single class detail
 app.get('/api/classes/:slug', async (c) => {
   const slug = c.req.param('slug')
-  const cls = await c.env.DB.prepare(`
+  const cls: any = await c.env.DB.prepare(`
     SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.bio as instructor_bio, i.specialty as instructor_specialty, i.total_students as instructor_total_students, i.total_classes as instructor_total_classes, i.rating as instructor_rating, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
@@ -1038,7 +1038,25 @@ app.get('/api/classes/:slug', async (c) => {
     FROM reviews r JOIN users u ON r.user_id = u.id
     WHERE r.class_id = ? ORDER BY r.created_at DESC LIMIT 10
   `).bind(cls.id).all()
-  
+
+  // 다음 예정 수업 정보 (class_lessons 기준)
+  const nextLesson = await c.env.DB.prepare(`
+    SELECT * FROM class_lessons
+    WHERE class_id = ? AND datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') > datetime('now')
+    ORDER BY scheduled_at ASC LIMIT 1
+  `).bind(cls.id).first()
+
+  // 총 수업 수 및 완료된 수업 수
+  const lessonStats = await c.env.DB.prepare(`
+    SELECT COUNT(*) as total,
+           SUM(CASE WHEN status = 'ended' OR datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') < datetime('now') THEN 1 ELSE 0 END) as completed
+    FROM class_lessons WHERE class_id = ?
+  `).bind(cls.id).first() as any
+
+  cls.next_lesson = nextLesson
+  cls.total_class_lessons = lessonStats?.total || 0
+  cls.completed_class_lessons = lessonStats?.completed || 0
+
   // Group lessons by chapter
   const chapters: Record<string, any[]> = {}
   for (const lesson of lessons) {
@@ -1088,15 +1106,33 @@ app.post('/api/auth/register', async (c) => {
   }
 })
 
-// Get user enrollments
+// Get user enrollments (with next lesson info from class_lessons)
 app.get('/api/user/:userId/enrollments', async (c) => {
   const userId = c.req.param('userId')
+  const now = new Date().toISOString()
+
+  // 수강 목록과 함께 각 클래스의 다음 예정 수업, 최근 종료 수업 정보 포함
   const { results } = await c.env.DB.prepare(`
-    SELECT e.*, c.title, c.slug, c.thumbnail, c.total_lessons, i.display_name as instructor_name
+    SELECT e.*, c.title, c.slug, c.thumbnail, c.total_lessons, i.display_name as instructor_name,
+           next_lesson.id as next_lesson_id,
+           next_lesson.lesson_title as next_lesson_title,
+           next_lesson.scheduled_at as next_lesson_scheduled_at,
+           next_lesson.duration_minutes as next_lesson_duration,
+           next_lesson.classin_instructor_url as next_lesson_instructor_url,
+           next_lesson.status as next_lesson_status,
+           (SELECT COUNT(*) FROM class_lessons WHERE class_id = c.id) as total_lesson_count,
+           (SELECT COUNT(*) FROM class_lessons WHERE class_id = c.id AND (status = 'ended' OR datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') < datetime('now'))) as completed_lesson_count
     FROM enrollments e
     JOIN classes c ON e.class_id = c.id
     JOIN instructors i ON c.instructor_id = i.id
-    WHERE e.user_id = ? ORDER BY e.enrolled_at DESC
+    LEFT JOIN class_lessons next_lesson ON next_lesson.id = (
+      SELECT id FROM class_lessons
+      WHERE class_id = c.id
+        AND datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') > datetime('now')
+      ORDER BY scheduled_at ASC LIMIT 1
+    )
+    WHERE e.user_id = ?
+    ORDER BY COALESCE(next_lesson.scheduled_at, e.enrolled_at) DESC
   `).bind(userId).all()
   return c.json(results)
 })
@@ -2035,7 +2071,44 @@ app.get('/api/admin/classes/:classId/lessons', async (c) => {
     SELECT * FROM class_lessons
     WHERE class_id = ?
     ORDER BY lesson_number DESC
-  `).bind(classId).all()
+  `).bind(classId).all() as { results: any[] }
+
+  // 종료된 수업 처리 (오류 발생해도 기본 결과는 반환)
+  try {
+    const now = Date.now()
+    const classInConfig = await getClassInConfig(c.env.DB)
+
+    for (const lesson of results) {
+      const startTime = lesson.scheduled_at ? new Date(lesson.scheduled_at).getTime() : 0
+      const duration = (lesson.duration_minutes || 60) * 60 * 1000
+      const isEnded = startTime > 0 && (startTime + duration) < now
+
+      // 시간이 지났으면 status를 ended로 업데이트
+      if (isEnded && lesson.status !== 'ended') {
+        await c.env.DB.prepare(
+          'UPDATE class_lessons SET status = ?, updated_at = datetime("now") WHERE id = ?'
+        ).bind('ended', lesson.id).run()
+        lesson.status = 'ended'
+      }
+
+      // 종료된 수업 중 replay_url이 없는 경우 ClassIn API에서 다시보기 URL 가져오기
+      if (isEnded && !lesson.replay_url && lesson.classin_course_id && lesson.classin_class_id && classInConfig) {
+        try {
+          const webcastResult = await getClassInWebcastUrl(classInConfig, lesson.classin_course_id, lesson.classin_class_id)
+          if (webcastResult.url) {
+            await c.env.DB.prepare(
+              'UPDATE class_lessons SET replay_url = ?, updated_at = datetime("now") WHERE id = ?'
+            ).bind(webcastResult.url, lesson.id).run()
+            lesson.replay_url = webcastResult.url
+          }
+        } catch (e) {
+          // ClassIn API 호출 실패 시 무시
+        }
+      }
+    }
+  } catch (e) {
+    // 전체 처리 실패 시 무시하고 기본 결과 반환
+  }
 
   return c.json({ lessons: results })
 })
@@ -2167,11 +2240,24 @@ app.delete('/api/admin/classes/:id', async (c) => {
     return c.json({ error: '클래스를 찾을 수 없습니다.' }, 404)
   }
 
-  // 수강생이 있는지 확인
-  const enrollments = await c.env.DB.prepare('SELECT COUNT(*) as count FROM enrollments WHERE class_id = ?').bind(classId).first() as any
+  // 활성 수강생이 있는지 확인 (종료/만료된 수강은 제외)
+  const enrollments = await c.env.DB.prepare(
+    "SELECT COUNT(*) as count FROM enrollments WHERE class_id = ? AND status = 'active'"
+  ).bind(classId).first() as any
   if (enrollments?.count > 0) {
-    return c.json({ error: `${enrollments.count}명의 수강생이 있습니다. 먼저 수강신청을 취소해주세요.` }, 400)
+    return c.json({ error: `${enrollments.count}명의 활성 수강생이 있습니다. 먼저 수강을 종료해주세요.` }, 400)
   }
+
+  // 관련 테이블들 삭제 (FOREIGN KEY 제약 해결)
+  await c.env.DB.prepare('DELETE FROM classin_sessions WHERE class_id = ?').bind(classId).run()
+  await c.env.DB.prepare('DELETE FROM enrollments WHERE class_id = ?').bind(classId).run()
+  await c.env.DB.prepare('DELETE FROM orders WHERE class_id = ?').bind(classId).run()
+  await c.env.DB.prepare('DELETE FROM lessons WHERE class_id = ?').bind(classId).run()
+  await c.env.DB.prepare('DELETE FROM reviews WHERE class_id = ?').bind(classId).run()
+  await c.env.DB.prepare('DELETE FROM wishlist WHERE class_id = ?').bind(classId).run()
+  await c.env.DB.prepare('DELETE FROM cart WHERE class_id = ?').bind(classId).run()
+  await c.env.DB.prepare('DELETE FROM subscriptions WHERE class_id = ?').bind(classId).run()
+  await c.env.DB.prepare('DELETE FROM class_lessons WHERE class_id = ?').bind(classId).run()
 
   // 클래스 삭제
   await c.env.DB.prepare('DELETE FROM classes WHERE id = ?').bind(classId).run()
@@ -2773,6 +2859,41 @@ app.put('/api/admin/enrollments/:id/status', async (c) => {
   `).bind(status, enrollmentId).run()
 
   return c.json({ success: true, message: '수강 상태가 변경되었습니다.' })
+})
+
+// 수강신청 삭제 (완전 삭제)
+app.delete('/api/admin/enrollments/:id', async (c) => {
+  const enrollmentId = parseInt(c.req.param('id'))
+
+  const enrollment = await c.env.DB.prepare(
+    'SELECT id, class_id, classin_account_uid, status FROM enrollments WHERE id = ?'
+  ).bind(enrollmentId).first() as any
+
+  if (!enrollment) {
+    return c.json({ error: '수강 정보를 찾을 수 없습니다.' }, 404)
+  }
+
+  // 가상 계정 반납 (할당되어 있는 경우)
+  if (enrollment.classin_account_uid) {
+    await returnVirtualAccountFromEnrollment(c.env.DB, enrollmentId)
+  }
+
+  // 활성 수강인 경우 current_students 감소
+  if (enrollment.status === 'active') {
+    await c.env.DB.prepare(
+      'UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?'
+    ).bind(enrollment.class_id).run()
+  }
+
+  // classin_sessions의 enrollment_id 참조 해제
+  await c.env.DB.prepare(
+    'UPDATE classin_sessions SET enrollment_id = NULL WHERE enrollment_id = ?'
+  ).bind(enrollmentId).run()
+
+  // enrollments 레코드 삭제
+  await c.env.DB.prepare('DELETE FROM enrollments WHERE id = ?').bind(enrollmentId).run()
+
+  return c.json({ success: true, message: '수강신청이 삭제되었습니다.' })
 })
 
 // Assign virtual account to user (사용자에게 가상 계정 할당)
@@ -4280,83 +4401,47 @@ async function loadMyPageTab(tab) {
   if (tab === 'enrollments') {
     const res = await fetch('/api/user/'+currentUser.id+'/enrollments');
     const items = await res.json();
-    // Also fetch ClassIn sessions
-    const sessRes = await fetch('/api/user/'+currentUser.id+'/classin-sessions');
-    const sessions = await sessRes.json();
-    const sessionMap = {};
-    if (Array.isArray(sessions)) sessions.forEach(s => { sessionMap[s.class_id] = s; });
 
-    // 진행중/예정된 수업만 표시 (종료된 수업은 수강완료 탭으로)
-    // 수업 종료 = 시작시간 + 수업시간(분)이 현재보다 과거
+    // 활성 수강만 표시 (다음 예정 수업이 있거나, 수업이 아직 없는 경우)
     const activeItems = items.filter(e => {
-      const session = sessionMap[e.class_id];
-      if (!session) return true; // 세션 없으면 표시
-      if (session.status === 'ended') return false;
-      if (!session.scheduled_at) return true;
-      const startTime = new Date(session.scheduled_at).getTime();
-      const duration = (session.duration_minutes || 60) * 60 * 1000; // 기본 60분
-      const endTime = startTime + duration;
-      const isEnded = endTime < Date.now();
-      return !isEnded;
+      // 관리자가 종료/만료 처리한 수강은 제외
+      if (e.status === 'ended' || e.status === 'expired') return false;
+      // 다음 예정 수업이 있거나, 아직 수업이 없는 경우 표시
+      return e.next_lesson_id || e.total_lesson_count === 0;
     });
 
     container.innerHTML = activeItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-book-open text-3xl mb-2"></i><p>수강 중인 클래스가 없습니다</p></div>'
       : activeItems.map(e => {
-        const session = sessionMap[e.class_id];
-        return \`
-        <div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100">
-          <a href="/class/\${e.slug}" class="flex gap-3">
-            <div class="relative flex-shrink-0">
-              <img src="\${e.thumbnail}" class="w-20 h-14 rounded-lg object-cover">
-              \${session ? '<span class="absolute -top-1 -right-1 w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center"><i class="fas fa-video text-white text-[8px]"></i></span>' : ''}
-            </div>
-            <div class="flex-1 min-w-0">
-              <p class="text-sm font-medium text-dark-800 line-clamp-1">\${e.title}</p>
-              <p class="text-xs text-gray-500">\${e.instructor_name}</p>
-              <div class="w-full bg-gray-200 rounded-full h-1.5 mt-2"><div class="bg-primary-500 h-1.5 rounded-full" style="width:\${e.progress}%"></div></div>
-            </div>
-          </a>
-          \${session ? \`
-          <div class="mt-2 pt-2 border-t border-gray-50">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-bold rounded">\${session.status === 'ready' ? 'ClassIn 준비됨' : session.status === 'live' ? 'LIVE 진행중' : 'ClassIn'}</span>
-              <span class="text-[11px] text-gray-400">\${session.scheduled_at ? new Date(session.scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : ''}</span>
-            </div>
-            <div class="flex gap-2">
-              <a href="\${session.classin_join_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all">
-                <i class="fas fa-door-open"></i> 수업 입장
-              </a>
-              <a href="/classroom/\${session.id}" onclick="event.stopPropagation()" class="h-8 px-3 border border-gray-200 text-dark-600 text-xs font-medium rounded-lg flex items-center justify-center gap-1 hover:bg-gray-50 transition-all">
-                <i class="fas fa-info-circle"></i> 상세
-              </a>
-            </div>
-          </div>
-          \` : ''}
-        </div>
-      \`}).join('');
+        const hasNextLesson = e.next_lesson_id;
+        const progress = e.total_lesson_count > 0 ? Math.round((e.completed_lesson_count / e.total_lesson_count) * 100) : 0;
+
+        let lessonSection = '';
+        if (hasNextLesson) {
+          const dateStr = e.next_lesson_scheduled_at ? new Date(e.next_lesson_scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+          const enterBtn = e.next_lesson_instructor_url
+            ? '<a href="' + e.next_lesson_instructor_url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all"><i class="fas fa-door-open"></i> 수업 입장</a>'
+            : '<span class="flex-1 h-8 bg-gray-200 text-gray-600 text-xs font-semibold rounded-lg flex items-center justify-center gap-1"><i class="fas fa-clock"></i> 수업 준비중</span>';
+          lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><div class="flex items-center gap-2 mb-2"><span class="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-bold rounded">다음 수업</span><span class="text-[11px] text-gray-400">' + dateStr + '</span></div><p class="text-xs text-gray-600 mb-2 line-clamp-1">' + (e.next_lesson_title || '') + '</p><div class="flex gap-2">' + enterBtn + '</div></div>';
+        } else {
+          lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><p class="text-xs text-gray-400 text-center">아직 예정된 수업이 없습니다</p></div>';
+        }
+
+        return '<div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100"><a href="/class/' + e.slug + '" class="flex gap-3"><div class="relative flex-shrink-0"><img src="' + e.thumbnail + '" class="w-20 h-14 rounded-lg object-cover">' + (hasNextLesson ? '<span class="absolute -top-1 -right-1 w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center"><i class="fas fa-video text-white text-[8px]"></i></span>' : '') + '</div><div class="flex-1 min-w-0"><p class="text-sm font-medium text-dark-800 line-clamp-1">' + e.title + '</p><p class="text-xs text-gray-500">' + e.instructor_name + '</p><div class="flex items-center gap-2 mt-1"><div class="flex-1 bg-gray-200 rounded-full h-1.5"><div class="bg-primary-500 h-1.5 rounded-full" style="width:' + progress + '%"></div></div><span class="text-[10px] text-gray-400">' + (e.completed_lesson_count || 0) + '/' + (e.total_lesson_count || 0) + '</span></div></div></a>' + lessonSection + '</div>';
+      }).join('');
   } else if (tab === 'completed') {
     const res = await fetch('/api/user/'+currentUser.id+'/enrollments');
     const items = await res.json();
-    const sessRes = await fetch('/api/user/'+currentUser.id+'/classin-sessions');
-    const sessions = await sessRes.json();
-    const sessionMap = {};
-    if (Array.isArray(sessions)) sessions.forEach(s => { sessionMap[s.class_id] = s; });
 
-    // 종료된 수업 (status가 ended이거나 시작시간+수업시간이 현재보다 과거)
+    // 완료된 수강 (종료/만료 처리되었거나, 모든 수업이 완료된 경우)
     const completedItems = items.filter(e => {
-      const session = sessionMap[e.class_id];
-      if (!session) return false;
-      if (session.status === 'ended') return true;
-      if (!session.scheduled_at) return false;
-      const startTime = new Date(session.scheduled_at).getTime();
-      const duration = (session.duration_minutes || 60) * 60 * 1000;
-      const endTime = startTime + duration;
-      return endTime < Date.now();
+      if (e.status === 'ended' || e.status === 'expired') return true;
+      // 수업이 있고, 다음 예정 수업이 없으면 완료
+      return e.total_lesson_count > 0 && !e.next_lesson_id;
     });
 
     container.innerHTML = completedItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-check-circle text-3xl mb-2"></i><p>수강 완료된 클래스가 없습니다</p></div>'
       : completedItems.map(e => {
-        const session = sessionMap[e.class_id];
+        const progress = e.total_lesson_count > 0 ? Math.round((e.completed_lesson_count / e.total_lesson_count) * 100) : 100;
         return \`
         <div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100">
           <a href="/class/\${e.slug}" class="flex gap-3">
@@ -4367,21 +4452,16 @@ async function loadMyPageTab(tab) {
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium text-dark-800 line-clamp-1">\${e.title}</p>
               <p class="text-xs text-gray-500">\${e.instructor_name}</p>
-              <div class="w-full bg-green-200 rounded-full h-1.5 mt-2"><div class="bg-green-500 h-1.5 rounded-full" style="width:100%"></div></div>
+              <div class="flex items-center gap-2 mt-1">
+                <div class="flex-1 bg-green-200 rounded-full h-1.5"><div class="bg-green-500 h-1.5 rounded-full" style="width:\${progress}%"></div></div>
+                <span class="text-[10px] text-gray-400">\${e.completed_lesson_count || 0}/\${e.total_lesson_count || 0}</span>
+              </div>
             </div>
           </a>
           <div class="mt-2 pt-2 border-t border-gray-50">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="px-1.5 py-0.5 bg-green-100 text-green-700 text-[10px] font-bold rounded">수업 완료</span>
-              <span class="text-[11px] text-gray-400">\${session.scheduled_at ? new Date(session.scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric'}) : ''}</span>
-            </div>
-            <div class="flex gap-2">
-              <a href="\${session.replay_url || session.classin_join_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-green-500 hover:bg-green-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all">
-                <i class="fas fa-play-circle"></i> 다시 보기
-              </a>
-              <a href="/classroom/\${session.id}" onclick="event.stopPropagation()" class="h-8 px-3 border border-gray-200 text-dark-600 text-xs font-medium rounded-lg flex items-center justify-center gap-1 hover:bg-gray-50 transition-all">
-                <i class="fas fa-info-circle"></i> 상세
-              </a>
+            <div class="flex items-center gap-2">
+              <span class="px-1.5 py-0.5 bg-green-100 text-green-700 text-[10px] font-bold rounded">\${e.status === 'ended' ? '수강 종료' : '수업 완료'}</span>
+              <span class="text-[11px] text-gray-400">총 \${e.completed_lesson_count || 0}회 수업</span>
             </div>
           </div>
         </div>
@@ -4740,7 +4820,7 @@ ${navHTML}
               <p class="text-xs text-gray-400 mt-0.5">${cls.instructor_name}</p>
               <div class="flex items-center gap-2 mt-2">
                 <span class="px-2 py-0.5 bg-red-500/20 text-red-400 text-[10px] font-bold rounded-md"><i class="fas fa-circle text-[5px] mr-0.5"></i>LIVE</span>
-                <span class="text-xs text-gray-500">${cls.schedule_start ? new Date(cls.schedule_start).toLocaleDateString('ko-KR', {month: 'long', day: 'numeric'}) : ''}</span>
+                <span class="text-xs text-gray-500">${cls.schedule_start ? new Date(cls.schedule_start).toLocaleDateString('ko-KR', {timeZone:'Asia/Seoul', month: 'long', day: 'numeric'}) : ''}</span>
               </div>
             </div>
           </div>
@@ -5035,6 +5115,14 @@ app.get('/class/:slug', async (c) => {
     SELECT r.*, u.name as user_name FROM reviews r JOIN users u ON r.user_id = u.id WHERE r.class_id = ? ORDER BY r.created_at DESC LIMIT 10
   `).bind(cls.id).all()
 
+  // 다음 예정 수업 정보 (class_lessons 기준)
+  const nextLesson = await c.env.DB.prepare(`
+    SELECT * FROM class_lessons
+    WHERE class_id = ? AND datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') > datetime('now')
+    ORDER BY scheduled_at ASC LIMIT 1
+  `).bind(cls.id).first()
+  cls.next_lesson = nextLesson
+
   // Group lessons by chapter
   const chapters: Record<string, any[]> = {}
   for (const lesson of lessons as any[]) {
@@ -5042,7 +5130,7 @@ app.get('/class/:slug', async (c) => {
     if (!chapters[ch]) chapters[ch] = []
     chapters[ch].push(lesson)
   }
-  
+
   const whatYouLearn = cls.what_you_learn ? cls.what_you_learn.split('|') : []
   const requirements = cls.requirements ? cls.requirements.split('|') : []
 
@@ -5109,12 +5197,18 @@ ${navHTML}
             </div>
             ${cls.discount_percent > 0 ? `<p class="text-sm text-gray-400 line-through mb-3">${cls.original_price.toLocaleString()}원</p>` : '<div class="mb-3"></div>'}
             
-            ${cls.schedule_start ? `
+            ${cls.next_lesson ? `
             <div class="flex items-center gap-2 px-3 py-2 bg-red-50 rounded-xl mb-3">
               <i class="fas fa-calendar-alt text-red-500"></i>
-              <span class="text-sm font-medium text-red-700">라이브 시작: ${new Date(new Date(cls.schedule_start).getTime() + 9 * 60 * 60 * 1000).toLocaleDateString('ko-KR', {year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit'})}</span>
+              <span class="text-sm font-medium text-red-700">다음 수업: ${new Date(cls.next_lesson.scheduled_at).toLocaleString('ko-KR', {timeZone:'Asia/Seoul', year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit'})}</span>
             </div>
-            ` : ''}
+            <p class="text-xs text-gray-500 mb-3 -mt-1">${cls.next_lesson.lesson_title}</p>
+            ` : (cls.schedule_start ? `
+            <div class="flex items-center gap-2 px-3 py-2 bg-gray-50 rounded-xl mb-3">
+              <i class="fas fa-calendar-alt text-gray-500"></i>
+              <span class="text-sm font-medium text-gray-600">예정된 수업 없음</span>
+            </div>
+            ` : '')}
             
             <div class="flex items-center gap-2 mb-3">
               <div class="flex-1 bg-gray-100 rounded-full h-2">
@@ -5396,8 +5490,8 @@ ${navHTML}
           </div>
           <p class="text-center text-sm text-gray-300 mt-3">
             <i class="far fa-calendar mr-1"></i>
-            ${scheduledDate.toLocaleDateString('ko-KR', {year:'numeric', month:'long', day:'numeric', weekday:'long'})} 
-            ${scheduledDate.toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit'})}
+            ${scheduledDate.toLocaleDateString('ko-KR', {timeZone:'Asia/Seoul', year:'numeric', month:'long', day:'numeric', weekday:'long'})}
+            ${scheduledDate.toLocaleTimeString('ko-KR', {timeZone:'Asia/Seoul', hour:'2-digit', minute:'2-digit'})}
           </p>
         </div>
         ` : session.status === 'ended' ? `
@@ -6261,7 +6355,7 @@ app.get('/admin', async (c) => {
       </div>
       <div class="flex gap-3 mt-6">
         <button onclick="closeSessionModal()" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg">취소</button>
-        <button onclick="confirmCreateSession()" class="flex-1 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg">생성</button>
+        <button id="createSessionBtn" onclick="confirmCreateSession()" class="flex-1 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg disabled:bg-gray-400 disabled:cursor-not-allowed">생성</button>
       </div>
     </div>
   </div>
@@ -7114,24 +7208,35 @@ app.get('/admin', async (c) => {
         return;
       }
 
-      const res = await fetch('/api/admin/classes/' + selectedClassId + '/create-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scheduledAt: new Date(scheduledAt).toISOString() })
-      });
-      const data = await res.json();
+      // 중복 클릭 방지
+      const btn = document.getElementById('createSessionBtn');
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>생성중...';
 
-      closeSessionModal();
+      try {
+        const res = await fetch('/api/admin/classes/' + selectedClassId + '/create-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scheduledAt: new Date(scheduledAt).toISOString() })
+        });
+        const data = await res.json();
 
-      if (data.success) {
-        if (data.alreadyExists) {
-          showModal('알림', '이미 생성된 수업이 있습니다.\\n\\n코스 ID: ' + data.courseId + '\\n수업 ID: ' + data.classId);
+        closeSessionModal();
+
+        if (data.success) {
+          if (data.alreadyExists) {
+            showModal('알림', '이미 생성된 수업이 있습니다.\\n\\n코스 ID: ' + data.courseId + '\\n수업 ID: ' + data.classId);
+          } else {
+            showModal('성공', 'ClassIn 수업이 생성되었습니다!\\n\\n코스 ID: ' + data.courseId + '\\n수업 ID: ' + data.classId);
+          }
+          loadClasses();
         } else {
-          showModal('성공', 'ClassIn 수업이 생성되었습니다!\\n\\n코스 ID: ' + data.courseId + '\\n수업 ID: ' + data.classId);
+          showModal('오류', data.error || '수업 생성 실패');
         }
-        loadClasses();
-      } else {
-        showModal('오류', data.error || '수업 생성 실패');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '생성';
       }
     }
 
@@ -7145,14 +7250,22 @@ app.get('/admin', async (c) => {
       const data = await res.json();
 
       if (data.lessons && data.lessons.length > 0) {
+        const now = Date.now();
         document.getElementById('lessonHistoryContent').innerHTML = \`
           <div class="space-y-3">
-            \${data.lessons.map(lesson => \`
-              <div class="p-4 border rounded-xl \${lesson.status === 'ended' ? 'bg-gray-50 border-gray-200' : lesson.status === 'live' ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'}">
+            \${data.lessons.map(lesson => {
+              // 수업 종료 시간 계산 (시작시간 + 수업시간)
+              const endTime = new Date(lesson.scheduled_at).getTime() + (lesson.duration_minutes || 60) * 60 * 1000;
+              const isTimeOver = endTime < now;
+              const isEnded = lesson.status === 'ended' || isTimeOver;
+              const isLive = lesson.status === 'live' && !isTimeOver;
+
+              return \`
+              <div class="p-4 border rounded-xl \${isEnded ? 'bg-gray-50 border-gray-200' : isLive ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'}">
                 <div class="flex items-center justify-between mb-2">
                   <span class="font-bold text-gray-800">\${lesson.lesson_title}</span>
-                  <span class="px-2 py-0.5 text-xs font-bold rounded-full \${lesson.status === 'ended' ? 'bg-gray-200 text-gray-600' : lesson.status === 'live' ? 'bg-red-500 text-white' : 'bg-blue-500 text-white'}">
-                    \${lesson.status === 'ended' ? '종료' : lesson.status === 'live' ? '진행중' : '예정'}
+                  <span class="px-2 py-0.5 text-xs font-bold rounded-full \${isEnded ? 'bg-gray-200 text-gray-600' : isLive ? 'bg-red-500 text-white' : 'bg-blue-500 text-white'}">
+                    \${isEnded ? '종료' : isLive ? '진행중' : '예정'}
                   </span>
                 </div>
                 <div class="text-sm text-gray-600 space-y-1">
@@ -7161,11 +7274,13 @@ app.get('/admin', async (c) => {
                   <p><i class="fas fa-video text-gray-400 w-4"></i> 수업 ID: \${lesson.classin_class_id || '-'}</p>
                 </div>
                 <div class="flex gap-2 mt-3">
-                  \${lesson.classin_instructor_url ? \`<a href="\${lesson.classin_instructor_url}" target="_blank" class="flex-1 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg text-center">강사 입장</a>\` : ''}
+                  \${isEnded
+                    ? \`<span class="flex-1 py-1.5 bg-gray-300 text-gray-600 text-xs font-semibold rounded-lg text-center cursor-default">수업 종료</span>\`
+                    : (lesson.classin_instructor_url ? \`<a href="\${lesson.classin_instructor_url}" target="_blank" class="flex-1 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg text-center">강사 입장</a>\` : '')}
                   \${lesson.replay_url ? \`<a href="\${lesson.replay_url}" target="_blank" class="flex-1 py-1.5 bg-green-500 hover:bg-green-600 text-white text-xs font-semibold rounded-lg text-center">다시보기</a>\` : ''}
                 </div>
               </div>
-            \`).join('')}
+            \`}).join('')}
           </div>
         \`;
       } else {
@@ -7705,7 +7820,10 @@ app.get('/admin/enrollments', async (c) => {
             <td class="px-4 py-3 font-mono text-xs text-gray-500">\${e.classin_account_uid || '-'}</td>
             <td class="px-4 py-3 text-xs text-gray-500">\${new Date(e.enrolled_at).toLocaleDateString('ko-KR')}</td>
             <td class="px-4 py-3">
-              \${e.status === 'active' ? \`<button onclick="endEnrollment(\${e.id})" class="text-orange-500 hover:text-orange-700 text-xs px-2 py-1 border border-orange-200 rounded hover:bg-orange-50">종료</button>\` : '-'}
+              <div class="flex gap-1">
+                \${e.status === 'active' ? \`<button onclick="endEnrollment(\${e.id})" class="text-orange-500 hover:text-orange-700 text-xs px-2 py-1 border border-orange-200 rounded hover:bg-orange-50">종료</button>\` : ''}
+                <button onclick="deleteEnrollment(\${e.id})" class="text-red-500 hover:text-red-700 text-xs px-2 py-1 border border-red-200 rounded hover:bg-red-50">삭제</button>
+              </div>
             </td>
           </tr>
         \`;
@@ -7753,6 +7871,22 @@ app.get('/admin/enrollments', async (c) => {
         loadEnrollments();
       } else {
         showModal('오류', data.error || '상태 변경 실패');
+      }
+    }
+
+    async function deleteEnrollment(enrollmentId) {
+      if (!confirm('이 수강신청을 삭제하시겠습니까?\\n\\n이 작업은 되돌릴 수 없습니다.')) return;
+
+      const res = await fetch('/api/admin/enrollments/' + enrollmentId, {
+        method: 'DELETE'
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        showModal('성공', data.message);
+        loadEnrollments();
+      } else {
+        showModal('오류', data.error || '삭제 실패');
       }
     }
 
