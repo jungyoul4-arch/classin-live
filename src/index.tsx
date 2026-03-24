@@ -4322,10 +4322,14 @@ async function activateTestCode() {
       successEl.textContent = data.message;
       successEl.classList.remove('hidden');
       document.getElementById('testCodeInput').value = '';
-      checkTestAccountStatus();
       // Refresh user data
       currentUser.is_test_account = true;
       localStorage.setItem('classin_user', JSON.stringify(currentUser));
+      // 1초 후 모달 닫고 마이페이지 새로고침
+      setTimeout(() => {
+        closeTestCodeModal();
+        openMyPage();
+      }, 1000);
     } else {
       errorEl.textContent = data.error || '활성화에 실패했습니다.';
       errorEl.classList.remove('hidden');
