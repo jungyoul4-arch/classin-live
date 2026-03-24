@@ -19,7 +19,7 @@ function applyBranding(html: string, env: Bindings): string {
   return html
     .replaceAll('ClassIn Live', appName)
     .replaceAll('클래신 라이브', appNameKo)
-    .replaceAll('>LIVE</span>', `>${appBadge}</span>`)
+    .replaceAll('{{APP_BADGE}}', appBadge)
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -3489,7 +3489,7 @@ const navHTML = `
           <i class="fas fa-play text-white text-sm"></i>
         </div>
         <span class="text-xl font-extrabold text-dark-900">Class<span class="text-primary-500">In</span></span>
-        <span class="text-[10px] font-bold text-primary-500 bg-primary-50 px-1.5 py-0.5 rounded-full -ml-1">LIVE</span>
+        <span class="text-[10px] font-bold text-primary-500 bg-primary-50 px-1.5 py-0.5 rounded-full -ml-1">{{APP_BADGE}}</span>
       </a>
       
       <!-- Search -->
