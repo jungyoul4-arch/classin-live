@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "classin-live",
+  "compatibility_date": "2026-02-13",
+  "pages_build_output_dir": "./dist",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "classin-live-db",
+      "database_id": "b428a4e3-8210-4c79-91f5-7d238730ac4c"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "IMAGES",
+      "bucket_name": "classin-live-images"
+    }
+  ]
+}

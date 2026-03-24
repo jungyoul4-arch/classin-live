@@ -1112,14 +1112,22 @@ app.get('/api/user/:userId/enrollments', async (c) => {
   const now = new Date().toISOString()
 
   // 수강 목록과 함께 각 클래스의 다음 예정 수업, 최근 종료 수업 정보 포함
+  // 학생용 입장 URL은 classin_sessions에서 가져옴 (uid 포함된 URL)
   const { results } = await c.env.DB.prepare(`
     SELECT e.*, c.title, c.slug, c.thumbnail, c.total_lessons, i.display_name as instructor_name,
            next_lesson.id as next_lesson_id,
            next_lesson.lesson_title as next_lesson_title,
            next_lesson.scheduled_at as next_lesson_scheduled_at,
            next_lesson.duration_minutes as next_lesson_duration,
-           next_lesson.classin_instructor_url as next_lesson_instructor_url,
+           next_lesson.classin_course_id as next_lesson_course_id,
+           next_lesson.classin_class_id as next_lesson_class_id,
            next_lesson.status as next_lesson_status,
+           -- 학생용 입장 URL: classin_sessions에서 해당 학생의 세션 찾기
+           (SELECT classin_join_url FROM classin_sessions
+            WHERE enrollment_id = e.id
+              AND classin_course_id = next_lesson.classin_course_id
+              AND classin_class_id = next_lesson.classin_class_id
+            LIMIT 1) as next_lesson_join_url,
            (SELECT COUNT(*) FROM class_lessons WHERE class_id = c.id) as total_lesson_count,
            (SELECT COUNT(*) FROM class_lessons WHERE class_id = c.id AND (status = 'ended' OR datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') < datetime('now'))) as completed_lesson_count
     FROM enrollments e
@@ -4418,8 +4426,8 @@ async function loadMyPageTab(tab) {
         let lessonSection = '';
         if (hasNextLesson) {
           const dateStr = e.next_lesson_scheduled_at ? new Date(e.next_lesson_scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
-          const enterBtn = e.next_lesson_instructor_url
-            ? '<a href="' + e.next_lesson_instructor_url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all"><i class="fas fa-door-open"></i> 수업 입장</a>'
+          const enterBtn = e.next_lesson_join_url
+            ? '<a href="' + e.next_lesson_join_url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all"><i class="fas fa-door-open"></i> 수업 입장</a>'
             : '<span class="flex-1 h-8 bg-gray-200 text-gray-600 text-xs font-semibold rounded-lg flex items-center justify-center gap-1"><i class="fas fa-clock"></i> 수업 준비중</span>';
           lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><div class="flex items-center gap-2 mb-2"><span class="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-bold rounded">다음 수업</span><span class="text-[11px] text-gray-400">' + dateStr + '</span></div><p class="text-xs text-gray-600 mb-2 line-clamp-1">' + (e.next_lesson_title || '') + '</p><div class="flex gap-2">' + enterBtn + '</div></div>';
         } else {

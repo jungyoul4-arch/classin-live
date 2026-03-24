@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "classin-teachers",
+  "compatibility_date": "2026-02-13",
+  "pages_build_output_dir": "./dist",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "classin-teachers-db-v2",
+      "database_id": "4faae997-d33b-477b-bc3a-925202f9572f"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "IMAGES",
+      "bucket_name": "classin-teachers-images"
+    }
+  ]
+}
