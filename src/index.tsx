@@ -519,6 +519,28 @@ async function createClassInSession(
 
     // Update enrollment with ClassIn join URL
     await db.prepare('UPDATE enrollments SET classin_join_url = ? WHERE id = ?').bind(result.joinUrl || '', enrollmentId).run()
+
+    // class_lessons에도 저장 (마이페이지 다음 수업 표시용)
+    if (result.courseId && result.classId) {
+      // 이미 해당 수업이 class_lessons에 있는지 확인
+      const existingLesson = await db.prepare(
+        'SELECT id FROM class_lessons WHERE class_id = ? AND classin_class_id = ?'
+      ).bind(classId, result.classId).first()
+
+      if (!existingLesson) {
+        // 수업 번호 계산
+        const lessonCount = await db.prepare(
+          'SELECT COUNT(*) as count FROM class_lessons WHERE class_id = ?'
+        ).bind(classId).first() as any
+        const lessonNumber = (lessonCount?.count || 0) + 1
+        const lessonTitle = `${cls.title} #${lessonNumber}`
+
+        await db.prepare(`
+          INSERT INTO class_lessons (class_id, lesson_number, lesson_title, classin_course_id, classin_class_id, scheduled_at, duration_minutes, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled')
+        `).bind(classId, lessonNumber, lessonTitle, result.courseId, result.classId, scheduledAt, cls.duration_minutes || 60).run()
+      }
+    }
   }
 
   return result
