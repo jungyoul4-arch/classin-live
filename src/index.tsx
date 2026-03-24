@@ -6926,7 +6926,9 @@ app.get('/admin', async (c) => {
         if (!cls.instructor_classin_uid) {
           createBtn = '<span class="text-gray-400 text-xs">-</span>';
         } else if (!hasSession || isSessionEnded) {
-          createBtn = \`<button onclick="openCreateSession(\${cls.id}, '\${cls.title.replace(/'/g, "\\\\'")}', '\${cls.instructor_name}', '\${cls.schedule_start || ''}')" class="text-blue-500 hover:text-blue-700 text-xs"><i class="fas fa-plus"></i></button>\`;
+          const safeTitle = cls.title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+          const safeInstructor = (cls.instructor_name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+          createBtn = \`<button onclick="openCreateSession(\${cls.id}, '\${safeTitle}', '\${safeInstructor}', '\${cls.schedule_start || ''}')" class="text-blue-500 hover:text-blue-700 text-xs"><i class="fas fa-plus"></i></button>\`;
         } else {
           createBtn = '<span class="text-green-500 text-xs"><i class="fas fa-check"></i></span>';
         }
