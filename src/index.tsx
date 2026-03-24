@@ -6,9 +6,34 @@ type Bindings = {
   IMAGES: R2Bucket
   CLASSIN_SID?: string
   CLASSIN_SECRET?: string
+  APP_NAME?: string
+  APP_NAME_KO?: string
+}
+
+// Helper: 브랜드명을 환경변수로 치환
+function applyBranding(html: string, env: Bindings): string {
+  const appName = env.APP_NAME || 'ClassIn Live'
+  const appNameKo = env.APP_NAME_KO || '클래신 라이브'
+  return html
+    .replaceAll('ClassIn Live', appName)
+    .replaceAll('클래신 라이브', appNameKo)
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
+
+// 미들웨어: 모든 HTML 응답에 브랜드명 자동 치환 적용
+app.use('*', async (c, next) => {
+  await next()
+  const contentType = c.res.headers.get('content-type')
+  if (contentType?.includes('text/html')) {
+    const body = await c.res.text()
+    const branded = applyBranding(body, c.env)
+    c.res = new Response(branded, {
+      status: c.res.status,
+      headers: c.res.headers
+    })
+  }
+})
 
 app.use('/api/*', cors())
 
@@ -4971,7 +4996,7 @@ ${footerHTML}
 ${modalsHTML}
 ${globalScripts}
 </body></html>`
-  return c.html(html)
+  return c.html(applyBranding(html, c.env))
 })
 
 // ==================== Categories / Browse Page ====================
@@ -5109,7 +5134,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 </script>
 </body></html>`
-  return c.html(html)
+  return c.html(applyBranding(html, c.env))
 })
 
 // ==================== Class Detail Page ====================
@@ -5415,7 +5440,7 @@ ${footerHTML}
 ${modalsHTML}
 ${globalScripts}
 </body></html>`
-  return c.html(html)
+  return c.html(applyBranding(html, c.env))
 })
 
 // ==================== ClassIn Classroom Entry Page ====================
@@ -5702,7 +5727,7 @@ ${footerHTML}
 ${modalsHTML}
 ${globalScripts}
 </body></html>`
-  return c.html(html)
+  return c.html(applyBranding(html, c.env))
 })
 
 // Helper function for class card template (server-side)
@@ -5795,7 +5820,7 @@ app.get('/admin/login', async (c) => {
 
   const error = c.req.query('error')
 
-  return c.html(`
+  const adminLoginHtml = `
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -5844,7 +5869,8 @@ app.get('/admin/login', async (c) => {
   </div>
 </body>
 </html>
-  `)
+  `
+  return c.html(applyBranding(adminLoginHtml, c.env))
 })
 
 // Admin login API

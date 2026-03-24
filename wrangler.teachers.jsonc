@@ -5,6 +5,8 @@
   "pages_build_output_dir": "./dist",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
+    "APP_NAME": "ClassIn Teachers",
+    "APP_NAME_KO": "클래신 티쳐스",
     "CLASSIN_SID": "86799720",
     "CLASSIN_SECRET": "ReldwKsx"
   },
