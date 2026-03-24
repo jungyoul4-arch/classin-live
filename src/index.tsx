@@ -8,15 +8,18 @@ type Bindings = {
   CLASSIN_SECRET?: string
   APP_NAME?: string
   APP_NAME_KO?: string
+  APP_BADGE?: string
 }
 
 // Helper: 브랜드명을 환경변수로 치환
 function applyBranding(html: string, env: Bindings): string {
   const appName = env.APP_NAME || 'ClassIn Live'
   const appNameKo = env.APP_NAME_KO || '클래신 라이브'
+  const appBadge = env.APP_BADGE || 'LIVE'
   return html
     .replaceAll('ClassIn Live', appName)
     .replaceAll('클래신 라이브', appNameKo)
+    .replaceAll('>LIVE</span>', `>${appBadge}</span>`)
 }
 
 const app = new Hono<{ Bindings: Bindings }>()

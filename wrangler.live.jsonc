@@ -6,7 +6,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "APP_NAME": "ClassIn Live",
-    "APP_NAME_KO": "클래신 라이브"
+    "APP_NAME_KO": "클래신 라이브",
+    "APP_BADGE": "LIVE"
   },
   "d1_databases": [
     {

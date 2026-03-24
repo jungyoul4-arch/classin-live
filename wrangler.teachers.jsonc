@@ -7,6 +7,7 @@
   "vars": {
     "APP_NAME": "ClassIn Teachers",
     "APP_NAME_KO": "클래신 티쳐스",
+    "APP_BADGE": "TEACHERS",
     "CLASSIN_SID": "86799720",
     "CLASSIN_SECRET": "ReldwKsx"
   },
