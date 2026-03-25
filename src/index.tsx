@@ -440,9 +440,10 @@ async function createClassInSession(
 
             // 생성된 코스/수업 ID를 classes 테이블에 저장
             if (result.classId) {
+              const scheduledAtISO = new Date(beginTime * 1000).toISOString()
               await db.prepare(`
-                UPDATE classes SET classin_course_id = ?, classin_class_id = ?, classin_created_at = datetime('now') WHERE id = ?
-              `).bind(courseId, result.classId, classId).run()
+                UPDATE classes SET classin_course_id = ?, classin_class_id = ?, classin_scheduled_at = ?, classin_created_at = datetime('now') WHERE id = ?
+              `).bind(courseId, result.classId, scheduledAtISO, classId).run()
               existingClassId = result.classId
 
               // 새 수업 생성 시에도 studentUid를 URL에 포함
