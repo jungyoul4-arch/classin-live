@@ -7026,7 +7026,8 @@ app.get('/admin', async (c) => {
         const hasSession = cls.classin_course_id && cls.classin_class_id;
         const scheduledTime = cls.classin_scheduled_at ? new Date(cls.classin_scheduled_at).getTime() : 0;
         const durationMs = (cls.duration_minutes || 60) * 60 * 1000;
-        const isSessionEnded = hasSession && scheduledTime && (scheduledTime + durationMs < now);
+        // classin_scheduled_at이 null이면 종료된 것으로 처리
+        const isSessionEnded = hasSession && (!scheduledTime || (scheduledTime + durationMs < now));
 
         let statusBadge;
         if (isSessionEnded) {
