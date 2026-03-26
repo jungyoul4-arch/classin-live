@@ -6778,7 +6778,7 @@ async function loadMyEnrollments() {
       return '<div class="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0 '+(isEnded ? 'opacity-60' : '')+'">' +
         '<span class="w-6 h-6 '+(isEnded ? 'bg-gray-300' : isEnrolled ? 'bg-blue-500' : 'bg-orange-400')+' text-white text-xs font-bold rounded-full flex items-center justify-center">'+(idx+1)+'</span>' +
         '<div class="flex-1 min-w-0">' +
-          '<p class="text-sm font-medium text-dark-700 truncate">'+lesson.lesson_title+'</p>' +
+          '<p class="text-sm font-medium text-dark-700 truncate">'+(lesson.lesson_title || '제목 없음')+'</p>' +
           '<p class="text-xs text-gray-400">'+dateStr+' · '+lesson.duration_minutes+'분</p>' +
         '</div>' +
         '<div class="flex items-center gap-2">' + statusBadge + actionBtn + '</div>' +
@@ -6849,24 +6849,29 @@ ${navHTML}
 </div>
 
 <script>
-const currentUser = JSON.parse(localStorage.getItem('classin_user') || 'null');
+const _instrUser = JSON.parse(localStorage.getItem('classin_user') || 'null');
 
-if (!currentUser || currentUser.role !== 'instructor') {
+if (!_instrUser || _instrUser.role !== 'instructor') {
   window.location.href = '/mypage';
 } else {
   loadInstructorCourses();
 }
 
 async function loadInstructorCourses() {
-  const res = await fetch('/api/user/'+currentUser.id+'/instructor-classes-with-lessons');
-  const courses = await res.json();
-
   const container = document.getElementById('instructorMypageContent');
 
-  if (!Array.isArray(courses) || courses.length === 0) {
-    container.innerHTML = '<div class="text-center py-12 text-gray-400"><i class="fas fa-chalkboard text-4xl mb-3"></i><p class="text-lg">담당 코스가 없습니다</p></div>';
-    return;
-  }
+  try {
+    const res = await fetch('/api/user/'+_instrUser.id+'/instructor-classes-with-lessons');
+    if (!res.ok) {
+      container.innerHTML = '<div class="text-center py-12 text-red-400"><i class="fas fa-exclamation-triangle text-4xl mb-3"></i><p class="text-lg">데이터를 불러오는데 실패했습니다</p><p class="text-sm mt-2">오류: '+res.status+'</p></div>';
+      return;
+    }
+    const courses = await res.json();
+
+    if (!Array.isArray(courses) || courses.length === 0) {
+      container.innerHTML = '<div class="text-center py-12 text-gray-400"><i class="fas fa-chalkboard text-4xl mb-3"></i><p class="text-lg">담당 코스가 없습니다</p></div>';
+      return;
+    }
 
   container.innerHTML = courses.map(course => {
     const lessonsHtml = course.lessons && course.lessons.length > 0 ? course.lessons.map((lesson, idx) => {
@@ -6879,7 +6884,7 @@ async function loadInstructorCourses() {
       const dateStr = new Date(lesson.scheduled_at).toLocaleDateString('ko-KR', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
 
       let statusBadge, actionBtn, deleteBtn;
-      const safeLessonTitle = lesson.lesson_title.replace(/'/g, "\\'");
+      const safeLessonTitle = (lesson.lesson_title || '').replace(/'/g, "\\\\'");
       if (isEnded) {
         statusBadge = '<span class="px-2 py-0.5 bg-gray-200 text-gray-600 text-[10px] font-medium rounded-full">완료</span>';
         actionBtn = lesson.replay_url
@@ -6893,20 +6898,20 @@ async function loadInstructorCourses() {
       } else {
         statusBadge = '<span class="px-2 py-0.5 bg-indigo-100 text-indigo-700 text-[10px] font-medium rounded-full">예정</span>';
         actionBtn = '<a href="/api/classin/instructor-enter/'+lesson.id+'?redirect=true" target="_blank" class="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg">강의실 입장</a>';
-        deleteBtn = '<button onclick="deleteInstructorLesson('+lesson.id+', \''+safeLessonTitle+'\')" class="ml-2 text-red-400 hover:text-red-600" title="수업 삭제"><i class="fas fa-trash-alt text-xs"></i></button>';
+        deleteBtn = '<button onclick="deleteInstructorLesson('+lesson.id+', \\\''+safeLessonTitle+'\\\')" class="ml-2 text-red-400 hover:text-red-600" title="수업 삭제"><i class="fas fa-trash-alt text-xs"></i></button>';
       }
 
       return '<div class="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0 '+(isEnded ? 'opacity-60' : '')+'">' +
         '<span class="w-6 h-6 '+(isEnded ? 'bg-gray-300' : isLive ? 'bg-red-500' : 'bg-indigo-500')+' text-white text-xs font-bold rounded-full flex items-center justify-center">'+(idx+1)+'</span>' +
         '<div class="flex-1 min-w-0">' +
-          '<p class="text-sm font-medium text-dark-700 truncate">'+lesson.lesson_title+'</p>' +
+          '<p class="text-sm font-medium text-dark-700 truncate">'+(lesson.lesson_title || '제목 없음')+'</p>' +
           '<p class="text-xs text-gray-400">'+dateStr+' · '+lesson.duration_minutes+'분</p>' +
         '</div>' +
         '<div class="flex items-center gap-2">' + statusBadge + actionBtn + deleteBtn + '</div>' +
       '</div>';
     }).join('') : '<p class="text-sm text-gray-400 text-center py-4">예정된 수업이 없습니다</p>';
 
-    const safeTitleJson = JSON.stringify(course.title).replace(/'/g, "\\\\'");
+    const safeTitle = (course.title || '').replace(/'/g, "\\\\'").replace(/"/g, '&quot;');
 
     return '<div class="mb-6 last:mb-0 p-4 bg-gray-50 rounded-xl border border-gray-100">' +
       '<div class="flex gap-4 mb-4">' +
@@ -6916,7 +6921,7 @@ async function loadInstructorCourses() {
           '<p class="text-sm text-gray-500">'+(course.category_name || '')+'</p>' +
           '<p class="text-xs text-gray-400 mt-1">수강생 '+(course.active_students || 0)+'명</p>' +
         '</div>' +
-        '<button onclick="openInstructorLessonModal('+course.id+', '+safeTitleJson+')" class="h-8 px-3 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-semibold rounded-lg flex items-center gap-1"><i class="fas fa-plus"></i>수업 생성</button>' +
+        '<button onclick="openInstructorLessonModal('+course.id+', \\\''+safeTitle+'\\\')" class="h-8 px-3 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-semibold rounded-lg flex items-center gap-1"><i class="fas fa-plus"></i>수업 생성</button>' +
       '</div>' +
       '<div class="bg-white rounded-lg p-3 border border-gray-100">' +
         '<h4 class="text-sm font-semibold text-dark-700 mb-2"><i class="fas fa-list-ol text-indigo-400 mr-1"></i>수업 목록</h4>' +
@@ -6924,6 +6929,10 @@ async function loadInstructorCourses() {
       '</div>' +
     '</div>';
   }).join('');
+  } catch (err) {
+    console.error('loadInstructorCourses error:', err);
+    container.innerHTML = '<div class="text-center py-12 text-red-400"><i class="fas fa-exclamation-triangle text-4xl mb-3"></i><p class="text-lg">데이터를 불러오는데 실패했습니다</p><p class="text-sm mt-2">오류 발생</p></div>';
+  }
 }
 
 // Instructor Lesson Modal functions
@@ -6944,9 +6953,8 @@ function closeInstructorLessonModal() {
 
 function addInstructorLessonRow() {
   const rowId = ++instructorLessonRowId;
-  const now = new Date();
-  now.setHours(now.getHours() + 1, 0, 0, 0);
-  const defaultDateTime = now.toISOString().slice(0, 16);
+  const now = new Date(Date.now() + 5 * 60 * 1000);
+  const defaultDateTime = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0') + 'T' + String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0');
 
   const html = '<div id="lessonRow'+rowId+'" class="p-3 bg-gray-50 rounded-xl border border-gray-200">' +
     '<div class="flex justify-between items-center mb-2">' +
@@ -6997,7 +7005,7 @@ async function submitInstructorLessons() {
     const res = await fetch('/api/instructor/classes/'+classId+'/create-sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lessons, userId: currentUser.id })
+      body: JSON.stringify({ lessons, userId: _instrUser.id })
     });
     const data = await res.json();
 
@@ -7025,7 +7033,7 @@ async function deleteInstructorLesson(lessonId, lessonTitle) {
     const res = await fetch('/api/instructor/lessons/' + lessonId, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: currentUser.id })
+      body: JSON.stringify({ userId: _instrUser.id })
     });
     const data = await res.json();
 
