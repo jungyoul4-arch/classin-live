@@ -2157,14 +2157,14 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
   `).bind(classId, lessonNumber, lessonTitle, courseId, lessonResult.classId, instructorUrl, scheduledAt, cls.duration_minutes || 60).run()
 
-  // 6. classes 테이블 업데이트 (최신 수업 정보 + lesson_count)
+  // 6. classes 테이블 업데이트 (최신 수업 정보 + lesson_count + schedule_start 동기화)
   await c.env.DB.prepare(`
     UPDATE classes
     SET classin_course_id = ?, classin_class_id = ?, classin_instructor_url = ?,
         classin_status = 'scheduled', classin_scheduled_at = ?, classin_created_at = datetime('now'),
-        lesson_count = ?
+        schedule_start = ?, lesson_count = ?
     WHERE id = ?
-  `).bind(courseId, lessonResult.classId, instructorUrl, scheduledAt, lessonNumber, classId).run()
+  `).bind(courseId, lessonResult.classId, instructorUrl, scheduledAt, scheduledAt, lessonNumber, classId).run()
 
   return c.json({
     success: true,
