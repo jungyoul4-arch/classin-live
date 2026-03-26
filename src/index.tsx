@@ -2588,10 +2588,10 @@ app.get('/api/admin/instructors', async (c) => {
 
 // Create new instructor (관리자: 강사 등록)
 app.post('/api/admin/instructors', async (c) => {
-  const { name, email, profileImage } = await c.req.json()
+  const { name, email, classInAccount, profileImage } = await c.req.json()
 
   if (!name || !email) {
-    return c.json({ error: '이름과 이메일은 필수입니다.' }, 400)
+    return c.json({ error: '이름과 로그인 이메일은 필수입니다.' }, 400)
   }
 
   // 이메일 중복 체크
@@ -2600,12 +2600,15 @@ app.post('/api/admin/instructors', async (c) => {
     return c.json({ error: '이미 등록된 이메일입니다.' }, 400)
   }
 
-  // 1. 유저 생성
+  // ClassIn 계정 결정 (입력값 없으면 로그인 이메일 사용)
+  const classInAccountValue = classInAccount?.trim() || email
+
+  // 1. 유저 생성 (ClassIn 계정을 phone 필드에 저장 - 전화번호/이메일 모두 가능)
   const passwordHash = '$2a$10$defaulthash' // 임시 비밀번호
   const userResult = await c.env.DB.prepare(`
-    INSERT INTO users (email, password_hash, name, role)
-    VALUES (?, ?, ?, 'instructor')
-  `).bind(email, passwordHash, name).run()
+    INSERT INTO users (email, password_hash, name, phone, role)
+    VALUES (?, ?, ?, ?, 'instructor')
+  `).bind(email, passwordHash, name, classInAccountValue !== email ? classInAccountValue : '').run()
 
   const userId = userResult.meta.last_row_id
 
@@ -2617,7 +2620,7 @@ app.post('/api/admin/instructors', async (c) => {
 
   const instructorId = instructorResult.meta.last_row_id
 
-  // 3. ClassIn 등록 (이메일로 자동 등록)
+  // 3. ClassIn 등록 (classInAccount 또는 이메일로 등록)
   let classInUid = ''
   let classInError = ''
   if (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET) {
@@ -2627,7 +2630,7 @@ app.post('/api/admin/instructors', async (c) => {
       API_BASE: 'https://api.eeo.cn'
     }
 
-    const result = await registerInstructorWithClassIn(c.env.DB, instructorId as number, config, email)
+    const result = await registerInstructorWithClassIn(c.env.DB, instructorId as number, config, classInAccountValue)
     if (result.uid) {
       classInUid = result.uid
     } else if (result.error) {
@@ -6553,8 +6556,14 @@ app.get('/admin', async (c) => {
           <input type="text" id="newInstructorName" placeholder="강사 이름" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
         </div>
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">이메일 <span class="text-red-500">*</span></label>
+          <label class="block text-sm font-medium text-gray-700 mb-1">로그인 이메일 <span class="text-red-500">*</span></label>
           <input type="email" id="newInstructorEmail" placeholder="instructor@example.com" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+          <p class="text-xs text-gray-500 mt-1">사이트 로그인에 사용됩니다.</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">ClassIn 계정 (전화번호/이메일)</label>
+          <input type="text" id="newInstructorClassInAccount" placeholder="010-1234-5678 또는 classin@example.com" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+          <p class="text-xs text-gray-500 mt-1">비워두면 로그인 이메일로 ClassIn에 등록됩니다.</p>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">프로필 이미지 URL</label>
@@ -6865,6 +6874,7 @@ app.get('/admin', async (c) => {
     function openAddInstructorModal() {
       document.getElementById('newInstructorName').value = '';
       document.getElementById('newInstructorEmail').value = '';
+      document.getElementById('newInstructorClassInAccount').value = '';
       document.getElementById('newInstructorImage').value = '';
       document.getElementById('addInstructorModal').classList.remove('hidden');
     }
@@ -6917,17 +6927,18 @@ app.get('/admin', async (c) => {
     async function confirmAddInstructor() {
       const name = document.getElementById('newInstructorName').value.trim();
       const email = document.getElementById('newInstructorEmail').value.trim();
+      const classInAccount = document.getElementById('newInstructorClassInAccount').value.trim();
       const profileImage = document.getElementById('newInstructorImage').value.trim();
 
       if (!name || !email) {
-        showModal('오류', '이름과 이메일은 필수입니다.');
+        showModal('오류', '이름과 로그인 이메일은 필수입니다.');
         return;
       }
 
       const res = await fetch('/api/admin/instructors', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, profileImage })
+        body: JSON.stringify({ name, email, classInAccount, profileImage })
       });
       const data = await res.json();
 
