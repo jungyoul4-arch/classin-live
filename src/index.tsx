@@ -285,8 +285,9 @@ async function getClassInLoginUrl(
   uid: string,
   courseId: string,
   classId: string,
-  deviceType: number = 1  // 1=PC, 2=iOS, 3=Android
-): Promise<{ url?: string; error?: string }> {
+  deviceType: number = 1,  // 1=PC, 2=iOS, 3=Android
+  identity: number = 1  // 1=학생, 2=청강생, 3=강사/조교
+): Promise<{ url?: string; error?: string; rawResponse?: string }> {
   const timestamp = Math.floor(Date.now() / 1000)
   const safeKey = await generateSafeKey(config.SECRET, timestamp)
 
@@ -299,6 +300,7 @@ async function getClassInLoginUrl(
   formData.set('classId', classId)
   formData.set('deviceType', deviceType.toString())
   formData.set('lifeTime', '86400')  // 24 hours
+  formData.set('identity', identity.toString())  // 역할 지정
 
   try {
     const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=getLoginLinked`, {
@@ -306,8 +308,15 @@ async function getClassInLoginUrl(
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: formData.toString()
     })
-    const data = await res.json() as any
-    console.log('getLoginLinked response:', JSON.stringify(data))
+    const text = await res.text()
+    console.log('getLoginLinked raw response:', text)
+
+    let data: any
+    try {
+      data = JSON.parse(text)
+    } catch {
+      return { error: 'Invalid JSON response', rawResponse: text.substring(0, 500) }
+    }
 
     if (data.error_info?.errno === 1 && data.data) {
       let url = data.data
@@ -317,17 +326,24 @@ async function getClassInLoginUrl(
         const urlObj = new URL(url.replace('classin://', 'https://'))
         const params = urlObj.searchParams
         const authTicket = params.get('authTicket')
-        // authTicket이 없으면 에러 반환
-        if (!authTicket || authTicket === 'null') {
-          console.log('getLoginLinked: authTicket is null or missing, raw URL:', url)
-          return { error: 'authTicket이 없습니다. 강사가 기관에 등록되어 있는지 확인하세요.' }
+        const telephone = params.get('telephone')
+        const classIdParam = params.get('classId')
+        const courseIdParam = params.get('courseId')
+        const schoolIdParam = params.get('schoolId')
+
+        // authTicket이 있으면 포함, 없으면 없이 URL 생성
+        if (authTicket && authTicket !== 'null') {
+          // Build web URL with authTicket (자동 로그인 가능)
+          url = `https://www.eeo.cn/client/invoke/index.html?telephone=${telephone}&authTicket=${authTicket}&classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
+        } else {
+          // authTicket 없이 URL 생성 (수동 로그인 필요)
+          console.log('getLoginLinked: authTicket is null or missing, using URL without authTicket')
+          url = `https://www.eeo.cn/client/invoke/index.html?telephone=${telephone}&classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
         }
-        // Build web URL with authTicket
-        url = `https://www.eeo.cn/client/invoke/index.html?telephone=${params.get('telephone')}&authTicket=${authTicket}&classId=${params.get('classId')}&courseId=${params.get('courseId')}&schoolId=${params.get('schoolId')}`
       }
       return { url }
     }
-    return { error: translateClassInError(data.error_info?.error || 'Failed to get login URL') }
+    return { error: translateClassInError(data.error_info?.error || 'Failed to get login URL'), rawResponse: text.substring(0, 500) }
   } catch (e: any) {
     return { error: e.message || 'Network error' }
   }
@@ -725,11 +741,12 @@ async function addStudentToCourse(
 }
 
 // ClassIn API: Add teacher to course (강사를 코스에 추가)
+// 강사도 addCourseStudent API를 사용하되 identity=3 (조교/강사)으로 설정
 async function addTeacherToCourse(
   config: ClassInConfig,
   courseId: string,
   teacherUid: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; rawResponse?: string }> {
   const timestamp = Math.floor(Date.now() / 1000)
   const safeKey = await generateSafeKey(config.SECRET, timestamp)
 
@@ -738,16 +755,29 @@ async function addTeacherToCourse(
   formData.set('safeKey', safeKey)
   formData.set('timeStamp', timestamp.toString())
   formData.set('courseId', courseId)
-  formData.set('teacherUid', teacherUid)
+  formData.set('studentUid', teacherUid)  // teacher도 동일하게 studentUid 사용
+  formData.set('identity', '3')  // 1=학생, 2=청강생, 3=조교(강사)
 
   try {
-    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addCourseTeacher`, {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addCourseStudent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: formData.toString()
     })
-    const data = await res.json() as any
-    console.log('addCourseTeacher response:', JSON.stringify(data))
+    const text = await res.text()
+    console.log('addCourseStudent (teacher) response:', text)
+
+    if (!text || text.trim() === '') {
+      return { success: false, error: 'Empty response from API', rawResponse: text }
+    }
+
+    let data: any
+    try {
+      data = JSON.parse(text)
+    } catch {
+      return { success: false, error: 'Invalid JSON response', rawResponse: text.substring(0, 500) }
+    }
+
     if (data.error_info?.errno === 1) {
       return { success: true }
     }
@@ -756,7 +786,7 @@ async function addTeacherToCourse(
     if (errorMsg.includes('已经存在') || errorMsg.includes('already exists')) {
       return { success: true }
     }
-    return { success: false, error: translateClassInError(errorMsg || 'Failed to add teacher to course') }
+    return { success: false, error: translateClassInError(errorMsg || 'Failed to add teacher to course'), rawResponse: text.substring(0, 500) }
   } catch (e: any) {
     return { success: false, error: e.message || 'Network error' }
   }
@@ -2086,6 +2116,38 @@ app.post('/api/admin/debug/webcast-url', async (c) => {
   })
 })
 
+// Debug: getLoginLinked API 테스트 (강사/학생 입장 URL)
+app.post('/api/admin/debug/login-linked', async (c) => {
+  const { uid, courseId, classId, deviceType } = await c.req.json()
+
+  const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  if (!config) {
+    return c.json({ error: 'ClassIn API not configured' }, 500)
+  }
+
+  if (!uid || !courseId || !classId) {
+    return c.json({ error: 'uid, courseId, classId are required' }, 400)
+  }
+
+  // Step 1: addCourseTeacher 호출 (강사인 경우)
+  const teacherResult = await addTeacherToCourse(config, courseId, uid)
+
+  // Step 2: getLoginLinked 호출 (identity: 1=학생, 2=청강생, 3=강사)
+  const identity = 3  // 강사로 테스트
+  const result = await getClassInLoginUrl(config, uid, courseId, classId, deviceType || 1, identity)
+
+  return c.json({
+    api: 'getLoginLinked',
+    endpoint: '/partner/api/course.api.php?action=getLoginLinked',
+    params: { uid, courseId, classId, deviceType: deviceType || 1, identity },
+    addCourseTeacherResult: teacherResult,
+    getLoginLinkedResult: result
+  })
+})
+
 // ==================== ClassIn 수업 관리 API ====================
 
 // 관리자: ClassIn 수업 생성 (시간 지정)
@@ -2189,8 +2251,8 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
     return c.json({ error: '수업 생성 실패: ' + lessonResult.error }, 500)
   }
 
-  // 4. 강사 입장 URL 생성
-  const instructorUrlResult = await getClassInLoginUrl(config, teacherUid, courseId, lessonResult.classId, 1)
+  // 4. 강사 입장 URL 생성 (identity=3 강사)
+  const instructorUrlResult = await getClassInLoginUrl(config, teacherUid, courseId, lessonResult.classId, 1, 3)
   const instructorUrl = instructorUrlResult.url ||
     `https://www.eeo.cn/client/invoke/index.html?uid=${teacherUid}&classId=${lessonResult.classId}&courseId=${courseId}&schoolId=${config.SID}`
 
@@ -3463,13 +3525,14 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
   const courseResult = await addTeacherToCourse(classInConfig, lesson.classin_course_id, instructorUid)
   console.log('addTeacherToCourse result:', JSON.stringify(courseResult), 'instructorUid:', instructorUid, 'courseId:', lesson.classin_course_id)
 
-  // Step 2: Generate fresh login URL with token
+  // Step 2: Generate fresh login URL with token (identity=3 강사)
   const loginUrlResult = await getClassInLoginUrl(
     classInConfig,
     instructorUid,
     lesson.classin_course_id,
     lesson.classin_class_id,
-    1  // PC
+    1,  // PC
+    3   // 강사
   )
 
   if (loginUrlResult.url) {
