@@ -4546,7 +4546,7 @@ const navHTML = `
       <!-- Search -->
       <div class="hidden md:flex flex-1 max-w-xl mx-8">
         <div class="relative w-full">
-          <input type="text" id="searchInput" placeholder="배우고 싶은 것을 검색해보세요" 
+          <input type="search" id="searchInput" placeholder="배우고 싶은 것을 검색해보세요" autocomplete="off" name="course-search" value=""
             class="w-full h-10 pl-10 pr-4 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:bg-white transition-all">
           <i class="fas fa-search absolute left-3.5 top-3 text-gray-400 text-sm"></i>
         </div>
@@ -4576,7 +4576,7 @@ const navHTML = `
   <!-- Mobile Search -->
   <div class="md:hidden px-4 pb-3">
     <div class="relative">
-      <input type="text" id="searchInputMobile" placeholder="검색" class="w-full h-9 pl-9 pr-4 bg-gray-50 border border-gray-200 rounded-lg text-sm">
+      <input type="search" id="searchInputMobile" placeholder="검색" autocomplete="off" name="course-search-mobile" value="" class="w-full h-9 pl-9 pr-4 bg-gray-50 border border-gray-200 rounded-lg text-sm">
       <i class="fas fa-search absolute left-3 top-2.5 text-gray-400 text-sm"></i>
     </div>
   </div>
@@ -4653,11 +4653,11 @@ const modalsHTML = `
       <div class="space-y-4">
         <div>
           <label class="block text-sm font-medium text-dark-700 mb-1">이메일</label>
-          <input type="email" id="loginEmail" placeholder="example@email.com" class="w-full h-11 px-4 border border-gray-200 rounded-xl text-sm">
+          <input type="email" id="loginEmail" placeholder="example@email.com" autocomplete="username" class="w-full h-11 px-4 border border-gray-200 rounded-xl text-sm">
         </div>
         <div>
           <label class="block text-sm font-medium text-dark-700 mb-1">비밀번호</label>
-          <input type="password" id="loginPassword" placeholder="비밀번호 입력" class="w-full h-11 px-4 border border-gray-200 rounded-xl text-sm">
+          <input type="password" id="loginPassword" placeholder="비밀번호 입력" autocomplete="current-password" class="w-full h-11 px-4 border border-gray-200 rounded-xl text-sm">
         </div>
         <button onclick="handleLogin()" class="w-full h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all">로그인</button>
         <div class="relative my-4"><div class="absolute inset-0 flex items-center"><div class="w-full border-t border-gray-200"></div></div><div class="relative flex justify-center text-xs"><span class="bg-white px-2 text-gray-400">또는</span></div></div>
@@ -5899,9 +5899,14 @@ async function reactivateSubscription(subId) {
 // Search handling
 document.addEventListener('DOMContentLoaded', () => {
   updateAuthUI();
+  // Clear search inputs (prevent Chrome autofill)
+  const si = document.getElementById('searchInput');
+  const sim = document.getElementById('searchInputMobile');
+  if (si) si.value = '';
+  if (sim) sim.value = '';
   const searchHandler = (e) => { if (e.key === 'Enter') { window.location.href = '/categories?search=' + encodeURIComponent(e.target.value); } };
-  document.getElementById('searchInput')?.addEventListener('keydown', searchHandler);
-  document.getElementById('searchInputMobile')?.addEventListener('keydown', searchHandler);
+  si?.addEventListener('keydown', searchHandler);
+  sim?.addEventListener('keydown', searchHandler);
 });
 </script>`
 
