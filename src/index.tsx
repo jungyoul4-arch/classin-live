@@ -1211,6 +1211,48 @@ app.get('/api/user/:userId/enrollments', async (c) => {
   return c.json(results)
 })
 
+// Get instructor's classes (강사가 개설한 클래스 목록)
+app.get('/api/user/:userId/instructor-classes', async (c) => {
+  const userId = c.req.param('userId')
+
+  // 사용자가 강사인지 확인하고 instructor_id 가져오기
+  const instructor = await c.env.DB.prepare(`
+    SELECT i.id FROM instructors i
+    JOIN users u ON i.user_id = u.id
+    WHERE u.id = ? AND u.role = 'instructor'
+  `).bind(userId).first() as any
+
+  if (!instructor) {
+    return c.json([])
+  }
+
+  // 강사의 클래스 목록과 다음 예정 수업 정보
+  const { results } = await c.env.DB.prepare(`
+    SELECT c.*, cat.name as category_name,
+           (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') as active_students,
+           next_lesson.id as next_lesson_id,
+           next_lesson.lesson_title as next_lesson_title,
+           next_lesson.scheduled_at as next_lesson_scheduled_at,
+           next_lesson.duration_minutes as next_lesson_duration,
+           next_lesson.classin_instructor_url as next_lesson_instructor_url,
+           next_lesson.status as next_lesson_status,
+           (SELECT COUNT(*) FROM class_lessons WHERE class_id = c.id) as total_lesson_count,
+           (SELECT COUNT(*) FROM class_lessons WHERE class_id = c.id AND (status = 'ended' OR datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') < datetime('now'))) as completed_lesson_count
+    FROM classes c
+    LEFT JOIN categories cat ON c.category_id = cat.id
+    LEFT JOIN class_lessons next_lesson ON next_lesson.id = (
+      SELECT id FROM class_lessons
+      WHERE class_id = c.id
+        AND datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') > datetime('now')
+      ORDER BY scheduled_at ASC LIMIT 1
+    )
+    WHERE c.instructor_id = ?
+    ORDER BY COALESCE(next_lesson.scheduled_at, c.created_at) DESC
+  `).bind(instructor.id).all()
+
+  return c.json(results)
+})
+
 // Get user wishlist
 app.get('/api/user/:userId/wishlist', async (c) => {
   const userId = c.req.param('userId')
@@ -4376,41 +4418,66 @@ async function openMyPage(tab) {
   if (!currentUser) { openAuthModal('login'); return; }
   document.getElementById('myPageSidebar').classList.remove('hidden');
   const content = document.getElementById('myPageContent');
+  const isInstructor = currentUser.role === 'instructor';
   const activeTab = tab || 'enrollments';
-  
-  // Check test account status
-  let testAccountBadge = '';
-  try {
-    const testRes = await fetch('/api/user/' + currentUser.id + '/test-status');
-    const testData = await testRes.json();
-    if (testData.isTestAccount) {
-      testAccountBadge = \`<span class="inline-block mt-1 ml-1 px-2 py-0.5 bg-purple-100 text-purple-600 text-xs font-semibold rounded-full"><i class="fas fa-flask mr-1"></i>테스트</span>\`;
-    }
-  } catch(e) {}
 
-  content.innerHTML = \`
-    <div class="flex items-center gap-3 mb-4 pb-4 border-b border-gray-100">
-      <div class="w-14 h-14 bg-primary-100 rounded-full flex items-center justify-center">
-        <span class="text-xl font-bold text-primary-600">\${currentUser.name?.charAt(0) || 'U'}</span>
+  // Check test account status (학생만)
+  let testAccountBadge = '';
+  if (!isInstructor) {
+    try {
+      const testRes = await fetch('/api/user/' + currentUser.id + '/test-status');
+      const testData = await testRes.json();
+      if (testData.isTestAccount) {
+        testAccountBadge = \`<span class="inline-block mt-1 ml-1 px-2 py-0.5 bg-purple-100 text-purple-600 text-xs font-semibold rounded-full"><i class="fas fa-flask mr-1"></i>테스트</span>\`;
+      }
+    } catch(e) {}
+  }
+
+  // 강사용 UI
+  if (isInstructor) {
+    content.innerHTML = \`
+      <div class="flex items-center gap-3 mb-4 pb-4 border-b border-gray-100">
+        <div class="w-14 h-14 bg-indigo-100 rounded-full flex items-center justify-center">
+          <span class="text-xl font-bold text-indigo-600">\${currentUser.name?.charAt(0) || 'U'}</span>
+        </div>
+        <div>
+          <p class="font-bold text-dark-900">\${currentUser.name}</p>
+          <p class="text-sm text-gray-500">\${currentUser.email}</p>
+          <span class="inline-block mt-1 px-2 py-0.5 bg-indigo-100 text-indigo-600 text-xs font-semibold rounded-full"><i class="fas fa-chalkboard-teacher mr-1"></i>강사</span>
+        </div>
       </div>
-      <div>
-        <p class="font-bold text-dark-900">\${currentUser.name}</p>
-        <p class="text-sm text-gray-500">\${currentUser.email}</p>
-        \${currentUser.subscription_plan ? \`<span class="inline-block mt-1 px-2 py-0.5 bg-primary-100 text-primary-600 text-xs font-semibold rounded-full">\${currentUser.subscription_plan === 'annual' ? '연간' : '월간'} 구독중</span>\` : ''}
-        \${testAccountBadge}
+      <div class="flex gap-1 mb-4 bg-gray-100 rounded-xl p-1">
+        <button onclick="loadMyPageTab('enrollments')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='enrollments'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">강의중</button>
+        <button onclick="loadMyPageTab('completed')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='completed'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">강의완료</button>
       </div>
-    </div>
-    <button onclick="openTestCodeModal(); closeMyPage();" class="w-full mb-4 py-3 bg-purple-50 hover:bg-purple-100 text-purple-700 font-medium rounded-xl transition-all flex items-center justify-center gap-2 border border-purple-200">
-      <i class="fas fa-flask"></i>테스트 코드 입력
-    </button>
-    <div class="flex gap-1 mb-4 bg-gray-100 rounded-xl p-1">
-      <button onclick="loadMyPageTab('enrollments')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='enrollments'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강중</button>
-      <button onclick="loadMyPageTab('completed')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='completed'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강완료</button>
-      <button onclick="loadMyPageTab('subscriptions')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='subscriptions'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}"><i class="fas fa-sync-alt mr-0.5 text-[9px]"></i>구독</button>
-      <button onclick="loadMyPageTab('orders')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='orders'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">결제내역</button>
-    </div>
-    <div id="myPageTabContent"></div>
-  \`;
+      <div id="myPageTabContent"></div>
+    \`;
+  } else {
+    // 학생용 UI
+    content.innerHTML = \`
+      <div class="flex items-center gap-3 mb-4 pb-4 border-b border-gray-100">
+        <div class="w-14 h-14 bg-primary-100 rounded-full flex items-center justify-center">
+          <span class="text-xl font-bold text-primary-600">\${currentUser.name?.charAt(0) || 'U'}</span>
+        </div>
+        <div>
+          <p class="font-bold text-dark-900">\${currentUser.name}</p>
+          <p class="text-sm text-gray-500">\${currentUser.email}</p>
+          \${currentUser.subscription_plan ? \`<span class="inline-block mt-1 px-2 py-0.5 bg-primary-100 text-primary-600 text-xs font-semibold rounded-full">\${currentUser.subscription_plan === 'annual' ? '연간' : '월간'} 구독중</span>\` : ''}
+          \${testAccountBadge}
+        </div>
+      </div>
+      <button onclick="openTestCodeModal(); closeMyPage();" class="w-full mb-4 py-3 bg-purple-50 hover:bg-purple-100 text-purple-700 font-medium rounded-xl transition-all flex items-center justify-center gap-2 border border-purple-200">
+        <i class="fas fa-flask"></i>테스트 코드 입력
+      </button>
+      <div class="flex gap-1 mb-4 bg-gray-100 rounded-xl p-1">
+        <button onclick="loadMyPageTab('enrollments')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='enrollments'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강중</button>
+        <button onclick="loadMyPageTab('completed')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='completed'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">수강완료</button>
+        <button onclick="loadMyPageTab('subscriptions')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='subscriptions'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}"><i class="fas fa-sync-alt mr-0.5 text-[9px]"></i>구독</button>
+        <button onclick="loadMyPageTab('orders')" class="mypage-tab flex-1 py-1.5 text-xs font-medium rounded-lg transition-all \${activeTab==='orders'?'bg-white text-dark-900 shadow-sm':'text-gray-500'}">결제내역</button>
+      </div>
+      <div id="myPageTabContent"></div>
+    \`;
+  }
   loadMyPageTab(activeTab);
 }
 function closeMyPage() { document.getElementById('myPageSidebar').classList.add('hidden'); }
@@ -4549,15 +4616,83 @@ async function testEnroll(classId) {
 }
 
 async function loadMyPageTab(tab) {
+  const isInstructor = currentUser.role === 'instructor';
+  const tabs = isInstructor ? ['enrollments','completed'] : ['enrollments','completed','subscriptions','orders'];
+
   document.querySelectorAll('.mypage-tab').forEach((b,i) => {
-    const tabs = ['enrollments','completed','subscriptions','orders'];
     b.classList.toggle('bg-white', tabs[i]===tab);
     b.classList.toggle('text-dark-900', tabs[i]===tab);
     b.classList.toggle('shadow-sm', tabs[i]===tab);
     b.classList.toggle('text-gray-500', tabs[i]!==tab);
   });
   const container = document.getElementById('myPageTabContent');
-  
+
+  // 강사용 마이페이지
+  if (isInstructor) {
+    if (tab === 'enrollments') {
+      // 강의중인 클래스
+      const res = await fetch('/api/user/'+currentUser.id+'/instructor-classes');
+      const items = await res.json();
+
+      const activeItems = items.filter(c => c.next_lesson_id || c.total_lesson_count === 0);
+
+      container.innerHTML = activeItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-chalkboard text-3xl mb-2"></i><p>강의중인 클래스가 없습니다</p></div>'
+        : activeItems.map(c => {
+          const hasNextLesson = c.next_lesson_id;
+          const progress = c.total_lesson_count > 0 ? Math.round((c.completed_lesson_count / c.total_lesson_count) * 100) : 0;
+
+          let lessonSection = '';
+          if (hasNextLesson) {
+            const dateStr = c.next_lesson_scheduled_at ? new Date(c.next_lesson_scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+            const enterBtn = c.next_lesson_instructor_url
+              ? '<a href="' + c.next_lesson_instructor_url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all"><i class="fas fa-door-open"></i> 강의실 입장</a>'
+              : '<span class="flex-1 h-8 bg-gray-200 text-gray-600 text-xs font-semibold rounded-lg flex items-center justify-center gap-1"><i class="fas fa-clock"></i> 수업 준비중</span>';
+            lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><div class="flex items-center gap-2 mb-2"><span class="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 text-[10px] font-bold rounded">다음 수업</span><span class="text-[11px] text-gray-400">' + dateStr + '</span></div><p class="text-xs text-gray-600 mb-2 line-clamp-1">' + (c.next_lesson_title || '') + '</p><div class="flex gap-2">' + enterBtn + '</div></div>';
+          } else {
+            lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><p class="text-xs text-gray-400 text-center">아직 예정된 수업이 없습니다</p></div>';
+          }
+
+          return '<div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100"><a href="/class/' + c.slug + '" class="flex gap-3"><div class="relative flex-shrink-0"><img src="' + (c.thumbnail || 'https://via.placeholder.com/80x56?text=No+Image') + '" class="w-20 h-14 rounded-lg object-cover">' + (hasNextLesson ? '<span class="absolute -top-1 -right-1 w-5 h-5 bg-indigo-500 rounded-full flex items-center justify-center"><i class="fas fa-video text-white text-[8px]"></i></span>' : '') + '</div><div class="flex-1 min-w-0"><p class="text-sm font-medium text-dark-800 line-clamp-1">' + c.title + '</p><p class="text-xs text-gray-500">' + (c.category_name || '') + ' · 수강생 ' + (c.active_students || 0) + '명</p><div class="flex items-center gap-2 mt-1"><div class="flex-1 bg-gray-200 rounded-full h-1.5"><div class="bg-indigo-500 h-1.5 rounded-full" style="width:' + progress + '%"></div></div><span class="text-[10px] text-gray-400">' + (c.completed_lesson_count || 0) + '/' + (c.total_lesson_count || 0) + '회</span></div></div></a>' + lessonSection + '</div>';
+        }).join('');
+    } else if (tab === 'completed') {
+      // 강의완료된 클래스
+      const res = await fetch('/api/user/'+currentUser.id+'/instructor-classes');
+      const items = await res.json();
+
+      const completedItems = items.filter(c => c.total_lesson_count > 0 && !c.next_lesson_id);
+
+      container.innerHTML = completedItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-check-circle text-3xl mb-2"></i><p>강의 완료된 클래스가 없습니다</p></div>'
+        : completedItems.map(c => {
+          const progress = c.total_lesson_count > 0 ? Math.round((c.completed_lesson_count / c.total_lesson_count) * 100) : 100;
+          return \`
+          <div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100">
+            <a href="/class/\${c.slug}" class="flex gap-3">
+              <div class="relative flex-shrink-0">
+                <img src="\${c.thumbnail || 'https://via.placeholder.com/80x56?text=No+Image'}" class="w-20 h-14 rounded-lg object-cover">
+                <span class="absolute -top-1 -right-1 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center"><i class="fas fa-check text-white text-[8px]"></i></span>
+              </div>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm font-medium text-dark-800 line-clamp-1">\${c.title}</p>
+                <p class="text-xs text-gray-500">\${c.category_name || ''} · 수강생 \${c.active_students || 0}명</p>
+                <div class="flex items-center gap-2 mt-1">
+                  <div class="flex-1 bg-green-200 rounded-full h-1.5"><div class="bg-green-500 h-1.5 rounded-full" style="width:\${progress}%"></div></div>
+                  <span class="text-[10px] text-gray-400">\${c.completed_lesson_count || 0}/\${c.total_lesson_count || 0}회</span>
+                </div>
+              </div>
+            </a>
+            <div class="mt-2 pt-2 border-t border-gray-50">
+              <div class="flex items-center gap-2">
+                <span class="px-1.5 py-0.5 bg-green-100 text-green-700 text-[10px] font-bold rounded">강의 완료</span>
+                <span class="text-[11px] text-gray-400">총 \${c.completed_lesson_count || 0}회 수업</span>
+              </div>
+            </div>
+          </div>
+        \`}).join('');
+    }
+    return;
+  }
+
+  // 학생용 마이페이지
   if (tab === 'enrollments') {
     const res = await fetch('/api/user/'+currentUser.id+'/enrollments');
     const items = await res.json();
