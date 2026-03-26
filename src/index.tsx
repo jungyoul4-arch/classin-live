@@ -331,14 +331,15 @@ async function getClassInLoginUrl(
         const courseIdParam = params.get('courseId')
         const schoolIdParam = params.get('schoolId')
 
-        // authTicket이 있으면 포함, 없으면 없이 URL 생성
+        // authTicket이 있으면 포함, 없으면 웹 교실 URL 사용
         if (authTicket && authTicket !== 'null') {
           // Build web URL with authTicket (자동 로그인 가능)
           url = `https://www.eeo.cn/client/invoke/index.html?telephone=${telephone}&authTicket=${authTicket}&classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
         } else {
-          // authTicket 없이 URL 생성 (수동 로그인 필요)
-          console.log('getLoginLinked: authTicket is null or missing, using URL without authTicket')
-          url = `https://www.eeo.cn/client/invoke/index.html?telephone=${telephone}&classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
+          // authTicket 없으면 웹 교실 URL 사용 (로그인 필요)
+          console.log('getLoginLinked: authTicket is null or missing, using web classroom URL')
+          // live.eeo.cn 웹 교실 형식 사용
+          url = `https://live.eeo.cn/pc.html?classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
         }
       }
       return { url }
@@ -3481,14 +3482,14 @@ app.get('/api/classin/enter/:sessionId', async (c) => {
 })
 
 // Generate fresh login URL for instructor entering a class (강사 입장 URL 동적 생성)
-// Use ?redirect=true to automatically redirect to the ClassIn URL
+// 강사도 가상 계정을 사용하여 authTicket을 받음 (학생과 동일한 방식)
 app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
   const lessonId = c.req.param('lessonId')
   const shouldRedirect = c.req.query('redirect') === 'true'
 
   // Get lesson info with instructor details
   const lesson = await c.env.DB.prepare(`
-    SELECT cl.*, c.instructor_id, i.classin_uid as instructor_classin_uid, i.display_name as instructor_name
+    SELECT cl.*, c.instructor_id, i.user_id as instructor_user_id, i.classin_uid as instructor_classin_uid, i.display_name as instructor_name
     FROM class_lessons cl
     JOIN classes c ON cl.class_id = c.id
     JOIN instructors i ON c.instructor_id = i.id
@@ -3513,26 +3514,73 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
     return c.json({ error: 'ClassIn API not configured' }, 400)
   }
 
-  const instructorUid = lesson.instructor_classin_uid
-  if (!instructorUid) {
-    if (shouldRedirect) {
-      return c.html('<html><body><h2>강사의 ClassIn UID가 없습니다. 관리자에게 문의하세요.</h2></body></html>')
+  // Step 1: 강사의 가상 계정 확인 또는 할당
+  let virtualAccount = await c.env.DB.prepare(`
+    SELECT * FROM classin_virtual_accounts
+    WHERE user_id = ? AND status = 'assigned'
+    ORDER BY assigned_at DESC LIMIT 1
+  `).bind(lesson.instructor_user_id).first() as any
+
+  // 가상 계정이 없으면 새로 할당
+  if (!virtualAccount) {
+    virtualAccount = await c.env.DB.prepare(`
+      SELECT * FROM classin_virtual_accounts
+      WHERE status = 'available' AND (expires_at IS NULL OR expires_at > datetime('now'))
+      ORDER BY id LIMIT 1
+    `).first() as any
+
+    if (!virtualAccount) {
+      if (shouldRedirect) {
+        return c.html('<html><body><h2>사용 가능한 ClassIn 계정이 없습니다. 관리자에게 문의하세요.</h2></body></html>')
+      }
+      return c.json({ error: 'No available ClassIn virtual accounts' }, 400)
     }
-    return c.json({ error: 'Instructor has no ClassIn UID' }, 400)
+
+    // 가상 계정 등록 (아직 등록 안 된 경우)
+    if (!virtualAccount.is_registered) {
+      const password = 'ClassIn' + Math.random().toString(36).substr(2, 6).toUpperCase()
+      const regResult = await registerVirtualAccount(classInConfig, virtualAccount.account_uid, lesson.instructor_name, password)
+      console.log('registerVirtualAccount for instructor:', JSON.stringify(regResult))
+
+      if (regResult.uid) {
+        virtualAccount.classin_uid = regResult.uid
+        virtualAccount.is_registered = true
+        virtualAccount.account_password = password
+      }
+    }
+
+    // 기관(school)에 학생으로 추가 (필수! - 강사도 학생으로 추가해야 authTicket 발급됨)
+    await addSchoolStudent(classInConfig, virtualAccount.account_uid, lesson.instructor_name)
+
+    // 가상 계정 할당
+    await c.env.DB.prepare(`
+      UPDATE classin_virtual_accounts
+      SET user_id = ?, assigned_at = datetime('now'), assigned_name = ?,
+          account_password = ?, is_registered = ?, classin_uid = ?, status = 'assigned', updated_at = datetime('now')
+      WHERE id = ?
+    `).bind(
+      lesson.instructor_user_id,
+      lesson.instructor_name,
+      virtualAccount.account_password || '',
+      virtualAccount.is_registered ? 1 : 0,
+      virtualAccount.classin_uid || virtualAccount.account_uid,
+      virtualAccount.id
+    ).run()
   }
 
-  // Step 1: Add teacher to course (코스에 강사 추가 - 이미 추가된 경우 무시됨)
-  const courseResult = await addTeacherToCourse(classInConfig, lesson.classin_course_id, instructorUid)
-  console.log('addTeacherToCourse result:', JSON.stringify(courseResult), 'instructorUid:', instructorUid, 'courseId:', lesson.classin_course_id)
+  const accountUid = virtualAccount.classin_uid || virtualAccount.account_uid
 
-  // Step 2: Generate fresh login URL with token (identity=3 강사)
+  // Step 2: 코스에 학생으로 추가 (authTicket을 받으려면 학생으로 추가해야 함)
+  await addStudentToCourse(classInConfig, lesson.classin_course_id, accountUid)
+
+  // Step 3: Generate fresh login URL with token
   const loginUrlResult = await getClassInLoginUrl(
     classInConfig,
-    instructorUid,
+    accountUid,
     lesson.classin_course_id,
     lesson.classin_class_id,
     1,  // PC
-    3   // 강사
+    1   // 학생으로 입장 (authTicket 받기 위해)
   )
 
   if (loginUrlResult.url) {
@@ -3550,12 +3598,12 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
     return c.json({ success: true, url: loginUrlResult.url })
   }
 
-  // Fallback to basic URL (without authTicket - user will need to login manually)
-  const fallbackUrl = `https://www.eeo.cn/client/invoke/index.html?uid=${instructorUid}&classId=${lesson.classin_class_id}&courseId=${lesson.classin_course_id}&schoolId=${classInConfig.SID}`
+  // Fallback to basic URL
+  const fallbackUrl = `https://www.eeo.cn/client/invoke/index.html?uid=${accountUid}&classId=${lesson.classin_class_id}&courseId=${lesson.classin_course_id}&schoolId=${classInConfig.SID}`
   if (shouldRedirect) {
     return c.redirect(fallbackUrl)
   }
-  return c.json({ success: true, url: fallbackUrl, warning: loginUrlResult.error || 'authTicket 생성 실패. ClassIn에 직접 로그인해야 합니다.' })
+  return c.json({ success: true, url: fallbackUrl, warning: loginUrlResult.error || 'authTicket 생성 실패' })
 })
 
 // ==================== Subscription API Routes ====================
