@@ -5760,11 +5760,11 @@ ${navHTML}
             
             <!-- 1회 결제 -->
             <div id="payOnetime">
-              <button onclick='openPaymentModal(${JSON.stringify({id:cls.id, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30 mb-2">
+              <button id="btnEnrollOnetime" onclick='openPaymentModal(${JSON.stringify({id:cls.id, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30 mb-2">
                 <i class="fas fa-credit-card mr-2"></i>바로 수강하기 · ${cls.price.toLocaleString()}원
               </button>
             </div>
-            
+
             <!-- 월간 구독 -->
             <div id="payMonthly" class="hidden">
               <div class="bg-blue-50 rounded-xl p-3 mb-2">
@@ -5774,13 +5774,13 @@ ${navHTML}
                 </div>
                 <p class="text-[11px] text-blue-600">오늘 결제 시 매월 ${new Date().getDate()}일에 자동으로 결제됩니다</p>
               </div>
-              <button onclick='openSubscriptionModal(${JSON.stringify({planType:"class_monthly", classId:cls.id, title:cls.title, amount:cls.price, originalAmount:cls.original_price, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/30 mb-2">
+              <button id="btnEnrollMonthly" onclick='openSubscriptionModal(${JSON.stringify({planType:"class_monthly", classId:cls.id, title:cls.title, amount:cls.price, originalAmount:cls.original_price, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/30 mb-2">
                 <i class="fas fa-sync-alt mr-2"></i>월간 구독 시작 · ${cls.price.toLocaleString()}원/월
               </button>
             </div>
-            
+
             <div class="grid grid-cols-2 gap-2">
-              <button onclick="addToCart(${cls.id})" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
+              <button id="btnAddToCart" onclick="addToCart(${cls.id})" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
                 <i class="fas fa-shopping-cart mr-1"></i>장바구니
               </button>
               <button onclick="toggleWishlistItem(${cls.id})" data-wishlist="${cls.id}" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
@@ -5931,6 +5931,26 @@ ${navHTML}
     <div class="hidden md:block md:col-span-2"></div>
   </div>
 </section>
+
+<script>
+// 강사는 다른 클래스 수강 불가
+document.addEventListener('DOMContentLoaded', () => {
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  if (user && user.role === 'instructor') {
+    const disableBtn = (btn, text) => {
+      if (!btn) return;
+      btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); };
+      btn.disabled = true;
+      btn.classList.remove('bg-primary-500', 'hover:bg-primary-600', 'bg-blue-500', 'hover:bg-blue-600', 'shadow-lg', 'shadow-primary-500/30', 'shadow-blue-500/30', 'hover:bg-gray-50');
+      btn.classList.add('bg-gray-300', 'cursor-not-allowed', 'text-gray-500');
+      if (text) btn.innerHTML = '<i class="fas fa-ban mr-2"></i>' + text;
+    };
+    disableBtn(document.getElementById('btnEnrollOnetime'), '강사는 수강신청 불가');
+    disableBtn(document.getElementById('btnEnrollMonthly'), '강사는 수강신청 불가');
+    disableBtn(document.getElementById('btnAddToCart'), '수강 불가');
+  }
+});
+</script>
 
 ${footerHTML}
 ${modalsHTML}
@@ -6937,13 +6957,25 @@ app.get('/admin', async (c) => {
           <p class="text-xs text-gray-500 mt-1">비워두면 로그인 이메일로 ClassIn에 등록됩니다.</p>
         </div>
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">프로필 이미지 URL</label>
-          <input type="text" id="newInstructorImage" placeholder="https://..." class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+          <label class="block text-sm font-medium text-gray-700 mb-1">프로필 이미지</label>
+          <div class="flex items-center gap-3">
+            <div id="newInstructorImagePreview" class="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center overflow-hidden border-2 border-dashed border-gray-300">
+              <i class="fas fa-user text-gray-400 text-xl"></i>
+            </div>
+            <div class="flex-1">
+              <input type="file" id="newInstructorImageFile" accept="image/*" onchange="previewInstructorImage('new')" class="hidden">
+              <input type="hidden" id="newInstructorImage" value="">
+              <button type="button" onclick="document.getElementById('newInstructorImageFile').click()" class="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-lg transition-all">
+                <i class="fas fa-upload mr-1"></i>이미지 업로드
+              </button>
+              <p class="text-xs text-gray-400 mt-1">JPG, PNG (최대 5MB)</p>
+            </div>
+          </div>
         </div>
       </div>
       <div class="flex gap-3 mt-6">
         <button onclick="closeAddInstructorModal()" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg">취소</button>
-        <button onclick="confirmAddInstructor()" class="flex-1 py-2 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold rounded-lg">추가</button>
+        <button onclick="confirmAddInstructor()" id="btnAddInstructor" class="flex-1 py-2 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold rounded-lg">추가</button>
       </div>
     </div>
   </div>
@@ -6968,13 +7000,25 @@ app.get('/admin', async (c) => {
           <input type="text" id="editInstructorPhone" placeholder="010-1234-5678" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
         </div>
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">프로필 이미지 URL</label>
-          <input type="text" id="editInstructorImage" placeholder="https://..." class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+          <label class="block text-sm font-medium text-gray-700 mb-1">프로필 이미지</label>
+          <div class="flex items-center gap-3">
+            <div id="editInstructorImagePreview" class="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center overflow-hidden border-2 border-dashed border-gray-300">
+              <i class="fas fa-user text-gray-400 text-xl"></i>
+            </div>
+            <div class="flex-1">
+              <input type="file" id="editInstructorImageFile" accept="image/*" onchange="previewInstructorImage('edit')" class="hidden">
+              <input type="hidden" id="editInstructorImage" value="">
+              <button type="button" onclick="document.getElementById('editInstructorImageFile').click()" class="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-lg transition-all">
+                <i class="fas fa-upload mr-1"></i>이미지 변경
+              </button>
+              <p class="text-xs text-gray-400 mt-1">JPG, PNG (최대 5MB)</p>
+            </div>
+          </div>
         </div>
       </div>
       <div class="flex gap-3 mt-6">
         <button onclick="closeEditInstructorModal()" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg">취소</button>
-        <button onclick="confirmEditInstructor()" class="flex-1 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg">저장</button>
+        <button onclick="confirmEditInstructor()" id="btnEditInstructor" class="flex-1 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg">저장</button>
       </div>
     </div>
   </div>
@@ -7247,6 +7291,8 @@ app.get('/admin', async (c) => {
       document.getElementById('newInstructorEmail').value = '';
       document.getElementById('newInstructorClassInAccount').value = '';
       document.getElementById('newInstructorImage').value = '';
+      document.getElementById('newInstructorImageFile').value = '';
+      document.getElementById('newInstructorImagePreview').innerHTML = '<i class="fas fa-user text-gray-400 text-xl"></i>';
       document.getElementById('addInstructorModal').classList.remove('hidden');
     }
 
@@ -7260,6 +7306,14 @@ app.get('/admin', async (c) => {
       document.getElementById('editInstructorEmail').value = email || '';
       document.getElementById('editInstructorPhone').value = phone || '';
       document.getElementById('editInstructorImage').value = profileImage || '';
+      document.getElementById('editInstructorImageFile').value = '';
+      // 기존 이미지 프리뷰 표시
+      const preview = document.getElementById('editInstructorImagePreview');
+      if (profileImage) {
+        preview.innerHTML = '<img src="' + profileImage + '" class="w-full h-full object-cover">';
+      } else {
+        preview.innerHTML = '<i class="fas fa-user text-gray-400 text-xl"></i>';
+      }
       document.getElementById('editInstructorModal').classList.remove('hidden');
     }
 
@@ -7267,16 +7321,74 @@ app.get('/admin', async (c) => {
       document.getElementById('editInstructorModal').classList.add('hidden');
     }
 
+    // 강사 이미지 미리보기
+    function previewInstructorImage(mode) {
+      const fileInput = document.getElementById(mode + 'InstructorImageFile');
+      const preview = document.getElementById(mode + 'InstructorImagePreview');
+      const file = fileInput.files[0];
+      if (file) {
+        if (file.size > 5 * 1024 * 1024) {
+          showModal('오류', '이미지 크기는 5MB 이하여야 합니다.');
+          fileInput.value = '';
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          preview.innerHTML = '<img src="' + e.target.result + '" class="w-full h-full object-cover">';
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+
+    // 강사 이미지 업로드 (공통)
+    async function uploadInstructorImage(fileInput) {
+      const file = fileInput.files[0];
+      if (!file) return null;
+
+      const formData = new FormData();
+      formData.append('image', file);
+
+      const res = await fetch('/api/admin/upload-image', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) {
+        throw new Error('이미지 업로드 실패');
+      }
+
+      const data = await res.json();
+      return data.url;
+    }
+
     async function confirmEditInstructor() {
       const id = document.getElementById('editInstructorId').value;
       const name = document.getElementById('editInstructorName').value.trim();
       const email = document.getElementById('editInstructorEmail').value.trim();
       const phone = document.getElementById('editInstructorPhone').value.trim();
-      const profileImage = document.getElementById('editInstructorImage').value.trim();
+      let profileImage = document.getElementById('editInstructorImage').value.trim();
+      const fileInput = document.getElementById('editInstructorImageFile');
 
       if (!name || !email) {
         showModal('오류', '이름과 이메일은 필수입니다.');
         return;
+      }
+
+      // 새 이미지 파일이 선택된 경우 업로드
+      if (fileInput.files[0]) {
+        const btn = document.getElementById('btnEditInstructor');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>업로드 중...';
+        try {
+          profileImage = await uploadInstructorImage(fileInput);
+        } catch (e) {
+          btn.disabled = false;
+          btn.innerHTML = '저장';
+          showModal('오류', e.message);
+          return;
+        }
+        btn.disabled = false;
+        btn.innerHTML = '저장';
       }
 
       const res = await fetch('/api/admin/instructors/' + id, {
@@ -7299,11 +7411,29 @@ app.get('/admin', async (c) => {
       const name = document.getElementById('newInstructorName').value.trim();
       const email = document.getElementById('newInstructorEmail').value.trim();
       const classInAccount = document.getElementById('newInstructorClassInAccount').value.trim();
-      const profileImage = document.getElementById('newInstructorImage').value.trim();
+      let profileImage = document.getElementById('newInstructorImage').value.trim();
+      const fileInput = document.getElementById('newInstructorImageFile');
 
       if (!name || !email) {
         showModal('오류', '이름과 로그인 이메일은 필수입니다.');
         return;
+      }
+
+      // 이미지 파일이 선택된 경우 업로드
+      if (fileInput.files[0]) {
+        const btn = document.getElementById('btnAddInstructor');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>업로드 중...';
+        try {
+          profileImage = await uploadInstructorImage(fileInput);
+        } catch (e) {
+          btn.disabled = false;
+          btn.innerHTML = '추가';
+          showModal('오류', e.message);
+          return;
+        }
+        btn.disabled = false;
+        btn.innerHTML = '추가';
       }
 
       const res = await fetch('/api/admin/instructors', {
