@@ -724,6 +724,44 @@ async function addStudentToCourse(
   }
 }
 
+// ClassIn API: Add teacher to course (강사를 코스에 추가)
+async function addTeacherToCourse(
+  config: ClassInConfig,
+  courseId: string,
+  teacherUid: string
+): Promise<{ success: boolean; error?: string }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('courseId', courseId)
+  formData.set('teacherUid', teacherUid)
+
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addCourseTeacher`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const data = await res.json() as any
+    console.log('addCourseTeacher response:', JSON.stringify(data))
+    if (data.error_info?.errno === 1) {
+      return { success: true }
+    }
+    // 이미 존재하는 경우도 성공으로 처리
+    const errorMsg = data.error_info?.error || ''
+    if (errorMsg.includes('已经存在') || errorMsg.includes('already exists')) {
+      return { success: true }
+    }
+    return { success: false, error: translateClassInError(errorMsg || 'Failed to add teacher to course') }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
 // Generate default password for virtual accounts
 function generateDefaultPassword(): string {
   return 'ClassIn' + Math.random().toString(36).substr(2, 6).toUpperCase()
@@ -3421,7 +3459,11 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
     return c.json({ error: 'Instructor has no ClassIn UID' }, 400)
   }
 
-  // Generate fresh login URL with token
+  // Step 1: Add teacher to course (코스에 강사 추가 - 이미 추가된 경우 무시됨)
+  const courseResult = await addTeacherToCourse(classInConfig, lesson.classin_course_id, instructorUid)
+  console.log('addTeacherToCourse result:', JSON.stringify(courseResult), 'instructorUid:', instructorUid, 'courseId:', lesson.classin_course_id)
+
+  // Step 2: Generate fresh login URL with token
   const loginUrlResult = await getClassInLoginUrl(
     classInConfig,
     instructorUid,
