@@ -8705,7 +8705,7 @@ app.get('/admin', async (c) => {
           </tr>
           <tr id="lessons-row-\${cls.id}" class="\${isExpanded ? '' : 'hidden'}">
             <td colspan="8" class="p-0">
-              <div id="lessons-content-\${cls.id}" class="bg-gray-50 border-t border-b border-gray-200">
+              <div id="lessons-content-\${cls.id}" class="bg-gray-50 border-l-4 border-l-blue-300 border-t border-b border-gray-200 ml-8">
                 <div class="p-4 text-gray-500 text-center text-sm">수업 목록 로딩 중...</div>
               </div>
             </td>
