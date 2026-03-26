@@ -316,8 +316,14 @@ async function getClassInLoginUrl(
         // Extract parameters from classin:// URL
         const urlObj = new URL(url.replace('classin://', 'https://'))
         const params = urlObj.searchParams
+        const authTicket = params.get('authTicket')
+        // authTicket이 없으면 에러 반환
+        if (!authTicket || authTicket === 'null') {
+          console.log('getLoginLinked: authTicket is null or missing, raw URL:', url)
+          return { error: 'authTicket이 없습니다. 강사가 기관에 등록되어 있는지 확인하세요.' }
+        }
         // Build web URL with authTicket
-        url = `https://www.eeo.cn/client/invoke/index.html?telephone=${params.get('telephone')}&authTicket=${params.get('authTicket')}&classId=${params.get('classId')}&courseId=${params.get('courseId')}&schoolId=${params.get('schoolId')}`
+        url = `https://www.eeo.cn/client/invoke/index.html?telephone=${params.get('telephone')}&authTicket=${authTicket}&classId=${params.get('classId')}&courseId=${params.get('courseId')}&schoolId=${params.get('schoolId')}`
       }
       return { url }
     }
@@ -2259,7 +2265,11 @@ app.patch('/api/admin/lessons/:lessonId', async (c) => {
 app.get('/api/admin/classes', async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT c.*, i.display_name as instructor_name, i.classin_uid as instructor_classin_uid,
-           cat.name as category_name
+           cat.name as category_name,
+           (SELECT id FROM class_lessons
+            WHERE class_id = c.id
+              AND datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') > datetime('now')
+            ORDER BY scheduled_at ASC LIMIT 1) as latest_lesson_id
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
     JOIN categories cat ON c.category_id = cat.id
@@ -3368,6 +3378,79 @@ app.get('/api/classin/enter/:sessionId', async (c) => {
     return c.redirect(fallbackUrl)
   }
   return c.json({ success: true, url: fallbackUrl, warning: loginUrlResult.error })
+})
+
+// Generate fresh login URL for instructor entering a class (강사 입장 URL 동적 생성)
+// Use ?redirect=true to automatically redirect to the ClassIn URL
+app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
+  const lessonId = c.req.param('lessonId')
+  const shouldRedirect = c.req.query('redirect') === 'true'
+
+  // Get lesson info with instructor details
+  const lesson = await c.env.DB.prepare(`
+    SELECT cl.*, c.instructor_id, i.classin_uid as instructor_classin_uid, i.display_name as instructor_name
+    FROM class_lessons cl
+    JOIN classes c ON cl.class_id = c.id
+    JOIN instructors i ON c.instructor_id = i.id
+    WHERE cl.id = ?
+  `).bind(lessonId).first() as any
+
+  if (!lesson) {
+    if (shouldRedirect) {
+      return c.html('<html><body><h2>수업을 찾을 수 없습니다.</h2></body></html>')
+    }
+    return c.json({ error: 'Lesson not found' }, 404)
+  }
+
+  const classInConfig = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  if (!classInConfig) {
+    if (shouldRedirect) {
+      return c.html('<html><body><h2>ClassIn API가 설정되지 않았습니다.</h2></body></html>')
+    }
+    return c.json({ error: 'ClassIn API not configured' }, 400)
+  }
+
+  const instructorUid = lesson.instructor_classin_uid
+  if (!instructorUid) {
+    if (shouldRedirect) {
+      return c.html('<html><body><h2>강사의 ClassIn UID가 없습니다. 관리자에게 문의하세요.</h2></body></html>')
+    }
+    return c.json({ error: 'Instructor has no ClassIn UID' }, 400)
+  }
+
+  // Generate fresh login URL with token
+  const loginUrlResult = await getClassInLoginUrl(
+    classInConfig,
+    instructorUid,
+    lesson.classin_course_id,
+    lesson.classin_class_id,
+    1  // PC
+  )
+
+  if (loginUrlResult.url) {
+    // Update the lesson with the fresh URL
+    await c.env.DB.prepare('UPDATE class_lessons SET classin_instructor_url = ? WHERE id = ?')
+      .bind(loginUrlResult.url, lessonId).run()
+
+    // Also update classes table for latest lesson
+    await c.env.DB.prepare('UPDATE classes SET classin_instructor_url = ? WHERE id = ?')
+      .bind(loginUrlResult.url, lesson.class_id).run()
+
+    if (shouldRedirect) {
+      return c.redirect(loginUrlResult.url)
+    }
+    return c.json({ success: true, url: loginUrlResult.url })
+  }
+
+  // Fallback to basic URL (without authTicket - user will need to login manually)
+  const fallbackUrl = `https://www.eeo.cn/client/invoke/index.html?uid=${instructorUid}&classId=${lesson.classin_class_id}&courseId=${lesson.classin_course_id}&schoolId=${classInConfig.SID}`
+  if (shouldRedirect) {
+    return c.redirect(fallbackUrl)
+  }
+  return c.json({ success: true, url: fallbackUrl, warning: loginUrlResult.error || 'authTicket 생성 실패. ClassIn에 직접 로그인해야 합니다.' })
 })
 
 // ==================== Subscription API Routes ====================
@@ -4644,8 +4727,8 @@ async function loadMyPageTab(tab) {
           let lessonSection = '';
           if (hasNextLesson) {
             const dateStr = c.next_lesson_scheduled_at ? new Date(c.next_lesson_scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
-            const enterBtn = c.next_lesson_instructor_url
-              ? '<a href="' + c.next_lesson_instructor_url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all"><i class="fas fa-door-open"></i> 강의실 입장</a>'
+            const enterBtn = c.next_lesson_id
+              ? '<a href="/api/classin/instructor-enter/' + c.next_lesson_id + '?redirect=true" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all"><i class="fas fa-door-open"></i> 강의실 입장</a>'
               : '<span class="flex-1 h-8 bg-gray-200 text-gray-600 text-xs font-semibold rounded-lg flex items-center justify-center gap-1"><i class="fas fa-clock"></i> 수업 준비중</span>';
             lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><div class="flex items-center gap-2 mb-2"><span class="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 text-[10px] font-bold rounded">다음 수업</span><span class="text-[11px] text-gray-400">' + dateStr + '</span></div><p class="text-xs text-gray-600 mb-2 line-clamp-1">' + (c.next_lesson_title || '') + '</p><div class="flex gap-2">' + enterBtn + '</div></div>';
           } else {
@@ -7218,8 +7301,8 @@ app.get('/admin', async (c) => {
               \${cls.classin_scheduled_at ? new Date(cls.classin_scheduled_at).toLocaleString('ko-KR', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-'}
             </td>
             <td class="px-3 py-2">
-              \${hasSession && cls.classin_instructor_url
-                ? \`<a href="\${cls.classin_instructor_url}" target="_blank" class="text-blue-500 hover:text-blue-700 text-xs"><i class="fas fa-sign-in-alt"></i></a>\`
+              \${hasSession && cls.latest_lesson_id
+                ? \`<a href="/api/classin/instructor-enter/\${cls.latest_lesson_id}?redirect=true" target="_blank" class="text-blue-500 hover:text-blue-700 text-xs"><i class="fas fa-sign-in-alt"></i></a>\`
                 : '-'}
             </td>
             <td class="px-3 py-2">\${createBtn}</td>
@@ -7583,7 +7666,7 @@ app.get('/admin', async (c) => {
                 <div class="flex gap-2 mt-3">
                   \${isEnded
                     ? \`<span class="flex-1 py-1.5 bg-gray-300 text-gray-600 text-xs font-semibold rounded-lg text-center cursor-default">수업 종료</span>\`
-                    : (lesson.classin_instructor_url ? \`<a href="\${lesson.classin_instructor_url}" target="_blank" class="flex-1 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg text-center">강사 입장</a>\` : '')}
+                    : (lesson.id ? \`<a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true" target="_blank" class="flex-1 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg text-center">강사 입장</a>\` : '')}
                   \${lesson.replay_url ? \`<a href="\${lesson.replay_url}" target="_blank" class="flex-1 py-1.5 bg-green-500 hover:bg-green-600 text-white text-xs font-semibold rounded-lg text-center">다시보기</a>\` : ''}
                 </div>
               </div>
