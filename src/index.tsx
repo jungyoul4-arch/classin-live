@@ -1395,7 +1395,12 @@ app.get('/api/user/:userId/enrollments-with-lessons', async (c) => {
     ORDER BY e.enrolled_at DESC
   `).bind(userId).all()
 
-  // 각 수강에 대한 수업 목록과 수강 여부 포함
+  // 각 수강에 대한 수업 목록과 수강 여부 포함 (종료된 수업은 replay_url 가져오기)
+  const now = Date.now()
+  const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
   const result = await Promise.all((enrollments as any[]).map(async (enrollment) => {
     const { results: lessons } = await c.env.DB.prepare(`
       SELECT cl.*,
@@ -1404,7 +1409,28 @@ app.get('/api/user/:userId/enrollments-with-lessons', async (c) => {
       FROM class_lessons cl
       WHERE cl.class_id = ?
       ORDER BY cl.scheduled_at ASC
-    `).bind(enrollment.id, userId, enrollment.class_id).all()
+    `).bind(enrollment.id, userId, enrollment.class_id).all() as { results: any[] }
+
+    // 종료된 수업의 replay_url 처리
+    for (const lesson of lessons) {
+      const startTime = lesson.scheduled_at ? new Date(lesson.scheduled_at).getTime() : 0
+      const duration = (lesson.duration_minutes || 60) * 60 * 1000
+      const isEnded = startTime > 0 && (startTime + duration) < now
+
+      if (isEnded && !lesson.replay_url && lesson.classin_course_id && lesson.classin_class_id && classInConfig) {
+        try {
+          const webcastResult = await getClassInWebcastUrl(classInConfig, lesson.classin_course_id, lesson.classin_class_id)
+          if (webcastResult.url) {
+            await c.env.DB.prepare(
+              'UPDATE class_lessons SET replay_url = ?, updated_at = datetime("now") WHERE id = ?'
+            ).bind(webcastResult.url, lesson.id).run()
+            lesson.replay_url = webcastResult.url
+          }
+        } catch (e) {
+          // ClassIn API 호출 실패 시 무시
+        }
+      }
+    }
 
     return {
       ...enrollment,
@@ -1440,11 +1466,37 @@ app.get('/api/user/:userId/instructor-classes-with-lessons', async (c) => {
     ORDER BY c.created_at DESC
   `).bind(instructor.id).all()
 
-  // 각 코스에 대한 수업 목록 포함
+  // 각 코스에 대한 수업 목록 포함 (종료된 수업은 replay_url 가져오기)
+  const now = Date.now()
+  const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
   const result = await Promise.all((courses as any[]).map(async (course) => {
     const { results: lessons } = await c.env.DB.prepare(`
       SELECT * FROM class_lessons WHERE class_id = ? ORDER BY scheduled_at ASC
-    `).bind(course.id).all()
+    `).bind(course.id).all() as { results: any[] }
+
+    // 종료된 수업의 replay_url 처리
+    for (const lesson of lessons) {
+      const startTime = lesson.scheduled_at ? new Date(lesson.scheduled_at).getTime() : 0
+      const duration = (lesson.duration_minutes || 60) * 60 * 1000
+      const isEnded = startTime > 0 && (startTime + duration) < now
+
+      if (isEnded && !lesson.replay_url && lesson.classin_course_id && lesson.classin_class_id && classInConfig) {
+        try {
+          const webcastResult = await getClassInWebcastUrl(classInConfig, lesson.classin_course_id, lesson.classin_class_id)
+          if (webcastResult.url) {
+            await c.env.DB.prepare(
+              'UPDATE class_lessons SET replay_url = ?, updated_at = datetime("now") WHERE id = ?'
+            ).bind(webcastResult.url, lesson.id).run()
+            lesson.replay_url = webcastResult.url
+          }
+        } catch (e) {
+          // ClassIn API 호출 실패 시 무시
+        }
+      }
+    }
 
     return {
       ...course,
@@ -2837,7 +2889,9 @@ app.get('/api/admin/classes/:classId/lessons', async (c) => {
   // 종료된 수업 처리 (오류 발생해도 기본 결과는 반환)
   try {
     const now = Date.now()
-    const classInConfig = await getClassInConfig(c.env.DB)
+    const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+      ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+      : null
 
     for (const lesson of results) {
       const startTime = lesson.scheduled_at ? new Date(lesson.scheduled_at).getTime() : 0
@@ -4022,7 +4076,9 @@ app.get('/api/classin-session/:sessionId', async (c) => {
   if (isEnded) {
     // classin_live_url이 없으면 webcast API 호출
     if (!session.classin_live_url && session.classin_course_id && session.classin_class_id) {
-      const classInConfig = await getClassInConfig(c.env.DB)
+      const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+        ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+        : null
       if (classInConfig) {
         const webcastResult = await getClassInWebcastUrl(classInConfig, session.classin_course_id, session.classin_class_id)
         if (webcastResult.url) {
