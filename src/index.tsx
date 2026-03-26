@@ -245,6 +245,57 @@ async function createClassInLesson(
   }
 }
 
+// ClassIn API: Delete Class (Lesson) via LMS API
+async function deleteClassInLesson(
+  config: ClassInConfig,
+  courseId: string,
+  activityId: string
+): Promise<{ success: boolean; notFound?: boolean; error?: string }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+
+  const bodyParams = {
+    courseId: parseInt(courseId),
+    activityId: parseInt(activityId)
+  }
+
+  const signature = await generateLmsSignature(bodyParams, config.SID, config.SECRET, timestamp)
+
+  try {
+    const res = await fetch(`${config.API_BASE}/lms/activity/delete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-EEO-SIGN': signature,
+        'X-EEO-UID': config.SID,
+        'X-EEO-TS': timestamp.toString()
+      },
+      body: JSON.stringify(bodyParams)
+    })
+
+    const data = await res.json() as any
+    console.log('LMS deleteActivity response:', JSON.stringify(data))
+
+    if (data.code === 1) {
+      return { success: true }
+    }
+    // 40005: 진행중인 수업 - 삭제 불가
+    if (data.code === 40005) {
+      return { success: false, error: '진행중인 수업은 삭제할 수 없습니다.' }
+    }
+    // 40006: 이미 종료된 수업 - 삭제 불가
+    if (data.code === 40006) {
+      return { success: false, error: '이미 종료된 수업은 삭제할 수 없습니다.' }
+    }
+    // 활동이 존재하지 않는 경우 (活动不存在) - 로컬에서만 삭제 진행
+    if (data.msg && (data.msg.includes('不存在') || data.msg.includes('not exist') || data.msg.includes('not found'))) {
+      return { success: true, notFound: true }
+    }
+    return { success: false, error: data.msg || 'Failed to delete lesson via LMS API' }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
 // ClassIn API: Get webcast/replay URL for a class
 async function getClassInWebcastUrl(
   config: ClassInConfig,
@@ -1246,7 +1297,7 @@ app.get('/api/user/:userId/enrollments', async (c) => {
   const userId = c.req.param('userId')
   const now = new Date().toISOString()
 
-  // 수강 목록과 함께 각 클래스의 다음 예정 수업, 최근 종료 수업 정보 포함
+  // 수강 목록과 함께 각 코스의 다음 예정 수업, 최근 종료 수업 정보 포함
   // 학생용 입장 URL은 classin_sessions에서 가져옴 (uid 포함된 URL)
   const { results } = await c.env.DB.prepare(`
     SELECT e.*, c.title, c.slug, c.thumbnail, c.total_lessons, i.display_name as instructor_name,
@@ -1286,7 +1337,7 @@ app.get('/api/user/:userId/enrollments', async (c) => {
   return c.json(results)
 })
 
-// Get instructor's classes (강사가 개설한 클래스 목록)
+// Get instructor's classes (강사가 개설한 코스 목록)
 app.get('/api/user/:userId/instructor-classes', async (c) => {
   const userId = c.req.param('userId')
 
@@ -1301,7 +1352,7 @@ app.get('/api/user/:userId/instructor-classes', async (c) => {
     return c.json([])
   }
 
-  // 강사의 클래스 목록과 다음 예정 수업 정보
+  // 강사의 코스 목록과 다음 예정 수업 정보
   const { results } = await c.env.DB.prepare(`
     SELECT c.*, cat.name as category_name,
            (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') as active_students,
@@ -1326,6 +1377,229 @@ app.get('/api/user/:userId/instructor-classes', async (c) => {
   `).bind(instructor.id).all()
 
   return c.json(results)
+})
+
+// Get user enrollments with all lesson details (for mypage)
+app.get('/api/user/:userId/enrollments-with-lessons', async (c) => {
+  const userId = c.req.param('userId')
+
+  // 수강 목록
+  const { results: enrollments } = await c.env.DB.prepare(`
+    SELECT e.*, c.id as class_id, c.title, c.slug, c.thumbnail, c.price, i.display_name as instructor_name,
+           s.status as subscription_status
+    FROM enrollments e
+    JOIN classes c ON e.class_id = c.id
+    JOIN instructors i ON c.instructor_id = i.id
+    LEFT JOIN subscriptions s ON s.user_id = e.user_id AND s.class_id = e.class_id AND s.status = 'active'
+    WHERE e.user_id = ? AND e.status = 'active'
+    ORDER BY e.enrolled_at DESC
+  `).bind(userId).all()
+
+  // 각 수강에 대한 수업 목록과 수강 여부 포함
+  const result = await Promise.all((enrollments as any[]).map(async (enrollment) => {
+    const { results: lessons } = await c.env.DB.prepare(`
+      SELECT cl.*,
+             (SELECT id FROM classin_sessions WHERE enrollment_id = ? AND classin_class_id = cl.classin_class_id LIMIT 1) as session_id,
+             (SELECT 1 FROM lesson_enrollments WHERE user_id = ? AND class_lesson_id = cl.id AND status = 'active') as is_enrolled
+      FROM class_lessons cl
+      WHERE cl.class_id = ?
+      ORDER BY cl.scheduled_at ASC
+    `).bind(enrollment.id, userId, enrollment.class_id).all()
+
+    return {
+      ...enrollment,
+      lessons: lessons
+    }
+  }))
+
+  return c.json(result)
+})
+
+// Get instructor's classes with all lesson details (for instructor mypage)
+app.get('/api/user/:userId/instructor-classes-with-lessons', async (c) => {
+  const userId = c.req.param('userId')
+
+  // 강사 확인
+  const instructor = await c.env.DB.prepare(`
+    SELECT i.id FROM instructors i
+    JOIN users u ON i.user_id = u.id
+    WHERE u.id = ? AND u.role = 'instructor'
+  `).bind(userId).first() as any
+
+  if (!instructor) {
+    return c.json([])
+  }
+
+  // 강사의 코스 목록
+  const { results: courses } = await c.env.DB.prepare(`
+    SELECT c.*, cat.name as category_name,
+           (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') as active_students
+    FROM classes c
+    LEFT JOIN categories cat ON c.category_id = cat.id
+    WHERE c.instructor_id = ?
+    ORDER BY c.created_at DESC
+  `).bind(instructor.id).all()
+
+  // 각 코스에 대한 수업 목록 포함
+  const result = await Promise.all((courses as any[]).map(async (course) => {
+    const { results: lessons } = await c.env.DB.prepare(`
+      SELECT * FROM class_lessons WHERE class_id = ? ORDER BY scheduled_at ASC
+    `).bind(course.id).all()
+
+    return {
+      ...course,
+      lessons: lessons
+    }
+  }))
+
+  return c.json(result)
+})
+
+// Instructor creates lessons for their course
+app.post('/api/instructor/classes/:classId/create-sessions', async (c) => {
+  const classId = parseInt(c.req.param('classId'))
+  const { lessons, userId } = await c.req.json()
+
+  // 강사 확인
+  const instructor = await c.env.DB.prepare(`
+    SELECT i.id, i.classin_uid FROM instructors i
+    JOIN users u ON i.user_id = u.id
+    WHERE u.id = ? AND u.role = 'instructor'
+  `).bind(userId).first() as any
+
+  if (!instructor) {
+    return c.json({ error: '강사 권한이 없습니다.' }, 403)
+  }
+
+  // 코스 정보 조회 (classin_course_id 포함)
+  const cls = await c.env.DB.prepare(`
+    SELECT id, title, classin_course_id, duration_minutes FROM classes WHERE id = ? AND instructor_id = ?
+  `).bind(classId, instructor.id).first() as any
+
+  if (!cls) {
+    return c.json({ error: '해당 코스에 대한 권한이 없습니다.' }, 403)
+  }
+
+  if (!Array.isArray(lessons) || lessons.length === 0) {
+    return c.json({ error: '수업 정보가 필요합니다.' }, 400)
+  }
+
+  const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  if (!config) {
+    return c.json({ error: 'ClassIn API가 설정되지 않았습니다.' }, 500)
+  }
+
+  if (!instructor.classin_uid) {
+    return c.json({ error: '강사가 ClassIn에 등록되지 않았습니다.' }, 400)
+  }
+
+  const teacherUid = instructor.classin_uid
+
+  // 1. 코스 - 기존 코스가 있으면 재사용, 없으면 새로 생성
+  let courseId = cls.classin_course_id
+  if (!courseId) {
+    const courseResult = await createClassInCourse(config, cls.title, teacherUid)
+    if (!courseResult.courseId) {
+      return c.json({ error: '코스 생성 실패: ' + courseResult.error }, 500)
+    }
+    courseId = courseResult.courseId
+    // 코스 ID를 classes 테이블에 저장
+    await c.env.DB.prepare('UPDATE classes SET classin_course_id = ? WHERE id = ?').bind(courseId, classId).run()
+  }
+
+  // 2. 현재 수업 수 조회
+  const lessonCountResult = await c.env.DB.prepare(
+    'SELECT COUNT(*) as count FROM class_lessons WHERE class_id = ?'
+  ).bind(classId).first() as any
+  let lessonNumber = (lessonCountResult?.count || 0)
+
+  const createdLessons: any[] = []
+  const errors: string[] = []
+
+  for (let i = 0; i < lessons.length; i++) {
+    const lesson = lessons[i]
+    const scheduledAt = lesson.scheduledAt
+    const durationMinutes = lesson.durationMinutes || cls.duration_minutes || 60
+
+    if (!scheduledAt) {
+      errors.push(`수업 ${i + 1}: 시작 시간이 필요합니다.`)
+      continue
+    }
+
+    // 시간 검증: 최소 2분 후여야 함
+    const scheduledTime = new Date(scheduledAt).getTime()
+    const minTime = Date.now() + 2 * 60 * 1000
+    if (scheduledTime < minTime) {
+      errors.push(`수업 ${i + 1}: 시작 시간은 현재로부터 최소 2분 후여야 합니다.`)
+      continue
+    }
+
+    lessonNumber++
+    const lessonTitle = lesson.title || `${cls.title} #${lessonNumber}`
+
+    // ClassIn 수업 생성
+    const beginTime = Math.floor(scheduledTime / 1000)
+    const endTime = beginTime + durationMinutes * 60
+
+    const lessonResult = await createClassInLesson(
+      config,
+      courseId,
+      lessonTitle,
+      beginTime,
+      endTime,
+      teacherUid,
+      { live: 1, record: 1 }
+    )
+
+    if (!lessonResult.classId) {
+      errors.push(`${lessonTitle}: ClassIn 수업 생성 실패 - ${lessonResult.error}`)
+      lessonNumber--
+      continue
+    }
+
+    // 강사 입장 URL 생성
+    const instructorUrlResult = await getClassInLoginUrl(config, teacherUid, courseId, lessonResult.classId, 1, 3)
+    const instructorUrl = instructorUrlResult.url ||
+      `https://www.eeo.cn/client/invoke/index.html?uid=${teacherUid}&classId=${lessonResult.classId}&courseId=${courseId}&schoolId=${config.SID}`
+
+    // DB에 저장
+    const result = await c.env.DB.prepare(`
+      INSERT INTO class_lessons (class_id, lesson_number, lesson_title, classin_course_id, classin_class_id,
+                                 classin_instructor_url, scheduled_at, duration_minutes, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
+    `).bind(classId, lessonNumber, lessonTitle, courseId, lessonResult.classId, instructorUrl, scheduledAt, durationMinutes).run()
+
+    createdLessons.push({
+      id: result.meta.last_row_id,
+      lessonNumber,
+      lessonTitle,
+      classId: lessonResult.classId,
+      scheduledAt,
+      durationMinutes
+    })
+  }
+
+  // classes 테이블 업데이트 (최신 수업 정보)
+  if (createdLessons.length > 0) {
+    const latestLesson = createdLessons[createdLessons.length - 1]
+    await c.env.DB.prepare(`
+      UPDATE classes
+      SET classin_course_id = ?, classin_class_id = ?,
+          classin_status = 'scheduled', lesson_count = ?
+      WHERE id = ?
+    `).bind(courseId, latestLesson.classId, lessonNumber, classId).run()
+  }
+
+  return c.json({
+    success: true,
+    message: `${createdLessons.length}개 수업이 생성되었습니다.`,
+    courseId,
+    createdLessons,
+    errors: errors.length > 0 ? errors : undefined
+  })
 })
 
 // Get user wishlist
@@ -1392,7 +1666,7 @@ app.delete('/api/cart', async (c) => {
 
 // Process payment (demo) - with ClassIn session auto-creation
 app.post('/api/payment/process', async (c) => {
-  const { userId, classId, paymentMethod, cardNumber, cardExpiry, cardCvc, amount, orderType, subscriptionPlan } = await c.req.json()
+  const { userId, classId, lessonId, paymentMethod, cardNumber, cardExpiry, cardCvc, amount, orderType, subscriptionPlan } = await c.req.json()
 
   const last4 = cardNumber ? cardNumber.slice(-4) : '0000'
   const txId = `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
@@ -1405,6 +1679,83 @@ app.post('/api/payment/process', async (c) => {
 
   let classinSession: ClassInSessionResult | null = null
   let virtualAccountInfo: { accountUid: string; password: string; isRegistered: boolean } | null = null
+
+  // 수업별 결제 처리
+  if (orderType === 'lesson' && lessonId) {
+    // Get lesson info
+    const lessonInfo = await c.env.DB.prepare('SELECT * FROM class_lessons WHERE id = ?').bind(lessonId).first() as any
+    const user = await c.env.DB.prepare('SELECT name FROM users WHERE id = ?').bind(userId).first() as any
+    const userName = user?.name || 'Student'
+
+    // Create lesson enrollment
+    await c.env.DB.prepare(`
+      INSERT INTO lesson_enrollments (user_id, class_lesson_id, payment_id, status)
+      VALUES (?, ?, ?, 'active')
+      ON CONFLICT(user_id, class_lesson_id) DO UPDATE SET status = 'active'
+    `).bind(userId, lessonId, orderResult.meta.last_row_id).run()
+
+    // Also create a course enrollment if not exists (for accessing course info)
+    if (lessonInfo?.class_id) {
+      await c.env.DB.prepare(`
+        INSERT INTO enrollments (user_id, class_id, status)
+        VALUES (?, ?, 'active')
+        ON CONFLICT(user_id, class_id) DO NOTHING
+      `).bind(userId, lessonInfo.class_id).run()
+
+      // Get enrollment ID
+      const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, lessonInfo.class_id).first() as any
+
+      const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+        ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+        : null
+
+      // Assign virtual account
+      if (enrollment?.id) {
+        const assignResult = await assignVirtualAccountToEnrollment(
+          c.env.DB,
+          enrollment.id,
+          userId,
+          userName,
+          classInConfig
+        )
+        if (assignResult.success) {
+          virtualAccountInfo = {
+            accountUid: assignResult.accountUid!,
+            password: assignResult.password!,
+            isRegistered: assignResult.isRegistered || false
+          }
+        }
+      }
+
+      // Create ClassIn session for this specific lesson if it has ClassIn info
+      if (lessonInfo.classin_class_id && lessonInfo.classin_course_id) {
+        classinSession = await createClassInSession(
+          c.env.DB,
+          lessonInfo.class_id,
+          userId,
+          enrollment?.id || 0,
+          classInConfig || undefined,
+          lessonId
+        )
+      }
+    }
+
+    return c.json({
+      success: true,
+      orderId: orderResult.meta.last_row_id,
+      transactionId: txId,
+      message: '수업 결제가 완료되었습니다!',
+      virtualAccount: virtualAccountInfo,
+      classinSession: classinSession ? {
+        joinUrl: classinSession.joinUrl,
+        classId: classinSession.classId,
+        courseId: classinSession.courseId,
+        isDemo: !c.env.CLASSIN_SID || classinSession.courseId?.startsWith('DEMO_'),
+        error: classinSession.error,
+        debugInfo: classinSession.debugInfo
+      } : null
+    })
+  }
 
   // If class purchase, create enrollment + assign virtual account + ClassIn session
   if (classId) {
@@ -1566,6 +1917,59 @@ app.get('/api/user/:userId/test-status', async (c) => {
   })
 })
 
+// Test account lesson enrollment (테스트 계정 수업 등록)
+app.post('/api/lesson-enroll/test', async (c) => {
+  const { userId, lessonId } = await c.req.json()
+
+  if (!userId || !lessonId) {
+    return c.json({ error: 'userId와 lessonId가 필요합니다.' }, 400)
+  }
+
+  // Check if user is valid test account
+  const user = await c.env.DB.prepare(`
+    SELECT id, name, is_test_account, test_expires_at FROM users WHERE id = ?
+  `).bind(userId).first() as any
+
+  if (!user) {
+    return c.json({ error: '사용자를 찾을 수 없습니다.' }, 404)
+  }
+
+  const isTestActive = user.is_test_account === 1 &&
+    (!user.test_expires_at || new Date(user.test_expires_at) > new Date())
+
+  if (!isTestActive) {
+    return c.json({ error: '테스트 계정이 아니거나 만료되었습니다.' }, 403)
+  }
+
+  // Get lesson info
+  const lessonInfo = await c.env.DB.prepare('SELECT * FROM class_lessons WHERE id = ?').bind(lessonId).first() as any
+  if (!lessonInfo) {
+    return c.json({ error: '수업을 찾을 수 없습니다.' }, 404)
+  }
+
+  // Create lesson enrollment
+  await c.env.DB.prepare(`
+    INSERT INTO lesson_enrollments (user_id, class_lesson_id, status)
+    VALUES (?, ?, 'active')
+    ON CONFLICT(user_id, class_lesson_id) DO UPDATE SET status = 'active'
+  `).bind(userId, lessonId).run()
+
+  // Also create course enrollment if not exists
+  if (lessonInfo.class_id) {
+    await c.env.DB.prepare(`
+      INSERT INTO enrollments (user_id, class_id, status)
+      VALUES (?, ?, 'active')
+      ON CONFLICT(user_id, class_id) DO NOTHING
+    `).bind(userId, lessonInfo.class_id).run()
+  }
+
+  return c.json({
+    success: true,
+    message: '수업 수강 등록이 완료되었습니다. (테스트 계정)',
+    lessonId: lessonId
+  })
+})
+
 // Test account: Free enrollment (테스트 계정용 무료 수강신청)
 app.post('/api/test-account/enroll', async (c) => {
   try {
@@ -1649,7 +2053,7 @@ app.post('/api/test-account/enroll', async (c) => {
 
       return c.json({
         success: true,
-        message: '이미 수강 중인 클래스입니다.',
+        message: '이미 수강 중인 코스입니다.',
         classinSession: classinSession ? {
           joinUrl: joinUrl,
           classId: classinSession.classin_class_id,
@@ -2175,7 +2579,7 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
     return c.json({ error: 'ClassIn API가 설정되지 않았습니다.' }, 500)
   }
 
-  // 클래스 및 강사 정보 조회
+  // 코스 및 강사 정보 조회
   const cls = await c.env.DB.prepare(`
     SELECT c.*, i.classin_uid as instructor_classin_uid, i.display_name as instructor_name
     FROM classes c
@@ -2184,7 +2588,7 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
   `).bind(classId).first() as any
 
   if (!cls) {
-    return c.json({ error: '클래스를 찾을 수 없습니다.' }, 404)
+    return c.json({ error: '코스를 찾을 수 없습니다.' }, 404)
   }
 
   if (!cls.instructor_classin_uid) {
@@ -2286,7 +2690,141 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
   })
 })
 
-// 관리자: 클래스별 수업 이력 조회
+// 관리자: 여러 수업 한 번에 생성
+app.post('/api/admin/classes/:classId/create-sessions', async (c) => {
+  const classId = parseInt(c.req.param('classId'))
+  const { lessons } = await c.req.json() as { lessons: Array<{ title?: string; scheduledAt: string; durationMinutes?: number }> }
+
+  if (!lessons || !Array.isArray(lessons) || lessons.length === 0) {
+    return c.json({ error: '최소 1개의 수업 정보가 필요합니다.' }, 400)
+  }
+
+  const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  if (!config) {
+    return c.json({ error: 'ClassIn API가 설정되지 않았습니다.' }, 500)
+  }
+
+  // 코스 및 강사 정보 조회
+  const cls = await c.env.DB.prepare(`
+    SELECT c.*, i.classin_uid as instructor_classin_uid, i.display_name as instructor_name
+    FROM classes c
+    JOIN instructors i ON c.instructor_id = i.id
+    WHERE c.id = ?
+  `).bind(classId).first() as any
+
+  if (!cls) {
+    return c.json({ error: '코스를 찾을 수 없습니다.' }, 404)
+  }
+
+  if (!cls.instructor_classin_uid) {
+    return c.json({ error: '강사가 ClassIn에 등록되지 않았습니다. 먼저 강사를 등록해주세요.' }, 400)
+  }
+
+  const teacherUid = cls.instructor_classin_uid
+
+  // 1. 코스 - 기존 코스가 있으면 재사용, 없으면 새로 생성
+  let courseId = cls.classin_course_id
+  if (!courseId) {
+    const courseResult = await createClassInCourse(config, cls.title, teacherUid)
+    if (!courseResult.courseId) {
+      return c.json({ error: '코스 생성 실패: ' + courseResult.error }, 500)
+    }
+    courseId = courseResult.courseId
+  }
+
+  // 2. 현재 수업 수 조회
+  const lessonCountResult = await c.env.DB.prepare(
+    'SELECT COUNT(*) as count FROM class_lessons WHERE class_id = ?'
+  ).bind(classId).first() as any
+  let lessonNumber = (lessonCountResult?.count || 0)
+
+  // 3. 각 수업 생성
+  const createdLessons: any[] = []
+  const errors: string[] = []
+
+  for (const lesson of lessons) {
+    // 시간 검증: 최소 2분 후여야 함
+    const scheduledTime = new Date(lesson.scheduledAt).getTime()
+    const minTime = Date.now() + 2 * 60 * 1000
+    if (scheduledTime < minTime) {
+      errors.push(`${lesson.title || '수업'}: 시작 시간은 현재로부터 최소 2분 후여야 합니다.`)
+      continue
+    }
+
+    lessonNumber++
+    const lessonTitle = lesson.title || `${cls.title} #${lessonNumber}`
+    const durationMinutes = lesson.durationMinutes || cls.duration_minutes || 60
+
+    // ClassIn 수업 생성
+    const beginTime = Math.floor(scheduledTime / 1000)
+    const endTime = beginTime + durationMinutes * 60
+
+    const lessonResult = await createClassInLesson(
+      config,
+      courseId,
+      lessonTitle,
+      beginTime,
+      endTime,
+      teacherUid,
+      { live: 1, record: 1 }
+    )
+
+    if (!lessonResult.classId) {
+      errors.push(`${lessonTitle}: ClassIn 수업 생성 실패 - ${lessonResult.error}`)
+      lessonNumber-- // 롤백
+      continue
+    }
+
+    // 강사 입장 URL 생성
+    const instructorUrlResult = await getClassInLoginUrl(config, teacherUid, courseId, lessonResult.classId, 1, 3)
+    const instructorUrl = instructorUrlResult.url ||
+      `https://www.eeo.cn/client/invoke/index.html?uid=${teacherUid}&classId=${lessonResult.classId}&courseId=${courseId}&schoolId=${config.SID}`
+
+    // DB에 저장
+    await c.env.DB.prepare(`
+      INSERT INTO class_lessons (class_id, lesson_number, lesson_title, classin_course_id, classin_class_id,
+                                 classin_instructor_url, scheduled_at, duration_minutes, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
+    `).bind(classId, lessonNumber, lessonTitle, courseId, lessonResult.classId, instructorUrl, lesson.scheduledAt, durationMinutes).run()
+
+    createdLessons.push({
+      lessonNumber,
+      lessonTitle,
+      classId: lessonResult.classId,
+      scheduledAt: lesson.scheduledAt,
+      durationMinutes
+    })
+  }
+
+  // 4. classes 테이블 업데이트 (최신 수업 정보)
+  if (createdLessons.length > 0) {
+    const latestLesson = createdLessons[createdLessons.length - 1]
+    await c.env.DB.prepare(`
+      UPDATE classes
+      SET classin_course_id = ?, classin_class_id = ?,
+          classin_status = 'scheduled', classin_created_at = datetime('now'),
+          lesson_count = ?
+      WHERE id = ?
+    `).bind(courseId, latestLesson.classId, lessonNumber, classId).run()
+  }
+
+  if (createdLessons.length === 0) {
+    return c.json({ error: errors.join('\n') || '수업 생성에 실패했습니다.' }, 400)
+  }
+
+  return c.json({
+    success: true,
+    message: `${createdLessons.length}개 수업이 생성되었습니다.` + (errors.length > 0 ? ` (${errors.length}개 실패)` : ''),
+    courseId,
+    createdLessons,
+    errors: errors.length > 0 ? errors : undefined
+  })
+})
+
+// 관리자: 코스별 수업 이력 조회
 app.get('/api/admin/classes/:classId/lessons', async (c) => {
   const classId = parseInt(c.req.param('classId'))
 
@@ -2362,7 +2900,113 @@ app.patch('/api/admin/lessons/:lessonId', async (c) => {
   return c.json({ success: true })
 })
 
-// 관리자: 클래스 목록 (ClassIn 상태 포함)
+// 관리자: 수업 삭제
+app.delete('/api/admin/lessons/:lessonId', async (c) => {
+  const lessonId = parseInt(c.req.param('lessonId'))
+
+  // 수업 정보 조회
+  const lesson = await c.env.DB.prepare(
+    'SELECT * FROM class_lessons WHERE id = ?'
+  ).bind(lessonId).first() as any
+
+  if (!lesson) {
+    return c.json({ error: '수업을 찾을 수 없습니다.' }, 404)
+  }
+
+  // ClassIn에서 수업 삭제 시도 (진행중/종료된 수업은 삭제 불가)
+  if (lesson.classin_course_id && lesson.classin_class_id) {
+    const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+      ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+      : null
+
+    if (config) {
+      const deleteResult = await deleteClassInLesson(config, lesson.classin_course_id, lesson.classin_class_id)
+      if (!deleteResult.success) {
+        // ClassIn 삭제 실패 시 에러 반환 (진행중/종료된 수업)
+        return c.json({ error: deleteResult.error || 'ClassIn 수업 삭제 실패' }, 400)
+      }
+    }
+  }
+
+  // DB에서 수업 삭제
+  await c.env.DB.prepare('DELETE FROM class_lessons WHERE id = ?').bind(lessonId).run()
+
+  // lesson_enrollments에서도 삭제
+  await c.env.DB.prepare('DELETE FROM lesson_enrollments WHERE class_lesson_id = ?').bind(lessonId).run()
+
+  // 코스의 lesson_count 업데이트
+  if (lesson.class_id) {
+    const countResult = await c.env.DB.prepare(
+      'SELECT COUNT(*) as count FROM class_lessons WHERE class_id = ?'
+    ).bind(lesson.class_id).first() as any
+    await c.env.DB.prepare(
+      'UPDATE classes SET lesson_count = ? WHERE id = ?'
+    ).bind(countResult?.count || 0, lesson.class_id).run()
+  }
+
+  return c.json({ success: true, message: '수업이 삭제되었습니다.' })
+})
+
+// 강사: 수업 삭제
+app.delete('/api/instructor/lessons/:lessonId', async (c) => {
+  const lessonId = parseInt(c.req.param('lessonId'))
+  const { userId } = await c.req.json()
+
+  // 강사 확인
+  const instructor = await c.env.DB.prepare(`
+    SELECT i.id FROM instructors i
+    JOIN users u ON i.user_id = u.id
+    WHERE u.id = ? AND u.role = 'instructor'
+  `).bind(userId).first() as any
+
+  if (!instructor) {
+    return c.json({ error: '강사 권한이 없습니다.' }, 403)
+  }
+
+  // 수업 정보 조회 (이 강사의 코스인지 확인)
+  const lesson = await c.env.DB.prepare(`
+    SELECT cl.*, c.instructor_id
+    FROM class_lessons cl
+    JOIN classes c ON cl.class_id = c.id
+    WHERE cl.id = ? AND c.instructor_id = ?
+  `).bind(lessonId, instructor.id).first() as any
+
+  if (!lesson) {
+    return c.json({ error: '수업을 찾을 수 없거나 권한이 없습니다.' }, 404)
+  }
+
+  // ClassIn에서 수업 삭제 시도
+  if (lesson.classin_course_id && lesson.classin_class_id) {
+    const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+      ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+      : null
+
+    if (config) {
+      const deleteResult = await deleteClassInLesson(config, lesson.classin_course_id, lesson.classin_class_id)
+      if (!deleteResult.success) {
+        return c.json({ error: deleteResult.error || 'ClassIn 수업 삭제 실패' }, 400)
+      }
+    }
+  }
+
+  // DB에서 수업 삭제
+  await c.env.DB.prepare('DELETE FROM class_lessons WHERE id = ?').bind(lessonId).run()
+  await c.env.DB.prepare('DELETE FROM lesson_enrollments WHERE class_lesson_id = ?').bind(lessonId).run()
+
+  // 코스의 lesson_count 업데이트
+  if (lesson.class_id) {
+    const countResult = await c.env.DB.prepare(
+      'SELECT COUNT(*) as count FROM class_lessons WHERE class_id = ?'
+    ).bind(lesson.class_id).first() as any
+    await c.env.DB.prepare(
+      'UPDATE classes SET lesson_count = ? WHERE id = ?'
+    ).bind(countResult?.count || 0, lesson.class_id).run()
+  }
+
+  return c.json({ success: true, message: '수업이 삭제되었습니다.' })
+})
+
+// 관리자: 코스 목록 (ClassIn 상태 포함)
 app.get('/api/admin/classes', async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT c.*, i.display_name as instructor_name, i.classin_uid as instructor_classin_uid,
@@ -2380,7 +3024,7 @@ app.get('/api/admin/classes', async (c) => {
   return c.json({ classes: results })
 })
 
-// 관리자: 클래스 생성
+// 관리자: 코스 생성
 app.post('/api/admin/classes', async (c) => {
   const { title, description, instructorId, categoryId, price, scheduleStart, durationMinutes, thumbnail, level, classType } = await c.req.json()
 
@@ -2415,14 +3059,14 @@ app.post('/api/admin/classes', async (c) => {
   })
 })
 
-// 관리자: 클래스 수정
+// 관리자: 코스 수정
 app.put('/api/admin/classes/:id', async (c) => {
   const classId = parseInt(c.req.param('id'))
   const { title, description, instructorId, categoryId, price, scheduleStart, durationMinutes, thumbnail, level, classType, status } = await c.req.json()
 
   const cls = await c.env.DB.prepare('SELECT id FROM classes WHERE id = ?').bind(classId).first()
   if (!cls) {
-    return c.json({ error: '클래스를 찾을 수 없습니다.' }, 404)
+    return c.json({ error: '코스를 찾을 수 없습니다.' }, 404)
   }
 
   await c.env.DB.prepare(`
@@ -2455,16 +3099,16 @@ app.put('/api/admin/classes/:id', async (c) => {
     classId
   ).run()
 
-  return c.json({ success: true, message: '클래스가 수정되었습니다.' })
+  return c.json({ success: true, message: '코스가 수정되었습니다.' })
 })
 
-// 관리자: 클래스 삭제
+// 관리자: 코스 삭제
 app.delete('/api/admin/classes/:id', async (c) => {
   const classId = parseInt(c.req.param('id'))
 
   const cls = await c.env.DB.prepare('SELECT id, title FROM classes WHERE id = ?').bind(classId).first() as any
   if (!cls) {
-    return c.json({ error: '클래스를 찾을 수 없습니다.' }, 404)
+    return c.json({ error: '코스를 찾을 수 없습니다.' }, 404)
   }
 
   // 활성 수강생이 있는지 확인 (종료/만료된 수강은 제외)
@@ -2486,10 +3130,10 @@ app.delete('/api/admin/classes/:id', async (c) => {
   await c.env.DB.prepare('DELETE FROM subscriptions WHERE class_id = ?').bind(classId).run()
   await c.env.DB.prepare('DELETE FROM class_lessons WHERE class_id = ?').bind(classId).run()
 
-  // 클래스 삭제
+  // 코스 삭제
   await c.env.DB.prepare('DELETE FROM classes WHERE id = ?').bind(classId).run()
 
-  return c.json({ success: true, message: '클래스가 삭제되었습니다.' })
+  return c.json({ success: true, message: '코스가 삭제되었습니다.' })
 })
 
 // 관리자: 카테고리 목록
@@ -2498,7 +3142,7 @@ app.get('/api/admin/categories', async (c) => {
   return c.json({ categories: results })
 })
 
-// 관리자: 특정 클래스 ClassIn 정보 조회
+// 관리자: 특정 코스 ClassIn 정보 조회
 app.get('/api/admin/classes/:classId/session', async (c) => {
   const classId = parseInt(c.req.param('classId'))
 
@@ -2512,7 +3156,7 @@ app.get('/api/admin/classes/:classId/session', async (c) => {
   `).bind(classId).first() as any
 
   if (!cls) {
-    return c.json({ error: '클래스를 찾을 수 없습니다.' }, 404)
+    return c.json({ error: '코스를 찾을 수 없습니다.' }, 404)
   }
 
   // 해당 수업의 수강생 수
@@ -2741,10 +3385,10 @@ app.get('/api/admin/instructors', async (c) => {
 
 // Create new instructor (관리자: 강사 등록)
 app.post('/api/admin/instructors', async (c) => {
-  const { name, email, classInAccount, profileImage } = await c.req.json()
+  const { name, email, phone, classInMethod, profileImage } = await c.req.json()
 
-  if (!name || !email) {
-    return c.json({ error: '이름과 로그인 이메일은 필수입니다.' }, 400)
+  if (!name || !email || !phone) {
+    return c.json({ error: '이름, 이메일, 전화번호는 필수입니다.' }, 400)
   }
 
   // 이메일 중복 체크
@@ -2753,19 +3397,19 @@ app.post('/api/admin/instructors', async (c) => {
     return c.json({ error: '이미 등록된 이메일입니다.' }, 400)
   }
 
-  // ClassIn 계정 결정 (입력값 없으면 로그인 이메일 사용)
-  const classInAccountValue = classInAccount?.trim() || email
+  // ClassIn 등록 계정 결정 (방식에 따라 이메일 또는 전화번호 사용)
+  const classInAccountValue = classInMethod === 'email' ? email : phone
 
-  // 1. 유저 생성 (ClassIn 계정을 phone 필드에 저장 - 전화번호/이메일 모두 가능)
+  // 1. 유저 생성
   const passwordHash = '$2a$10$defaulthash' // 임시 비밀번호
   const userResult = await c.env.DB.prepare(`
     INSERT INTO users (email, password_hash, name, phone, role)
     VALUES (?, ?, ?, ?, 'instructor')
-  `).bind(email, passwordHash, name, classInAccountValue !== email ? classInAccountValue : '').run()
+  `).bind(email, passwordHash, name, phone).run()
 
   const userId = userResult.meta.last_row_id
 
-  // 2. 강사 레코드 생성
+  // 2. 강사 레코드 생성 (classin_method 저장)
   const instructorResult = await c.env.DB.prepare(`
     INSERT INTO instructors (user_id, display_name, profile_image)
     VALUES (?, ?, ?)
@@ -2773,7 +3417,7 @@ app.post('/api/admin/instructors', async (c) => {
 
   const instructorId = instructorResult.meta.last_row_id
 
-  // 3. ClassIn 등록 (classInAccount 또는 이메일로 등록)
+  // 3. ClassIn 등록 (선택한 방식으로 등록)
   let classInUid = ''
   let classInError = ''
   if (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET) {
@@ -2798,6 +3442,7 @@ app.post('/api/admin/instructors', async (c) => {
       user_id: userId,
       display_name: name,
       email,
+      phone,
       classin_uid: classInUid
     },
     classInError: classInError || undefined
@@ -2807,11 +3452,15 @@ app.post('/api/admin/instructors', async (c) => {
 // Update instructor (관리자: 강사 수정)
 app.put('/api/admin/instructors/:id', async (c) => {
   const instructorId = parseInt(c.req.param('id'))
-  const { name, email, phone, profileImage } = await c.req.json()
+  const { name, email, phone, profileImage, classInMethod } = await c.req.json()
+
+  if (!phone) {
+    return c.json({ error: '전화번호는 필수입니다.' }, 400)
+  }
 
   // 강사 정보 조회
   const instructor = await c.env.DB.prepare(`
-    SELECT i.*, u.id as user_id, u.phone as user_phone FROM instructors i
+    SELECT i.*, u.id as user_id, u.phone as user_phone, u.email as user_email FROM instructors i
     JOIN users u ON i.user_id = u.id
     WHERE i.id = ?
   `).bind(instructorId).first() as any
@@ -2832,10 +3481,13 @@ app.put('/api/admin/instructors/:id', async (c) => {
     WHERE id = ?
   `).bind(name || null, email || null, phone || null, instructor.user_id).run()
 
-  // 전화번호가 변경되었고 ClassIn 설정이 있으면 재등록
+  // 전화번호/이메일이 변경되었거나 ClassIn 미등록 상태면 재등록
   let classInResult = null
   const phoneChanged = phone && phone !== instructor.user_phone
-  if (phoneChanged && c.env.CLASSIN_SID && c.env.CLASSIN_SECRET) {
+  const emailChanged = email && email !== instructor.user_email
+  const needReregister = (classInMethod === 'phone' && phoneChanged) || (classInMethod === 'email' && emailChanged) || !instructor.classin_uid
+
+  if (needReregister && c.env.CLASSIN_SID && c.env.CLASSIN_SECRET) {
     const config = {
       SID: c.env.CLASSIN_SID,
       SECRET: c.env.CLASSIN_SECRET,
@@ -2847,8 +3499,9 @@ app.put('/api/admin/instructors/:id', async (c) => {
       UPDATE instructors SET classin_uid = NULL, classin_registered_at = NULL WHERE id = ?
     `).bind(instructorId).run()
 
-    // 새 전화번호로 ClassIn 재등록
-    classInResult = await registerInstructorWithClassIn(c.env.DB, instructorId, config, phone)
+    // 선택한 방식으로 ClassIn 재등록
+    const classInAccountValue = classInMethod === 'email' ? (email || instructor.user_email) : (phone || instructor.user_phone)
+    classInResult = await registerInstructorWithClassIn(c.env.DB, instructorId, config, classInAccountValue)
   }
 
   return c.json({
@@ -2876,13 +3529,13 @@ app.delete('/api/admin/instructors/:id', async (c) => {
     return c.json({ error: '강사를 찾을 수 없습니다.' }, 404)
   }
 
-  // 해당 강사의 클래스가 있는지 확인
+  // 해당 강사의 코스가 있는지 확인
   const hasClasses = await c.env.DB.prepare(
     'SELECT COUNT(*) as count FROM classes WHERE instructor_id = ?'
   ).bind(instructorId).first() as any
 
   if (hasClasses?.count > 0) {
-    return c.json({ error: `이 강사에게 ${hasClasses.count}개의 클래스가 있습니다. 먼저 클래스를 삭제해주세요.` }, 400)
+    return c.json({ error: `이 강사에게 ${hasClasses.count}개의 코스가 있습니다. 먼저 코스를 삭제해주세요.` }, 400)
   }
 
   // 강사 삭제
@@ -3015,10 +3668,10 @@ app.delete('/api/admin/users/:id', async (c) => {
 })
 
 // ============================================
-// 관리자: 클래스별 수강신청자 관리
+// 관리자: 코스별 수강신청자 관리
 // ============================================
 
-// 클래스별 수강신청자 목록
+// 코스별 수강신청자 목록
 app.get('/api/admin/classes/:classId/enrollments', async (c) => {
   const classId = parseInt(c.req.param('classId'))
 
@@ -3033,7 +3686,7 @@ app.get('/api/admin/classes/:classId/enrollments', async (c) => {
   return c.json({ enrollments: results })
 })
 
-// 전체 수강신청자 목록 (클래스 정보 포함)
+// 전체 수강신청자 목록 (코스 정보 포함)
 app.get('/api/admin/enrollments', async (c) => {
   const classId = c.req.query('classId')
   const status = c.req.query('status')
@@ -3570,17 +4223,17 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
 
   const accountUid = virtualAccount.classin_uid || virtualAccount.account_uid
 
-  // Step 2: 코스에 학생으로 추가 (authTicket을 받으려면 학생으로 추가해야 함)
-  await addStudentToCourse(classInConfig, lesson.classin_course_id, accountUid)
+  // Step 2: 코스에 강사/조교(identity=3)로 추가 (칠판 권한 필요)
+  await addTeacherToCourse(classInConfig, lesson.classin_course_id, accountUid)
 
-  // Step 3: Generate fresh login URL with token
+  // Step 3: Generate fresh login URL with token (identity=3: 강사/조교)
   const loginUrlResult = await getClassInLoginUrl(
     classInConfig,
     accountUid,
     lesson.classin_course_id,
     lesson.classin_class_id,
     1,  // PC
-    1   // 학생으로 입장 (authTicket 받기 위해)
+    3   // 강사/조교로 입장 (칠판 권한)
   )
 
   if (loginUrlResult.url) {
@@ -3839,7 +4492,7 @@ const headHTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ClassIn Live - 라이브 양방향 클래스 플랫폼</title>
+  <title>ClassIn Live - 라이브 양방향 코스 플랫폼</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.0/css/all.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css" rel="stylesheet">
@@ -3955,7 +4608,7 @@ const footerHTML = `
         <h3 class="text-white font-bold mb-4">크리에이터</h3>
         <ul class="space-y-2 text-sm">
           <li><a href="#" class="hover:text-white transition-colors">크리에이터 센터</a></li>
-          <li><a href="#" class="hover:text-white transition-colors">클래스 개설</a></li>
+          <li><a href="#" class="hover:text-white transition-colors">코스 개설</a></li>
           <li><a href="#" class="hover:text-white transition-colors">정산 안내</a></li>
           <li><a href="#" class="hover:text-white transition-colors">크리에이터 가이드</a></li>
         </ul>
@@ -4021,7 +4674,7 @@ const modalsHTML = `
       <div class="text-center mb-6">
         <div class="w-12 h-12 bg-primary-500 rounded-xl flex items-center justify-center mx-auto mb-3"><i class="fas fa-play text-white"></i></div>
         <h2 class="text-2xl font-bold text-dark-900">회원가입</h2>
-        <p class="text-sm text-gray-500 mt-1">지금 가입하고 무료 클래스를 체험하세요</p>
+        <p class="text-sm text-gray-500 mt-1">지금 가입하고 무료 코스를 체험하세요</p>
       </div>
       <div class="space-y-4">
         <div>
@@ -4161,9 +4814,9 @@ const modalsHTML = `
     
     <div class="flex gap-2">
       <button onclick="closeSuccessModal()" class="flex-1 h-11 bg-gray-100 hover:bg-gray-200 text-dark-700 font-semibold rounded-xl transition-all">확인</button>
-      <button id="goToMyClassBtn" onclick="closeSuccessModal(); openMyPage('enrollments')" class="flex-1 h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all">
+      <a href="/mypage" id="goToMyClassBtn" class="flex-1 h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all flex items-center justify-center">
         <i class="fas fa-book-open mr-1"></i>내 수업 보기
-      </button>
+      </a>
     </div>
   </div>
 </div>
@@ -4180,7 +4833,7 @@ const modalsHTML = `
     </div>
     <div class="p-6">
       <div class="bg-purple-50 border border-purple-100 rounded-xl p-4 mb-4">
-        <p class="text-sm text-purple-800"><i class="fas fa-info-circle mr-2"></i>테스트 코드를 입력하면 <strong>30일간 결제 없이</strong> 모든 클래스를 무료로 수강할 수 있습니다.</p>
+        <p class="text-sm text-purple-800"><i class="fas fa-info-circle mr-2"></i>테스트 코드를 입력하면 <strong>30일간 결제 없이</strong> 모든 코스를 무료로 수강할 수 있습니다.</p>
       </div>
       <div class="mb-4">
         <label class="block text-sm font-medium text-gray-700 mb-2">테스트 코드</label>
@@ -4248,13 +4901,14 @@ function updateAuthUI() {
   const area = document.getElementById('authArea');
   if (!area) return;
   if (currentUser) {
+    const mypageUrl = currentUser.role === 'instructor' ? '/instructor/mypage' : '/mypage';
     area.innerHTML = \`
-      <button onclick="openMyPage()" class="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-gray-50 transition-all">
+      <a href="\${mypageUrl}" class="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-gray-50 transition-all">
         <div class="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center">
           <span class="text-sm font-bold text-primary-600">\${currentUser.name?.charAt(0) || 'U'}</span>
         </div>
         <span class="text-sm font-medium text-dark-700 hidden sm:block">마이페이지(\${currentUser.name}\${currentUser.is_test_account ? ',테스트' : ''})</span>
-      </button>
+      </a>
       <button onclick="handleLogout()" class="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-50 transition-all">로그아웃</button>
     \`;
   } else {
@@ -4359,7 +5013,7 @@ async function loadCart() {
   const total = items.reduce((sum, i) => sum + i.price, 0);
   document.getElementById('cartFooter').innerHTML = \`
     <div class="flex justify-between items-center mb-3">
-      <span class="text-sm text-gray-600">총 \${items.length}개 클래스</span>
+      <span class="text-sm text-gray-600">총 \${items.length}개 코스</span>
       <span class="text-lg font-bold text-dark-900">\${total.toLocaleString()}원</span>
     </div>
     <button onclick="closeCart(); openBulkPayment()" class="w-full h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all">전체 결제하기</button>
@@ -4441,6 +5095,65 @@ function openBulkPayment() {
   openPaymentModal({ title: '장바구니 전체 결제', price: 0, original_price: 0, orderType: 'bulk' });
 }
 
+// 수업별 결제 모달
+function openLessonPaymentModal(lessonData) {
+  if (!currentUser) { openAuthModal('login'); return; }
+
+  // 테스트 계정은 결제 없이 바로 수업 등록
+  if (currentUser.is_test_account && lessonData.lessonId) {
+    testEnrollLesson(lessonData.lessonId);
+    return;
+  }
+
+  paymentData = {
+    ...lessonData,
+    id: lessonData.classId,
+    title: lessonData.classTitle + ' - ' + lessonData.lessonTitle,
+    original_price: lessonData.price,
+    orderType: 'lesson',
+    lessonId: lessonData.lessonId
+  };
+  document.getElementById('paymentModal').classList.remove('hidden');
+
+  const lessonDate = new Date(lessonData.scheduledAt).toLocaleString('ko-KR', { month:'long', day:'numeric', weekday:'short', hour:'2-digit', minute:'2-digit' });
+
+  document.getElementById('paymentOrderSummary').innerHTML = \`
+    <div class="flex gap-3">
+      \${lessonData.thumbnail ? \`<img src="\${lessonData.thumbnail}" class="w-20 h-14 rounded-lg object-cover">\` : ''}
+      <div>
+        <p class="text-sm font-semibold text-dark-800">\${lessonData.lessonTitle}</p>
+        <p class="text-xs text-gray-500 mt-0.5">\${lessonData.classTitle}</p>
+        <p class="text-xs text-primary-500 mt-1"><i class="far fa-calendar-alt mr-1"></i>\${lessonDate}</p>
+      </div>
+    </div>
+  \`;
+  document.getElementById('priceSummary').innerHTML = \`
+    <div class="flex justify-between text-sm"><span class="text-gray-500">수업 1개</span><span class="text-gray-700">\${lessonData.price.toLocaleString()}원</span></div>
+    <div class="flex justify-between text-base font-bold pt-2 border-t border-gray-200 mt-2"><span class="text-dark-900">총 결제금액</span><span class="text-primary-600">\${lessonData.price.toLocaleString()}원</span></div>
+  \`;
+}
+
+// 테스트 계정 수업 수강 등록
+async function testEnrollLesson(lessonId) {
+  try {
+    const res = await fetch('/api/lesson-enroll/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: currentUser.id, lessonId })
+    });
+    const data = await res.json();
+    if (data.success) {
+      document.getElementById('successModal').classList.remove('hidden');
+      document.getElementById('successMessage').textContent = '수업 수강이 완료되었습니다! (테스트 계정)';
+      document.getElementById('classinSessionInfo').classList.add('hidden');
+    } else {
+      alert(data.error || '수강 등록 실패');
+    }
+  } catch (e) {
+    alert('수강 등록 중 오류 발생');
+  }
+}
+
 function closePaymentModal() { document.getElementById('paymentModal').classList.add('hidden'); }
 
 function selectPaymentMethod(method) {
@@ -4476,6 +5189,7 @@ async function processPayment() {
     const body = {
       userId: currentUser.id,
       classId: paymentData.id || null,
+      lessonId: paymentData.lessonId || null,
       paymentMethod: paymentData.paymentMethod || 'card',
       cardNumber: document.getElementById('cardNumber')?.value?.replace(/\\s/g,'') || '',
       cardExpiry: document.getElementById('cardExpiry')?.value || '',
@@ -4532,7 +5246,7 @@ let subscriptionData = {};
 function openSubscriptionModal(data) {
   if (!currentUser) { openAuthModal('login'); return; }
 
-  // 테스트 계정이 클래스 월간 구독 시도 시 바로 수강 등록
+  // 테스트 계정이 코스 월간 구독 시도 시 바로 수강 등록
   if (currentUser.is_test_account && data.classId) {
     testEnroll(data.classId);
     return;
@@ -4549,7 +5263,7 @@ function openSubscriptionModal(data) {
       \${data.thumbnail ? \`<img src="\${data.thumbnail}" class="w-20 h-14 rounded-lg object-cover">\` : \`<div class="w-20 h-14 bg-primary-50 rounded-lg flex items-center justify-center"><i class="fas fa-crown text-primary-500 text-xl"></i></div>\`}
       <div>
         <p class="text-sm font-semibold text-dark-800">\${data.title}</p>
-        <p class="text-xs text-gray-500 mt-0.5">\${data.instructor_name || '모든 클래스 무제한'}</p>
+        <p class="text-xs text-gray-500 mt-0.5">\${data.instructor_name || '모든 코스 무제한'}</p>
       </div>
     </div>
     <div class="mt-3 bg-blue-50 rounded-xl p-3">
@@ -4866,13 +5580,13 @@ async function loadMyPageTab(tab) {
   // 강사용 마이페이지
   if (isInstructor) {
     if (tab === 'enrollments') {
-      // 강의중인 클래스
+      // 강의중인 코스
       const res = await fetch('/api/user/'+currentUser.id+'/instructor-classes');
       const items = await res.json();
 
       const activeItems = items.filter(c => c.next_lesson_id || c.total_lesson_count === 0);
 
-      container.innerHTML = activeItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-chalkboard text-3xl mb-2"></i><p>강의중인 클래스가 없습니다</p></div>'
+      container.innerHTML = activeItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-chalkboard text-3xl mb-2"></i><p>강의중인 코스가 없습니다</p></div>'
         : activeItems.map(c => {
           const hasNextLesson = c.next_lesson_id;
           const progress = c.total_lesson_count > 0 ? Math.round((c.completed_lesson_count / c.total_lesson_count) * 100) : 0;
@@ -4891,13 +5605,13 @@ async function loadMyPageTab(tab) {
           return '<div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100"><a href="/class/' + c.slug + '" class="flex gap-3"><div class="relative flex-shrink-0"><img src="' + (c.thumbnail || 'https://via.placeholder.com/80x56?text=No+Image') + '" class="w-20 h-14 rounded-lg object-cover">' + (hasNextLesson ? '<span class="absolute -top-1 -right-1 w-5 h-5 bg-indigo-500 rounded-full flex items-center justify-center"><i class="fas fa-video text-white text-[8px]"></i></span>' : '') + '</div><div class="flex-1 min-w-0"><p class="text-sm font-medium text-dark-800 line-clamp-1">' + c.title + '</p><p class="text-xs text-gray-500">' + (c.category_name || '') + ' · 수강생 ' + (c.active_students || 0) + '명</p><div class="flex items-center gap-2 mt-1"><div class="flex-1 bg-gray-200 rounded-full h-1.5"><div class="bg-indigo-500 h-1.5 rounded-full" style="width:' + progress + '%"></div></div><span class="text-[10px] text-gray-400">' + (c.completed_lesson_count || 0) + '/' + (c.total_lesson_count || 0) + '회</span></div></div></a>' + lessonSection + '</div>';
         }).join('');
     } else if (tab === 'completed') {
-      // 강의완료된 클래스
+      // 강의완료된 코스
       const res = await fetch('/api/user/'+currentUser.id+'/instructor-classes');
       const items = await res.json();
 
       const completedItems = items.filter(c => c.total_lesson_count > 0 && !c.next_lesson_id);
 
-      container.innerHTML = completedItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-check-circle text-3xl mb-2"></i><p>강의 완료된 클래스가 없습니다</p></div>'
+      container.innerHTML = completedItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-check-circle text-3xl mb-2"></i><p>강의 완료된 코스가 없습니다</p></div>'
         : completedItems.map(c => {
           const progress = c.total_lesson_count > 0 ? Math.round((c.completed_lesson_count / c.total_lesson_count) * 100) : 100;
           return \`
@@ -4941,7 +5655,7 @@ async function loadMyPageTab(tab) {
       return e.next_lesson_id || e.total_lesson_count === 0;
     });
 
-    container.innerHTML = activeItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-book-open text-3xl mb-2"></i><p>수강 중인 클래스가 없습니다</p></div>'
+    container.innerHTML = activeItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-book-open text-3xl mb-2"></i><p>수강 중인 코스가 없습니다</p></div>'
       : activeItems.map(e => {
         const hasNextLesson = e.next_lesson_id;
         const progress = e.total_lesson_count > 0 ? Math.round((e.completed_lesson_count / e.total_lesson_count) * 100) : 0;
@@ -4972,7 +5686,7 @@ async function loadMyPageTab(tab) {
       return e.total_lesson_count > 0 && !e.next_lesson_id;
     });
 
-    container.innerHTML = completedItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-check-circle text-3xl mb-2"></i><p>수강 완료된 클래스가 없습니다</p></div>'
+    container.innerHTML = completedItems.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="fas fa-check-circle text-3xl mb-2"></i><p>수강 완료된 코스가 없습니다</p></div>'
       : completedItems.map(e => {
         const progress = e.total_lesson_count > 0 ? Math.round((e.completed_lesson_count / e.total_lesson_count) * 100) : 100;
         return \`
@@ -5023,7 +5737,7 @@ async function loadMyPageTab(tab) {
                 <i class="fas \${sub.plan_type === 'all_monthly' ? 'fa-crown text-yellow-500' : 'fa-sync-alt text-blue-500'} text-sm"></i>
               </div>
               <div>
-                <p class="text-sm font-bold text-dark-800">\${sub.class_title || '전체 클래스 구독'}</p>
+                <p class="text-sm font-bold text-dark-800">\${sub.class_title || '전체 코스 구독'}</p>
                 <p class="text-xs text-gray-500">\${sub.instructor_name || '모든 강의 무제한'}</p>
               </div>
             </div>
@@ -5068,7 +5782,7 @@ async function loadMyPageTab(tab) {
   } else if (tab === 'wishlist') {
     const res = await fetch('/api/user/'+currentUser.id+'/wishlist');
     const items = await res.json();
-    container.innerHTML = items.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="far fa-heart text-3xl mb-2"></i><p>찜한 클래스가 없습니다</p></div>'
+    container.innerHTML = items.length === 0 ? '<div class="text-center py-8 text-gray-400"><i class="far fa-heart text-3xl mb-2"></i><p>찜한 코스가 없습니다</p></div>'
       : items.map(w => \`
         <a href="/class/\${w.slug}" class="flex gap-3 p-3 rounded-xl hover:bg-gray-50 transition-all mb-2">
           <img src="\${w.thumbnail}" class="w-20 h-14 rounded-lg object-cover">
@@ -5112,45 +5826,8 @@ function showToast(msg) {
 
 function formatPrice(price) { return price?.toLocaleString() + '원'; }
 
-// Class card HTML generator
+// Class card HTML generator (코스 카드 - 항상 활성 상태, 수업 상태는 코스 클릭 후 수업 목록에서 확인)
 function classCardHTML(cls) {
-  // 수업 종료 여부 확인 (schedule_start + duration이 현재 시간보다 이전인 경우)
-  const now = Date.now();
-  const scheduleTime = cls.classin_scheduled_at ? new Date(cls.classin_scheduled_at).getTime() :
-                       (cls.schedule_start ? new Date(cls.schedule_start).getTime() : 0);
-  const durationMs = (cls.duration_minutes || 60) * 60 * 1000;
-  const isEnded = cls.class_type === 'live' && scheduleTime > 0 && (scheduleTime + durationMs < now);
-
-  // 수업 종료된 경우 비활성화
-  if (isEnded) {
-    return \`
-      <div class="block bg-white rounded-2xl overflow-hidden border border-gray-200 opacity-60 cursor-not-allowed">
-        <div class="relative aspect-[16/10] overflow-hidden grayscale">
-          <img src="\${cls.thumbnail}" alt="\${cls.title}" class="w-full h-full object-cover" loading="lazy">
-          <span class="absolute top-2.5 right-2.5 px-2 py-0.5 bg-gray-600 text-white text-[10px] font-bold rounded-md">수업 종료</span>
-        </div>
-        <div class="p-4">
-          <div class="flex items-center gap-1.5 mb-2">
-            <span class="text-xs text-gray-400 font-medium">\${cls.category_name || ''}</span>
-            <span class="text-gray-300 text-xs">|</span>
-            <span class="text-xs text-gray-400">\${cls.level === 'beginner' ? '입문' : cls.level === 'intermediate' ? '중급' : cls.level === 'advanced' ? '고급' : '전체'}</span>
-          </div>
-          <h3 class="text-sm font-semibold text-gray-500 line-clamp-2 mb-2 leading-snug">\${cls.title}</h3>
-          <div class="flex items-center gap-1.5 mb-3">
-            <span class="text-xs text-gray-400 font-medium">\${cls.instructor_name}</span>
-          </div>
-          <div class="flex items-center gap-2">
-            <span class="text-sm font-bold text-gray-500">\${cls.price.toLocaleString()}원</span>
-          </div>
-          <div class="flex items-center gap-3 mt-2 pt-2 border-t border-gray-50 text-[11px] text-gray-400">
-            <span><i class="far fa-clock mr-0.5"></i>\${cls.duration_minutes}분</span>
-            <span class="text-gray-400">종료됨</span>
-          </div>
-        </div>
-      </div>
-    \`;
-  }
-
   return \`
     <a href="/class/\${cls.slug}" class="block bg-white rounded-2xl overflow-hidden card-hover border border-gray-100">
       <div class="relative aspect-[16/10] overflow-hidden">
@@ -5258,11 +5935,11 @@ ${navHTML}
       <div>
         <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-6">
           <span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>
-          <span class="text-sm font-medium">실시간 라이브 양방향 클래스</span>
+          <span class="text-sm font-medium">실시간 라이브 양방향 코스</span>
         </div>
         <h1 class="text-3xl md:text-5xl font-extrabold leading-tight mb-4">
           당신의 성장을 위한<br>
-          <span class="text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-pink-400">라이브 양방향 클래스</span>가 시작됩니다
+          <span class="text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-pink-400">라이브 양방향 코스</span>가 시작됩니다
         </h1>
         <p class="text-gray-300 text-base md:text-lg mb-8 leading-relaxed">
           검증된 전문 강사의 실시간 양방향 수업으로 배우고,<br>
@@ -5270,14 +5947,14 @@ ${navHTML}
         </p>
         <div class="flex flex-wrap gap-3">
           <a href="/categories" class="px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30">
-            <i class="fas fa-play mr-2"></i>클래스 둘러보기
+            <i class="fas fa-play mr-2"></i>코스 둘러보기
           </a>
           <a href="#subscription" class="px-6 py-3 bg-white/10 hover:bg-white/20 backdrop-blur-sm text-white font-medium rounded-xl transition-all border border-white/20">
             <i class="fas fa-crown mr-2 text-yellow-400"></i>구독 시작하기
           </a>
         </div>
         <div class="flex items-center gap-6 mt-8">
-          <div class="text-center"><p class="text-2xl font-bold">6,200+</p><p class="text-xs text-gray-400">전체 클래스</p></div>
+          <div class="text-center"><p class="text-2xl font-bold">6,200+</p><p class="text-xs text-gray-400">전체 코스</p></div>
           <div class="w-px h-8 bg-white/20"></div>
           <div class="text-center"><p class="text-2xl font-bold">120K+</p><p class="text-xs text-gray-400">수강생</p></div>
           <div class="w-px h-8 bg-white/20"></div>
@@ -5320,8 +5997,8 @@ ${navHTML}
 <section class="max-w-7xl mx-auto px-4 sm:px-6 py-8">
   <div class="flex items-center justify-between mb-6">
     <div>
-      <h2 class="text-xl md:text-2xl font-bold text-dark-900"><i class="fas fa-fire text-primary-500 mr-2"></i>베스트 클래스</h2>
-      <p class="text-sm text-gray-500 mt-1">가장 많은 수강생이 선택한 인기 클래스</p>
+      <h2 class="text-xl md:text-2xl font-bold text-dark-900"><i class="fas fa-fire text-primary-500 mr-2"></i>베스트 코스</h2>
+      <p class="text-sm text-gray-500 mt-1">가장 많은 수강생이 선택한 인기 코스</p>
     </div>
     <a href="/categories?sort=popular" class="text-sm text-primary-500 font-medium hover:underline">더보기 <i class="fas fa-chevron-right text-xs ml-0.5"></i></a>
   </div>
@@ -5339,7 +6016,7 @@ ${navHTML}
           <span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>
           <span class="text-sm font-medium text-red-400">LIVE</span>
         </div>
-        <h2 class="text-xl md:text-2xl font-bold text-white">예정된 라이브 양방향 클래스</h2>
+        <h2 class="text-xl md:text-2xl font-bold text-white">예정된 라이브 양방향 코스</h2>
         <p class="text-sm text-gray-400 mt-1">실시간으로 선생님과 소통하며 배워보세요</p>
       </div>
     </div>
@@ -5353,7 +6030,7 @@ ${navHTML}
               <p class="text-xs text-gray-400 mt-0.5">${cls.instructor_name}</p>
               <div class="flex items-center gap-2 mt-2">
                 <span class="px-2 py-0.5 bg-red-500/20 text-red-400 text-[10px] font-bold rounded-md"><i class="fas fa-circle text-[5px] mr-0.5"></i>LIVE</span>
-                <span class="text-xs text-gray-500">${cls.schedule_start ? new Date(cls.schedule_start).toLocaleDateString('ko-KR', {timeZone:'Asia/Seoul', month: 'long', day: 'numeric'}) : ''}</span>
+                <span class="text-xs text-gray-500">${cls.lesson_count || 0}개 수업</span>
               </div>
             </div>
           </div>
@@ -5367,8 +6044,8 @@ ${navHTML}
 <section class="max-w-7xl mx-auto px-4 sm:px-6 py-8">
   <div class="flex items-center justify-between mb-6">
     <div>
-      <h2 class="text-xl md:text-2xl font-bold text-dark-900"><i class="fas fa-sparkles text-blue-500 mr-2"></i>신규 클래스</h2>
-      <p class="text-sm text-gray-500 mt-1">새롭게 오픈한 클래스를 만나보세요</p>
+      <h2 class="text-xl md:text-2xl font-bold text-dark-900"><i class="fas fa-sparkles text-blue-500 mr-2"></i>신규 코스</h2>
+      <p class="text-sm text-gray-500 mt-1">새롭게 오픈한 코스를 만나보세요</p>
     </div>
     <a href="/categories?sort=newest" class="text-sm text-primary-500 font-medium hover:underline">더보기 <i class="fas fa-chevron-right text-xs ml-0.5"></i></a>
   </div>
@@ -5389,29 +6066,29 @@ ${navHTML}
   </div>
   <div class="grid md:grid-cols-3 gap-6 max-w-5xl mx-auto">
     
-    <!-- 개별 클래스 월간 구독 -->
+    <!-- 개별 코스 월간 구독 -->
     <div class="bg-white rounded-2xl border-2 border-gray-100 p-6 hover:border-primary-200 transition-all">
       <div class="text-center">
         <div class="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center mx-auto mb-3">
           <i class="fas fa-book-open text-blue-500 text-lg"></i>
         </div>
-        <span class="text-sm font-semibold text-gray-500 uppercase">클래스 월간 구독</span>
+        <span class="text-sm font-semibold text-gray-500 uppercase">코스 월간 구독</span>
         <div class="mt-3 mb-1">
-          <span class="text-3xl font-extrabold text-dark-900">클래스별</span>
+          <span class="text-3xl font-extrabold text-dark-900">코스별</span>
         </div>
         <p class="text-sm text-gray-400 mb-4">월 수강료 자동결제</p>
         <ul class="text-sm text-gray-600 space-y-2 mb-6 text-left">
-          <li><i class="fas fa-check text-green-500 mr-2"></i>선택한 클래스 매월 수강</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i>선택한 코스 매월 수강</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>매월 결제일에 자동 결제</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>ClassIn 라이브 수업 참여</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>녹화 강의 다시보기</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>언제든 해지 가능</li>
         </ul>
-        <a href="/categories" class="block w-full h-11 border-2 border-blue-500 text-blue-500 font-semibold rounded-xl hover:bg-blue-50 transition-all leading-[2.75rem] text-center">클래스 선택하기</a>
+        <a href="/categories" class="block w-full h-11 border-2 border-blue-500 text-blue-500 font-semibold rounded-xl hover:bg-blue-50 transition-all leading-[2.75rem] text-center">코스 선택하기</a>
       </div>
     </div>
 
-    <!-- 전체 클래스 월간 구독 -->
+    <!-- 전체 코스 월간 구독 -->
     <div class="bg-white rounded-2xl border-2 border-primary-500 p-6 relative shadow-lg shadow-primary-100">
       <div class="absolute -top-3 left-1/2 -translate-x-1/2 px-4 py-1 bg-primary-500 text-white text-xs font-bold rounded-full">BEST</div>
       <div class="text-center">
@@ -5425,7 +6102,7 @@ ${navHTML}
         </div>
         <p class="text-xs text-gray-400 mb-4">매월 자동결제 <span class="line-through">299,000원</span> <span class="text-primary-500 font-bold">33% 할인</span></p>
         <ul class="text-sm text-gray-600 space-y-2 mb-6 text-left">
-          <li><i class="fas fa-check text-green-500 mr-2"></i><strong>모든 클래스</strong> 무제한 수강</li>
+          <li><i class="fas fa-check text-green-500 mr-2"></i><strong>모든 코스</strong> 무제한 수강</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>매월 결제일에 자동 결제</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>ClassIn 라이브 수업 무제한</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>녹화 강의 전체 다시보기</li>
@@ -5433,7 +6110,7 @@ ${navHTML}
           <li><i class="fas fa-check text-green-500 mr-2"></i>커뮤니티 & 학습자료 제공</li>
           <li><i class="fas fa-check text-green-500 mr-2"></i>언제든 해지 가능</li>
         </ul>
-        <button onclick="openSubscriptionModal({planType:'all_monthly', title:'전체 클래스 월간 구독', amount:199000, originalAmount:299000})" class="w-full h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30">월간 구독 시작하기</button>
+        <button onclick="openSubscriptionModal({planType:'all_monthly', title:'전체 코스 월간 구독', amount:199000, originalAmount:299000})" class="w-full h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30">월간 구독 시작하기</button>
       </div>
     </div>
 
@@ -5587,7 +6264,7 @@ async function loadClasses(append) {
     grid.appendChild(div.firstElementChild);
   });
   
-  document.getElementById('resultCount').textContent = (currentOffset + classes.length) + '개의 클래스';
+  document.getElementById('resultCount').textContent = (currentOffset + classes.length) + '개의 코스';
   document.getElementById('loadMoreArea').classList.toggle('hidden', classes.length < PAGE_SIZE);
   
   if (search) {
@@ -5655,6 +6332,13 @@ app.get('/class/:slug', async (c) => {
     ORDER BY scheduled_at ASC LIMIT 1
   `).bind(cls.id).first()
   cls.next_lesson = nextLesson
+
+  // 모든 예정된 수업 목록 (수업별 결제용)
+  const { results: scheduledLessons } = await c.env.DB.prepare(`
+    SELECT * FROM class_lessons
+    WHERE class_id = ?
+    ORDER BY scheduled_at ASC
+  `).bind(cls.id).all()
 
   // Group lessons by chapter
   const chapters: Record<string, any[]> = {}
@@ -5736,12 +6420,12 @@ ${navHTML}
               <span class="text-sm font-medium text-red-700">다음 수업: ${new Date(cls.next_lesson.scheduled_at).toLocaleString('ko-KR', {timeZone:'Asia/Seoul', year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit'})}</span>
             </div>
             <p class="text-xs text-gray-500 mb-3 -mt-1">${cls.next_lesson.lesson_title}</p>
-            ` : (cls.schedule_start ? `
+            ` : `
             <div class="flex items-center gap-2 px-3 py-2 bg-gray-50 rounded-xl mb-3">
               <i class="fas fa-calendar-alt text-gray-500"></i>
               <span class="text-sm font-medium text-gray-600">예정된 수업 없음</span>
             </div>
-            ` : '')}
+            `}
             
             <div class="flex items-center gap-2 mb-3">
               <div class="flex-1 bg-gray-100 rounded-full h-2">
@@ -5822,9 +6506,72 @@ ${navHTML}
 
       <!-- Description -->
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-info-circle text-blue-500 mr-2"></i>클래스 소개</h2>
+        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-info-circle text-blue-500 mr-2"></i>코스 소개</h2>
         <p class="text-sm text-dark-600 leading-relaxed whitespace-pre-line">${cls.description}</p>
       </div>
+
+      <!-- Scheduled Lessons (수업 목록) -->
+      ${scheduledLessons.length > 0 ? `
+      <div class="bg-white rounded-2xl p-6 border border-gray-100">
+        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-calendar-alt text-red-500 mr-2"></i>수업 목록 <span class="text-sm font-normal text-gray-500">(${scheduledLessons.length}개)</span></h2>
+        <div class="space-y-3">
+          ${scheduledLessons.map((sl: any, idx: number) => {
+            const now = Date.now()
+            const startTime = new Date(sl.scheduled_at).getTime()
+            const endTime = startTime + (sl.duration_minutes || 60) * 60 * 1000
+            const isEnded = endTime < now
+            const isLive = !isEnded && startTime <= now && now < endTime
+            const isUpcoming = startTime > now
+
+            const dateStr = new Date(sl.scheduled_at).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' })
+            const timeStr = new Date(sl.scheduled_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
+
+            let statusBadge, actionButton
+            if (isEnded) {
+              statusBadge = '<span class="px-2 py-0.5 bg-gray-200 text-gray-600 text-xs font-medium rounded-full">종료</span>'
+              actionButton = sl.replay_url
+                ? `<a href="${sl.replay_url}" target="_blank" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>다시보기</a>`
+                : '<span class="text-gray-400 text-sm">다시보기 없음</span>'
+            } else if (isLive) {
+              statusBadge = '<span class="px-2 py-0.5 bg-red-500 text-white text-xs font-medium rounded-full animate-pulse">진행중</span>'
+              actionButton = `<button onclick='openLessonPaymentModal(${JSON.stringify({lessonId: sl.id, lessonTitle: sl.lesson_title, classId: cls.id, classTitle: cls.title, price: cls.price, thumbnail: cls.thumbnail, instructor_name: cls.instructor_name, scheduledAt: sl.scheduled_at})})' class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-credit-card mr-1"></i>바로 수강하기 · ${cls.price.toLocaleString()}원</button>`
+            } else {
+              statusBadge = '<span class="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-medium rounded-full">예정</span>'
+              actionButton = `<button onclick='openLessonPaymentModal(${JSON.stringify({lessonId: sl.id, lessonTitle: sl.lesson_title, classId: cls.id, classTitle: cls.title, price: cls.price, thumbnail: cls.thumbnail, instructor_name: cls.instructor_name, scheduledAt: sl.scheduled_at})})' class="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30"><i class="fas fa-credit-card mr-1"></i>바로 수강하기 · ${cls.price.toLocaleString()}원</button>`
+            }
+
+            return `
+              <div class="flex flex-col sm:flex-row sm:items-center gap-4 p-4 border border-gray-100 rounded-xl ${isEnded ? 'bg-gray-50' : isLive ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'} hover:shadow-sm transition-all">
+                <div class="flex items-center gap-3 flex-1">
+                  <div class="w-10 h-10 rounded-full ${isEnded ? 'bg-gray-300' : isLive ? 'bg-red-500' : 'bg-blue-500'} flex items-center justify-center text-white font-bold text-sm">${idx + 1}</div>
+                  <div>
+                    <p class="font-semibold text-dark-800">${sl.lesson_title}</p>
+                    <div class="flex items-center gap-2 text-sm text-gray-500 mt-1">
+                      <span><i class="far fa-calendar mr-1"></i>${dateStr}</span>
+                      <span><i class="far fa-clock mr-1"></i>${timeStr}</span>
+                      <span><i class="fas fa-hourglass-half mr-1"></i>${sl.duration_minutes}분</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="flex items-center gap-3">
+                  ${statusBadge}
+                  ${actionButton}
+                </div>
+              </div>
+            `
+          }).join('')}
+        </div>
+        <div class="mt-4 p-4 bg-blue-50 rounded-xl border border-blue-100">
+          <div class="flex items-start gap-3">
+            <i class="fas fa-info-circle text-blue-500 mt-0.5"></i>
+            <div class="text-sm text-blue-800">
+              <p class="font-semibold mb-1">수업별 개별 결제</p>
+              <p class="text-blue-600">각 수업을 개별적으로 결제하여 수강할 수 있습니다. 월간 자동결제 시 모든 수업을 자동으로 수강할 수 있습니다.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      ` : ''}
 
       <!-- Curriculum -->
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
@@ -5882,7 +6629,7 @@ ${navHTML}
             <p class="text-sm text-dark-600 leading-relaxed mb-4">${cls.instructor_bio}</p>
             <div class="flex gap-4 text-sm text-gray-500">
               <span><i class="far fa-user mr-1"></i>${cls.instructor_total_students?.toLocaleString()}명 수강생</span>
-              <span><i class="far fa-play-circle mr-1"></i>${cls.instructor_total_classes}개 클래스</span>
+              <span><i class="far fa-play-circle mr-1"></i>${cls.instructor_total_classes}개 코스</span>
               <span><i class="fas fa-star text-yellow-400 mr-1"></i>${cls.instructor_rating}</span>
             </div>
           </div>
@@ -5933,7 +6680,7 @@ ${navHTML}
 </section>
 
 <script>
-// 강사는 다른 클래스 수강 불가
+// 강사는 다른 코스 수강 불가
 document.addEventListener('DOMContentLoaded', () => {
   const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
   if (user && user.role === 'instructor') {
@@ -5950,6 +6697,348 @@ document.addEventListener('DOMContentLoaded', () => {
     disableBtn(document.getElementById('btnAddToCart'), '수강 불가');
   }
 });
+</script>
+
+${footerHTML}
+${modalsHTML}
+${globalScripts}
+</body></html>`
+  return c.html(applyBranding(html, c.env))
+})
+
+// ==================== Student Mypage ====================
+app.get('/mypage', async (c) => {
+  // 사용자 인증 체크는 클라이언트에서 처리 (JWT 기반)
+
+  const html = `${headHTML}
+<body class="bg-gray-50 min-h-screen">
+${navHTML}
+
+<section class="max-w-4xl mx-auto px-4 sm:px-6 py-8">
+  <div class="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+    <h1 class="text-xl font-bold text-dark-900 mb-6"><i class="fas fa-user-graduate text-primary-500 mr-2"></i>내 수강 코스</h1>
+
+    <div id="mypageContent">
+      <div class="text-center py-8 text-gray-400">
+        <i class="fas fa-spinner fa-spin text-2xl mb-2"></i>
+        <p>로딩 중...</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+const currentUser = JSON.parse(localStorage.getItem('classin_user') || 'null');
+
+if (!currentUser) {
+  window.location.href = '/?login=required';
+} else {
+  loadMyEnrollments();
+}
+
+async function loadMyEnrollments() {
+  const res = await fetch('/api/user/'+currentUser.id+'/enrollments-with-lessons');
+  const enrollments = await res.json();
+
+  const container = document.getElementById('mypageContent');
+
+  if (!Array.isArray(enrollments) || enrollments.length === 0) {
+    container.innerHTML = '<div class="text-center py-12 text-gray-400"><i class="fas fa-book-open text-4xl mb-3"></i><p class="text-lg">수강 중인 코스가 없습니다</p><a href="/" class="mt-4 inline-block px-6 py-2 bg-primary-500 text-white font-semibold rounded-xl hover:bg-primary-600 transition-all">코스 둘러보기</a></div>';
+    return;
+  }
+
+  container.innerHTML = enrollments.map(e => {
+    // 수업 목록 렌더링
+    const lessonsHtml = e.lessons && e.lessons.length > 0 ? e.lessons.map((lesson, idx) => {
+      const now = Date.now();
+      const startTime = new Date(lesson.scheduled_at).getTime();
+      const endTime = startTime + (lesson.duration_minutes || 60) * 60 * 1000;
+      const isEnded = endTime < now;
+      const isLive = !isEnded && startTime <= now && now < endTime;
+      const isEnrolled = lesson.is_enrolled;
+
+      const dateStr = new Date(lesson.scheduled_at).toLocaleDateString('ko-KR', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+
+      let statusBadge, actionBtn;
+      if (isEnded) {
+        statusBadge = '<span class="px-2 py-0.5 bg-gray-200 text-gray-600 text-[10px] font-medium rounded-full">완료</span>';
+        actionBtn = lesson.replay_url
+          ? '<a href="'+lesson.replay_url+'" target="_blank" class="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-xs font-medium rounded-lg">다시보기</a>'
+          : '<span class="text-gray-400 text-xs">-</span>';
+      } else if (isEnrolled) {
+        statusBadge = isLive
+          ? '<span class="px-2 py-0.5 bg-red-500 text-white text-[10px] font-medium rounded-full animate-pulse">진행중</span>'
+          : '<span class="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-medium rounded-full">수강중</span>';
+        actionBtn = '<a href="/api/classin/enter/'+lesson.session_id+'?redirect=true" target="_blank" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium rounded-lg">입장</a>';
+      } else {
+        statusBadge = '<span class="px-2 py-0.5 bg-orange-100 text-orange-700 text-[10px] font-medium rounded-full">미수강</span>';
+        actionBtn = '<a href="/class/'+e.slug+'" class="px-3 py-1 bg-primary-500 hover:bg-primary-600 text-white text-xs font-medium rounded-lg">수강신청</a>';
+      }
+
+      return '<div class="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0 '+(isEnded ? 'opacity-60' : '')+'">' +
+        '<span class="w-6 h-6 '+(isEnded ? 'bg-gray-300' : isEnrolled ? 'bg-blue-500' : 'bg-orange-400')+' text-white text-xs font-bold rounded-full flex items-center justify-center">'+(idx+1)+'</span>' +
+        '<div class="flex-1 min-w-0">' +
+          '<p class="text-sm font-medium text-dark-700 truncate">'+lesson.lesson_title+'</p>' +
+          '<p class="text-xs text-gray-400">'+dateStr+' · '+lesson.duration_minutes+'분</p>' +
+        '</div>' +
+        '<div class="flex items-center gap-2">' + statusBadge + actionBtn + '</div>' +
+      '</div>';
+    }).join('') : '<p class="text-sm text-gray-400 text-center py-4">예정된 수업이 없습니다</p>';
+
+    const hasSubscription = e.subscription_status === 'active';
+    const subscriptionBadge = hasSubscription
+      ? '<span class="px-2 py-0.5 bg-blue-500 text-white text-[10px] font-bold rounded-full"><i class="fas fa-sync-alt mr-1"></i>월간 구독중</span>'
+      : '';
+
+    return '<div class="mb-6 last:mb-0 p-4 bg-gray-50 rounded-xl border border-gray-100">' +
+      '<a href="/class/'+e.slug+'" class="flex gap-4 mb-4">' +
+        '<img src="'+(e.thumbnail || 'https://via.placeholder.com/120x80')+'" class="w-24 h-16 rounded-lg object-cover flex-shrink-0">' +
+        '<div class="flex-1 min-w-0">' +
+          '<div class="flex items-center gap-2 mb-1"><p class="text-base font-bold text-dark-800 truncate">'+e.title+'</p>'+subscriptionBadge+'</div>' +
+          '<p class="text-sm text-gray-500">'+e.instructor_name+'</p>' +
+        '</div>' +
+      '</a>' +
+      '<div class="bg-white rounded-lg p-3 border border-gray-100">' +
+        '<h4 class="text-sm font-semibold text-dark-700 mb-2"><i class="fas fa-list-ol text-primary-400 mr-1"></i>수업 목록</h4>' +
+        lessonsHtml +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+</script>
+
+${footerHTML}
+${modalsHTML}
+${globalScripts}
+</body></html>`
+  return c.html(applyBranding(html, c.env))
+})
+
+// ==================== Instructor Mypage ====================
+app.get('/instructor/mypage', async (c) => {
+  const html = `${headHTML}
+<body class="bg-gray-50 min-h-screen">
+${navHTML}
+
+<section class="max-w-4xl mx-auto px-4 sm:px-6 py-8">
+  <div class="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+    <h1 class="text-xl font-bold text-dark-900 mb-6"><i class="fas fa-chalkboard-teacher text-indigo-500 mr-2"></i>내 강의 코스</h1>
+
+    <div id="instructorMypageContent">
+      <div class="text-center py-8 text-gray-400">
+        <i class="fas fa-spinner fa-spin text-2xl mb-2"></i>
+        <p>로딩 중...</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Lesson Create Modal for Instructor -->
+<div id="instructorLessonModal" class="fixed inset-0 z-50 hidden overflow-y-auto">
+  <div class="absolute inset-0 bg-black/50" onclick="closeInstructorLessonModal()"></div>
+  <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl max-h-[80vh] overflow-y-auto">
+    <h3 class="text-lg font-bold mb-4"><i class="fas fa-plus-circle text-indigo-500 mr-2"></i>수업 생성 - <span id="instructorLessonCourseName"></span></h3>
+    <input type="hidden" id="instructorLessonClassId">
+    <div id="instructorLessonRows" class="space-y-3 mb-4"></div>
+    <button onclick="addInstructorLessonRow()" class="w-full py-2 border-2 border-dashed border-gray-300 text-gray-500 hover:border-indigo-400 hover:text-indigo-500 rounded-xl transition-all"><i class="fas fa-plus mr-1"></i>수업 추가</button>
+    <div class="flex gap-2 mt-4">
+      <button onclick="closeInstructorLessonModal()" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg">취소</button>
+      <button onclick="submitInstructorLessons()" id="instructorLessonSubmitBtn" class="flex-1 py-2 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold rounded-lg">생성</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const currentUser = JSON.parse(localStorage.getItem('classin_user') || 'null');
+
+if (!currentUser || currentUser.role !== 'instructor') {
+  window.location.href = '/mypage';
+} else {
+  loadInstructorCourses();
+}
+
+async function loadInstructorCourses() {
+  const res = await fetch('/api/user/'+currentUser.id+'/instructor-classes-with-lessons');
+  const courses = await res.json();
+
+  const container = document.getElementById('instructorMypageContent');
+
+  if (!Array.isArray(courses) || courses.length === 0) {
+    container.innerHTML = '<div class="text-center py-12 text-gray-400"><i class="fas fa-chalkboard text-4xl mb-3"></i><p class="text-lg">담당 코스가 없습니다</p></div>';
+    return;
+  }
+
+  container.innerHTML = courses.map(course => {
+    const lessonsHtml = course.lessons && course.lessons.length > 0 ? course.lessons.map((lesson, idx) => {
+      const now = Date.now();
+      const startTime = new Date(lesson.scheduled_at).getTime();
+      const endTime = startTime + (lesson.duration_minutes || 60) * 60 * 1000;
+      const isEnded = endTime < now;
+      const isLive = !isEnded && startTime <= now && now < endTime;
+
+      const dateStr = new Date(lesson.scheduled_at).toLocaleDateString('ko-KR', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+
+      let statusBadge, actionBtn, deleteBtn;
+      const safeLessonTitle = lesson.lesson_title.replace(/'/g, "\\'");
+      if (isEnded) {
+        statusBadge = '<span class="px-2 py-0.5 bg-gray-200 text-gray-600 text-[10px] font-medium rounded-full">완료</span>';
+        actionBtn = lesson.replay_url
+          ? '<a href="'+lesson.replay_url+'" target="_blank" class="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-xs font-medium rounded-lg">다시보기</a>'
+          : '<span class="text-gray-400 text-xs">-</span>';
+        deleteBtn = '';
+      } else if (isLive) {
+        statusBadge = '<span class="px-2 py-0.5 bg-red-500 text-white text-[10px] font-medium rounded-full animate-pulse">진행중</span>';
+        actionBtn = '<a href="/api/classin/instructor-enter/'+lesson.id+'?redirect=true" target="_blank" class="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs font-medium rounded-lg">강의실 입장</a>';
+        deleteBtn = '';
+      } else {
+        statusBadge = '<span class="px-2 py-0.5 bg-indigo-100 text-indigo-700 text-[10px] font-medium rounded-full">예정</span>';
+        actionBtn = '<a href="/api/classin/instructor-enter/'+lesson.id+'?redirect=true" target="_blank" class="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg">강의실 입장</a>';
+        deleteBtn = '<button onclick="deleteInstructorLesson('+lesson.id+', \''+safeLessonTitle+'\')" class="ml-2 text-red-400 hover:text-red-600" title="수업 삭제"><i class="fas fa-trash-alt text-xs"></i></button>';
+      }
+
+      return '<div class="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0 '+(isEnded ? 'opacity-60' : '')+'">' +
+        '<span class="w-6 h-6 '+(isEnded ? 'bg-gray-300' : isLive ? 'bg-red-500' : 'bg-indigo-500')+' text-white text-xs font-bold rounded-full flex items-center justify-center">'+(idx+1)+'</span>' +
+        '<div class="flex-1 min-w-0">' +
+          '<p class="text-sm font-medium text-dark-700 truncate">'+lesson.lesson_title+'</p>' +
+          '<p class="text-xs text-gray-400">'+dateStr+' · '+lesson.duration_minutes+'분</p>' +
+        '</div>' +
+        '<div class="flex items-center gap-2">' + statusBadge + actionBtn + deleteBtn + '</div>' +
+      '</div>';
+    }).join('') : '<p class="text-sm text-gray-400 text-center py-4">예정된 수업이 없습니다</p>';
+
+    const safeTitleJson = JSON.stringify(course.title).replace(/'/g, "\\\\'");
+
+    return '<div class="mb-6 last:mb-0 p-4 bg-gray-50 rounded-xl border border-gray-100">' +
+      '<div class="flex gap-4 mb-4">' +
+        '<img src="'+(course.thumbnail || 'https://via.placeholder.com/120x80')+'" class="w-24 h-16 rounded-lg object-cover flex-shrink-0">' +
+        '<div class="flex-1 min-w-0">' +
+          '<p class="text-base font-bold text-dark-800 truncate">'+course.title+'</p>' +
+          '<p class="text-sm text-gray-500">'+(course.category_name || '')+'</p>' +
+          '<p class="text-xs text-gray-400 mt-1">수강생 '+(course.active_students || 0)+'명</p>' +
+        '</div>' +
+        '<button onclick="openInstructorLessonModal('+course.id+', '+safeTitleJson+')" class="h-8 px-3 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-semibold rounded-lg flex items-center gap-1"><i class="fas fa-plus"></i>수업 생성</button>' +
+      '</div>' +
+      '<div class="bg-white rounded-lg p-3 border border-gray-100">' +
+        '<h4 class="text-sm font-semibold text-dark-700 mb-2"><i class="fas fa-list-ol text-indigo-400 mr-1"></i>수업 목록</h4>' +
+        lessonsHtml +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+// Instructor Lesson Modal functions
+let instructorLessonRowId = 0;
+
+function openInstructorLessonModal(classId, className) {
+  document.getElementById('instructorLessonClassId').value = classId;
+  document.getElementById('instructorLessonCourseName').textContent = className;
+  document.getElementById('instructorLessonRows').innerHTML = '';
+  instructorLessonRowId = 0;
+  addInstructorLessonRow();
+  document.getElementById('instructorLessonModal').classList.remove('hidden');
+}
+
+function closeInstructorLessonModal() {
+  document.getElementById('instructorLessonModal').classList.add('hidden');
+}
+
+function addInstructorLessonRow() {
+  const rowId = ++instructorLessonRowId;
+  const now = new Date();
+  now.setHours(now.getHours() + 1, 0, 0, 0);
+  const defaultDateTime = now.toISOString().slice(0, 16);
+
+  const html = '<div id="lessonRow'+rowId+'" class="p-3 bg-gray-50 rounded-xl border border-gray-200">' +
+    '<div class="flex justify-between items-center mb-2">' +
+      '<span class="text-sm font-bold text-indigo-600">수업 #'+rowId+'</span>' +
+      (rowId > 1 ? '<button onclick="removeInstructorLessonRow('+rowId+')" class="text-gray-400 hover:text-red-500"><i class="fas fa-times"></i></button>' : '') +
+    '</div>' +
+    '<input type="text" id="lessonTitle'+rowId+'" placeholder="수업명 (선택)" class="w-full px-3 py-2 mb-2 border border-gray-200 rounded-lg text-sm">' +
+    '<input type="datetime-local" id="lessonDateTime'+rowId+'" value="'+defaultDateTime+'" class="w-full px-3 py-2 mb-2 border border-gray-200 rounded-lg text-sm">' +
+    '<input type="number" id="lessonDuration'+rowId+'" value="60" min="10" max="240" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" placeholder="수업 시간(분)">' +
+  '</div>';
+
+  document.getElementById('instructorLessonRows').insertAdjacentHTML('beforeend', html);
+}
+
+function removeInstructorLessonRow(rowId) {
+  document.getElementById('lessonRow'+rowId)?.remove();
+}
+
+async function submitInstructorLessons() {
+  const classId = document.getElementById('instructorLessonClassId').value;
+  const lessons = [];
+
+  document.querySelectorAll('[id^="lessonRow"]').forEach(row => {
+    const rowId = row.id.replace('lessonRow', '');
+    const title = document.getElementById('lessonTitle'+rowId)?.value?.trim();
+    const dateTime = document.getElementById('lessonDateTime'+rowId)?.value;
+    const duration = parseInt(document.getElementById('lessonDuration'+rowId)?.value) || 60;
+
+    if (dateTime) {
+      lessons.push({
+        title: title || null,
+        scheduledAt: new Date(dateTime).toISOString(),
+        durationMinutes: duration
+      });
+    }
+  });
+
+  if (lessons.length === 0) {
+    alert('최소 1개의 수업을 입력해주세요.');
+    return;
+  }
+
+  const btn = document.getElementById('instructorLessonSubmitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>생성 중...';
+
+  try {
+    const res = await fetch('/api/instructor/classes/'+classId+'/create-sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lessons, userId: currentUser.id })
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      closeInstructorLessonModal();
+      alert('수업이 생성되었습니다!');
+      loadInstructorCourses();
+    } else {
+      alert(data.error || '수업 생성 실패');
+    }
+  } catch (e) {
+    alert('수업 생성 중 오류 발생');
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '생성';
+}
+
+async function deleteInstructorLesson(lessonId, lessonTitle) {
+  if (!confirm('수업 "' + lessonTitle + '"을 삭제하시겠습니까?\\n\\n주의: ClassIn에 등록된 수업도 함께 삭제됩니다.')) {
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/instructor/lessons/' + lessonId, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: currentUser.id })
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      alert('수업이 삭제되었습니다.');
+      loadInstructorCourses();
+    } else {
+      alert(data.error || '수업 삭제에 실패했습니다.');
+    }
+  } catch (e) {
+    alert('수업 삭제 중 오류가 발생했습니다.');
+  }
+}
 </script>
 
 ${footerHTML}
@@ -5997,7 +7086,7 @@ ${navHTML}
       <div>
         <!-- Back link -->
         <a href="/class/${session.class_slug}" class="inline-flex items-center gap-1 text-sm text-gray-400 hover:text-white mb-4 transition-colors">
-          <i class="fas fa-arrow-left text-xs"></i> 클래스로 돌아가기
+          <i class="fas fa-arrow-left text-xs"></i> 코스로 돌아가기
         </a>
         
         <!-- Status Badge -->
@@ -6773,7 +7862,7 @@ app.get('/admin', async (c) => {
             </div>
             <div>
               <h3 class="text-lg font-bold text-gray-800">수강신청자 관리</h3>
-              <p class="text-sm text-gray-500">클래스별 수강생 관리, 수강 종료</p>
+              <p class="text-sm text-gray-500">코스별 수강생 관리, 수강 종료</p>
             </div>
           </div>
           <i class="fas fa-chevron-right text-gray-300 group-hover:text-orange-500 transition-all"></i>
@@ -6820,10 +7909,10 @@ app.get('/admin', async (c) => {
     <div class="bg-white rounded-xl shadow-sm overflow-hidden mt-8">
       <div class="p-6 border-b border-gray-100">
         <div class="flex items-center justify-between">
-          <h2 class="text-lg font-bold text-gray-800"><i class="fas fa-book text-blue-500 mr-2"></i>클래스 관리</h2>
+          <h2 class="text-lg font-bold text-gray-800"><i class="fas fa-book text-blue-500 mr-2"></i>코스 관리</h2>
           <div class="flex items-center gap-2">
             <button onclick="openAddClassModal()" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-all text-sm">
-              <i class="fas fa-plus mr-1"></i>클래스 추가
+              <i class="fas fa-plus mr-1"></i>코스 추가
             </button>
             <button onclick="loadClasses()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg transition-all">
               <i class="fas fa-sync-alt"></i>
@@ -6835,21 +7924,18 @@ app.get('/admin', async (c) => {
         <table class="w-full">
           <thead class="bg-gray-50">
             <tr>
+              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase w-8"></th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">이미지</th>
-              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">클래스명</th>
+              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">코스명</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">강사</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">가격</th>
-              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">라이브 시작</th>
-              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">ClassIn</th>
-              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">예약 시간</th>
-              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">강사입장</th>
+              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">수업</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">수업생성</th>
-              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">수업이력</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">작업</th>
             </tr>
           </thead>
           <tbody id="classesTable" class="divide-y divide-gray-100">
-            <tr><td colspan="11" class="px-6 py-8 text-center text-gray-400">로딩 중...</td></tr>
+            <tr><td colspan="8" class="px-6 py-8 text-center text-gray-400">로딩 중...</td></tr>
           </tbody>
         </table>
       </div>
@@ -6889,40 +7975,39 @@ app.get('/admin', async (c) => {
   </div>
 
   <!-- Create Session Modal -->
-  <div id="createSessionModal" class="fixed inset-0 z-50 hidden">
+  <div id="createSessionModal" class="fixed inset-0 z-50 hidden overflow-y-auto">
     <div class="absolute inset-0 bg-black/50" onclick="closeSessionModal()"></div>
-    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl">
-      <h3 class="text-lg font-bold mb-4"><i class="fas fa-calendar-plus text-blue-500 mr-2"></i>ClassIn 수업 생성</h3>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-bold mb-4"><i class="fas fa-calendar-plus text-blue-500 mr-2"></i>수업 생성</h3>
       <div class="space-y-4">
-        <div>
-          <p class="text-sm text-gray-500 mb-1">클래스</p>
-          <p class="font-medium" id="sessionClassName">-</p>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <p class="text-sm text-gray-500 mb-1">코스</p>
+            <p class="font-medium" id="sessionClassName">-</p>
+          </div>
+          <div>
+            <p class="text-sm text-gray-500 mb-1">강사</p>
+            <p class="font-medium" id="sessionInstructor">-</p>
+          </div>
         </div>
-        <div>
-          <p class="text-sm text-gray-500 mb-1">강사</p>
-          <p class="font-medium" id="sessionInstructor">-</p>
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">수업 시작 시간</label>
-          <input type="datetime-local" id="sessionScheduledAt" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+        <input type="hidden" id="sessionClassId" value="">
+        <input type="hidden" id="sessionDurationDefault" value="60">
+
+        <!-- 수업 목록 -->
+        <div class="border border-gray-200 rounded-lg p-3">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-sm font-semibold text-gray-700">수업 목록</span>
+            <button type="button" onclick="addLessonRow()" class="text-xs text-blue-500 hover:text-blue-700"><i class="fas fa-plus mr-1"></i>수업 추가</button>
+          </div>
+          <div id="lessonRowsContainer" class="space-y-3">
+            <!-- 수업 행이 여기에 추가됨 -->
+          </div>
         </div>
       </div>
       <div class="flex gap-3 mt-6">
         <button onclick="closeSessionModal()" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg">취소</button>
         <button id="createSessionBtn" onclick="confirmCreateSession()" class="flex-1 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg disabled:bg-gray-400 disabled:cursor-not-allowed">생성</button>
       </div>
-    </div>
-  </div>
-
-  <!-- Lesson History Modal -->
-  <div id="lessonHistoryModal" class="fixed inset-0 z-50 hidden overflow-y-auto">
-    <div class="absolute inset-0 bg-black/50" onclick="closeLessonHistoryModal()"></div>
-    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-2xl shadow-xl max-h-[80vh] overflow-y-auto">
-      <h3 class="text-lg font-bold mb-4"><i class="fas fa-history text-purple-500 mr-2"></i>수업 이력 - <span id="lessonHistoryClassName"></span></h3>
-      <div id="lessonHistoryContent">
-        <p class="text-gray-500 text-center py-4">로딩중...</p>
-      </div>
-      <button onclick="closeLessonHistoryModal()" class="mt-4 w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-2 rounded-lg">닫기</button>
     </div>
   </div>
 
@@ -6952,9 +8037,22 @@ app.get('/admin', async (c) => {
           <p class="text-xs text-gray-500 mt-1">사이트 로그인에 사용됩니다.</p>
         </div>
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">ClassIn 계정 (전화번호/이메일)</label>
-          <input type="text" id="newInstructorClassInAccount" placeholder="010-1234-5678 또는 classin@example.com" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
-          <p class="text-xs text-gray-500 mt-1">비워두면 로그인 이메일로 ClassIn에 등록됩니다.</p>
+          <label class="block text-sm font-medium text-gray-700 mb-1">전화번호 <span class="text-red-500">*</span></label>
+          <input type="tel" id="newInstructorPhone" placeholder="010-1234-5678" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">ClassIn 등록 방식</label>
+          <div class="flex gap-4 mt-2">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="newClassInMethod" value="phone" checked class="w-4 h-4 text-indigo-500">
+              <span class="text-sm text-gray-700">전화번호로 등록</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="newClassInMethod" value="email" class="w-4 h-4 text-indigo-500">
+              <span class="text-sm text-gray-700">이메일로 등록</span>
+            </label>
+          </div>
+          <p class="text-xs text-gray-500 mt-1">ClassIn 강사 계정 등록 시 사용할 정보를 선택합니다.</p>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">프로필 이미지</label>
@@ -6996,8 +8094,21 @@ app.get('/admin', async (c) => {
           <input type="email" id="editInstructorEmail" placeholder="instructor@example.com" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
         </div>
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">전화번호 (ClassIn 등록용)</label>
-          <input type="text" id="editInstructorPhone" placeholder="010-1234-5678" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+          <label class="block text-sm font-medium text-gray-700 mb-1">전화번호 <span class="text-red-500">*</span></label>
+          <input type="tel" id="editInstructorPhone" placeholder="010-1234-5678" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">ClassIn 등록 방식</label>
+          <div class="flex gap-4 mt-2">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="editClassInMethod" value="phone" checked class="w-4 h-4 text-blue-500">
+              <span class="text-sm text-gray-700">전화번호로 등록</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="editClassInMethod" value="email" class="w-4 h-4 text-blue-500">
+              <span class="text-sm text-gray-700">이메일로 등록</span>
+            </label>
+          </div>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">프로필 이미지</label>
@@ -7027,16 +8138,16 @@ app.get('/admin', async (c) => {
   <div id="classModal" class="fixed inset-0 z-50 hidden overflow-y-auto">
     <div class="absolute inset-0 bg-black/50" onclick="closeClassModal()"></div>
     <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-2xl shadow-xl max-h-[90vh] overflow-y-auto">
-      <h3 class="text-lg font-bold mb-4" id="classModalTitle"><i class="fas fa-book text-blue-500 mr-2"></i>클래스 추가</h3>
+      <h3 class="text-lg font-bold mb-4" id="classModalTitle"><i class="fas fa-book text-blue-500 mr-2"></i>코스 추가</h3>
       <input type="hidden" id="editClassId" value="">
       <div class="grid grid-cols-2 gap-4">
         <div class="col-span-2">
           <label class="block text-sm font-medium text-gray-700 mb-1">제목 <span class="text-red-500">*</span></label>
-          <input type="text" id="classTitle" placeholder="클래스 제목" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
+          <input type="text" id="classTitle" placeholder="코스 제목" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
         </div>
         <div class="col-span-2">
           <label class="block text-sm font-medium text-gray-700 mb-1">설명</label>
-          <textarea id="classDescription" placeholder="클래스 설명" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"></textarea>
+          <textarea id="classDescription" placeholder="코스 설명" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"></textarea>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">강사 <span class="text-red-500">*</span></label>
@@ -7055,12 +8166,8 @@ app.get('/admin', async (c) => {
           <input type="number" id="classPrice" placeholder="0" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
         </div>
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">수업 시간 (분)</label>
+          <label class="block text-sm font-medium text-gray-700 mb-1">수업 시간 (분, 기본값)</label>
           <input type="number" id="classDuration" placeholder="60" value="60" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">수업 시작일</label>
-          <input type="datetime-local" id="classScheduleStart" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">난이도</label>
@@ -7274,7 +8381,7 @@ app.get('/admin', async (c) => {
           </td>
           <td class="px-4 py-3">
             <div class="flex items-center gap-2">
-              <button onclick="openEditInstructorModal(\${inst.id}, '\${inst.display_name.replace(/'/g, "\\\\'")}', '\${(inst.user_email || '').replace(/'/g, "\\\\'")}', '\${(inst.user_phone || '').replace(/'/g, "\\\\'")}', '\${(inst.profile_image || '').replace(/'/g, "\\\\'")}')" class="text-blue-500 hover:text-blue-700 text-sm" title="수정">
+              <button onclick="openEditInstructorModal(\${inst.id}, '\${inst.display_name.replace(/'/g, "\\\\'")}', '\${(inst.user_email || '').replace(/'/g, "\\\\'")}', '\${(inst.user_phone || '').replace(/'/g, "\\\\'")}', '\${(inst.profile_image || '').replace(/'/g, "\\\\'")}', 'phone')" class="text-blue-500 hover:text-blue-700 text-sm" title="수정">
                 <i class="fas fa-edit"></i>
               </button>
               <button onclick="deleteInstructor(\${inst.id}, '\${inst.display_name.replace(/'/g, "\\\\'")}')" class="text-red-500 hover:text-red-700 text-sm" title="삭제">
@@ -7289,10 +8396,11 @@ app.get('/admin', async (c) => {
     function openAddInstructorModal() {
       document.getElementById('newInstructorName').value = '';
       document.getElementById('newInstructorEmail').value = '';
-      document.getElementById('newInstructorClassInAccount').value = '';
+      document.getElementById('newInstructorPhone').value = '';
       document.getElementById('newInstructorImage').value = '';
       document.getElementById('newInstructorImageFile').value = '';
       document.getElementById('newInstructorImagePreview').innerHTML = '<i class="fas fa-user text-gray-400 text-xl"></i>';
+      document.querySelector('input[name="newClassInMethod"][value="phone"]').checked = true;
       document.getElementById('addInstructorModal').classList.remove('hidden');
     }
 
@@ -7300,13 +8408,16 @@ app.get('/admin', async (c) => {
       document.getElementById('addInstructorModal').classList.add('hidden');
     }
 
-    function openEditInstructorModal(id, name, email, phone, profileImage) {
+    function openEditInstructorModal(id, name, email, phone, profileImage, classInMethod) {
       document.getElementById('editInstructorId').value = id;
       document.getElementById('editInstructorName').value = name || '';
       document.getElementById('editInstructorEmail').value = email || '';
       document.getElementById('editInstructorPhone').value = phone || '';
       document.getElementById('editInstructorImage').value = profileImage || '';
       document.getElementById('editInstructorImageFile').value = '';
+      // ClassIn 등록 방식 설정
+      const method = classInMethod || 'phone';
+      document.querySelector('input[name="editClassInMethod"][value="' + method + '"]').checked = true;
       // 기존 이미지 프리뷰 표시
       const preview = document.getElementById('editInstructorImagePreview');
       if (profileImage) {
@@ -7366,11 +8477,12 @@ app.get('/admin', async (c) => {
       const name = document.getElementById('editInstructorName').value.trim();
       const email = document.getElementById('editInstructorEmail').value.trim();
       const phone = document.getElementById('editInstructorPhone').value.trim();
+      const classInMethod = document.querySelector('input[name="editClassInMethod"]:checked')?.value || 'phone';
       let profileImage = document.getElementById('editInstructorImage').value.trim();
       const fileInput = document.getElementById('editInstructorImageFile');
 
-      if (!name || !email) {
-        showModal('오류', '이름과 이메일은 필수입니다.');
+      if (!name || !email || !phone) {
+        showModal('오류', '이름, 이메일, 전화번호는 필수입니다.');
         return;
       }
 
@@ -7394,7 +8506,7 @@ app.get('/admin', async (c) => {
       const res = await fetch('/api/admin/instructors/' + id, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, phone, profileImage })
+        body: JSON.stringify({ name, email, phone, profileImage, classInMethod })
       });
       const data = await res.json();
 
@@ -7410,12 +8522,13 @@ app.get('/admin', async (c) => {
     async function confirmAddInstructor() {
       const name = document.getElementById('newInstructorName').value.trim();
       const email = document.getElementById('newInstructorEmail').value.trim();
-      const classInAccount = document.getElementById('newInstructorClassInAccount').value.trim();
+      const phone = document.getElementById('newInstructorPhone').value.trim();
+      const classInMethod = document.querySelector('input[name="newClassInMethod"]:checked')?.value || 'phone';
       let profileImage = document.getElementById('newInstructorImage').value.trim();
       const fileInput = document.getElementById('newInstructorImageFile');
 
-      if (!name || !email) {
-        showModal('오류', '이름과 로그인 이메일은 필수입니다.');
+      if (!name || !email || !phone) {
+        showModal('오류', '이름, 이메일, 전화번호는 필수입니다.');
         return;
       }
 
@@ -7439,7 +8552,7 @@ app.get('/admin', async (c) => {
       const res = await fetch('/api/admin/instructors', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, classInAccount, profileImage })
+        body: JSON.stringify({ name, email, phone, classInMethod, profileImage })
       });
       const data = await res.json();
 
@@ -7523,86 +8636,248 @@ app.get('/admin', async (c) => {
     let instructorsList = [];
     let categoriesList = [];
 
+    // Track expanded courses
+    let expandedCourses = new Set();
+    let courseLessonsCache = {};
+
     async function loadClasses() {
       const res = await fetch('/api/admin/classes');
       const data = await res.json();
 
       const tbody = document.getElementById('classesTable');
       if (!data.classes || data.classes.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="11" class="px-6 py-8 text-center text-gray-400">클래스가 없습니다.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="px-6 py-8 text-center text-gray-400">코스가 없습니다.</td></tr>';
         return;
       }
 
       const now = Date.now();
 
       tbody.innerHTML = data.classes.map(cls => {
-        const hasSession = cls.classin_course_id && cls.classin_class_id;
-        const scheduledTime = cls.classin_scheduled_at ? new Date(cls.classin_scheduled_at).getTime() : 0;
-        const durationMs = (cls.duration_minutes || 60) * 60 * 1000;
-        // classin_scheduled_at이 null이면 종료된 것으로 처리
-        const isSessionEnded = hasSession && (!scheduledTime || (scheduledTime + durationMs < now));
+        const thumbnail = cls.thumbnail || 'https://via.placeholder.com/60x40?text=No+Image';
+        const safeTitle = cls.title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        const safeInstructor = (cls.instructor_name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        const isExpanded = expandedCourses.has(cls.id);
 
-        let statusBadge;
-        if (isSessionEnded) {
-          statusBadge = '<span class="px-1 py-0.5 rounded text-xs bg-orange-100 text-orange-700">종료</span>';
-        } else if (hasSession) {
-          statusBadge = '<span class="px-1 py-0.5 rounded text-xs bg-green-100 text-green-700">생성</span>';
-        } else {
-          statusBadge = '<span class="px-1 py-0.5 rounded text-xs bg-gray-100 text-gray-600">-</span>';
-        }
-
-        // 수업 생성 버튼 로직: 세션 없거나 종료된 경우 생성 가능
+        // 수업 생성 버튼
         let createBtn;
         if (!cls.instructor_classin_uid) {
-          createBtn = '<span class="text-gray-400 text-xs">-</span>';
-        } else if (!hasSession || isSessionEnded) {
-          const safeTitle = cls.title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-          const safeInstructor = (cls.instructor_name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
-          createBtn = \`<button onclick="openCreateSession(\${cls.id}, '\${safeTitle}', '\${safeInstructor}', '\${cls.schedule_start || ''}')" class="text-blue-500 hover:text-blue-700 text-xs"><i class="fas fa-plus"></i></button>\`;
+          createBtn = '<span class="text-gray-400 text-xs" title="강사 ClassIn UID 없음">-</span>';
         } else {
-          createBtn = '<span class="text-green-500 text-xs"><i class="fas fa-check"></i></span>';
+          createBtn = \`<button onclick="event.stopPropagation(); openCreateSession(\${cls.id}, '\${safeTitle}', '\${safeInstructor}', \${cls.duration_minutes || 60})" class="text-blue-500 hover:text-blue-700 text-sm" title="수업 생성"><i class="fas fa-plus"></i></button>\`;
         }
 
-        const thumbnail = cls.thumbnail || 'https://via.placeholder.com/60x40?text=No+Image';
+        // 수업 수 표시
+        const lessonCount = cls.lesson_count || 0;
+        const lessonBadge = lessonCount > 0
+          ? \`<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">\${lessonCount}개</span>\`
+          : '<span class="text-gray-400 text-xs">없음</span>';
 
         return \`
-          <tr class="hover:bg-gray-50">
+          <tr class="hover:bg-gray-50 cursor-pointer border-b border-gray-100" onclick="toggleCourseLessons(\${cls.id}, '\${safeTitle}')">
+            <td class="px-3 py-2 text-gray-400">
+              <i class="fas fa-chevron-\${isExpanded ? 'down' : 'right'} text-xs transition-transform" id="chevron-\${cls.id}"></i>
+            </td>
             <td class="px-3 py-2">
               <img src="\${thumbnail}" alt="" class="w-16 h-10 object-cover rounded" onerror="this.src='https://via.placeholder.com/60x40?text=No+Image'">
             </td>
             <td class="px-3 py-2">
-              <div class="font-medium text-sm line-clamp-1 max-w-[150px]">\${cls.title}</div>
-              <div class="text-xs text-gray-400">\${cls.category_name}</div>
+              <div class="font-medium text-sm line-clamp-1 max-w-[200px]">\${cls.title}</div>
+              <div class="text-xs text-gray-400">\${cls.category_name || ''}</div>
             </td>
-            <td class="px-3 py-2 text-sm">\${cls.instructor_name}</td>
+            <td class="px-3 py-2 text-sm">\${cls.instructor_name || '-'}</td>
             <td class="px-3 py-2 text-sm">\${(cls.price || 0).toLocaleString()}원</td>
-            <td class="px-3 py-2 text-xs">
-              \${cls.schedule_start ? \`<span class="\${new Date(cls.schedule_start).getTime() < now ? 'text-gray-400' : 'text-blue-600 font-medium'}">\${new Date(cls.schedule_start).toLocaleString('ko-KR', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span>\` : '-'}
-            </td>
-            <td class="px-3 py-2">\${statusBadge}</td>
-            <td class="px-3 py-2 text-xs text-gray-500">
-              \${cls.classin_scheduled_at ? new Date(cls.classin_scheduled_at).toLocaleString('ko-KR', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '-'}
-            </td>
-            <td class="px-3 py-2">
-              \${hasSession && cls.latest_lesson_id
-                ? \`<a href="/api/classin/instructor-enter/\${cls.latest_lesson_id}?redirect=true" target="_blank" class="text-blue-500 hover:text-blue-700 text-xs"><i class="fas fa-sign-in-alt"></i></a>\`
-                : '-'}
-            </td>
+            <td class="px-3 py-2">\${lessonBadge}</td>
             <td class="px-3 py-2">\${createBtn}</td>
             <td class="px-3 py-2">
-              \${cls.lesson_count > 0
-                ? \`<button onclick="openLessonHistoryModal(\${cls.id}, '\${cls.title.replace(/'/g, "\\\\'")}')" class="text-purple-500 hover:text-purple-700 text-xs"><i class="fas fa-history"></i> \${cls.lesson_count}</button>\`
-                : '<span class="text-gray-400 text-xs">-</span>'}
-            </td>
-            <td class="px-3 py-2">
               <div class="flex items-center gap-2">
-                <button onclick="openEditClass(\${cls.id})" class="text-gray-500 hover:text-blue-500 text-sm"><i class="fas fa-edit"></i></button>
-                <button onclick="deleteClass(\${cls.id}, '\${cls.title.replace(/'/g, "\\\\'")}')" class="text-gray-500 hover:text-red-500 text-sm"><i class="fas fa-trash-alt"></i></button>
+                <button onclick="event.stopPropagation(); openEditClass(\${cls.id})" class="text-gray-500 hover:text-blue-500 text-sm" title="수정"><i class="fas fa-edit"></i></button>
+                <button onclick="event.stopPropagation(); deleteClass(\${cls.id}, '\${cls.title.replace(/'/g, "\\\\'")}')" class="text-gray-500 hover:text-red-500 text-sm" title="삭제"><i class="fas fa-trash-alt"></i></button>
+              </div>
+            </td>
+          </tr>
+          <tr id="lessons-row-\${cls.id}" class="\${isExpanded ? '' : 'hidden'}">
+            <td colspan="8" class="p-0">
+              <div id="lessons-content-\${cls.id}" class="bg-gray-50 border-t border-b border-gray-200">
+                <div class="p-4 text-gray-500 text-center text-sm">수업 목록 로딩 중...</div>
               </div>
             </td>
           </tr>
         \`;
       }).join('');
+
+      // 이미 펼쳐진 코스의 수업 목록 다시 로드
+      expandedCourses.forEach(courseId => {
+        loadCourseLessons(courseId);
+      });
+    }
+
+    async function toggleCourseLessons(courseId, courseTitle) {
+      const lessonsRow = document.getElementById('lessons-row-' + courseId);
+      const chevron = document.getElementById('chevron-' + courseId);
+
+      if (expandedCourses.has(courseId)) {
+        // 접기
+        expandedCourses.delete(courseId);
+        lessonsRow.classList.add('hidden');
+        chevron.classList.remove('fa-chevron-down');
+        chevron.classList.add('fa-chevron-right');
+      } else {
+        // 펼치기
+        expandedCourses.add(courseId);
+        lessonsRow.classList.remove('hidden');
+        chevron.classList.remove('fa-chevron-right');
+        chevron.classList.add('fa-chevron-down');
+        await loadCourseLessons(courseId);
+      }
+    }
+
+    async function loadCourseLessons(courseId) {
+      const contentDiv = document.getElementById('lessons-content-' + courseId);
+      contentDiv.innerHTML = '<div class="p-4 text-gray-500 text-center text-sm">수업 목록 로딩 중...</div>';
+
+      const res = await fetch('/api/admin/classes/' + courseId + '/lessons');
+      const data = await res.json();
+
+      if (!data.lessons || data.lessons.length === 0) {
+        contentDiv.innerHTML = '<div class="p-4 text-gray-400 text-center text-sm">수업이 없습니다. 위의 + 버튼으로 수업을 생성하세요.</div>';
+        return;
+      }
+
+      const now = Date.now();
+
+      // 수업을 강의중(전)/강의완료로 분류
+      const upcomingLessons = [];
+      const completedLessons = [];
+
+      data.lessons.forEach(lesson => {
+        const endTime = new Date(lesson.scheduled_at).getTime() + (lesson.duration_minutes || 60) * 60 * 1000;
+        const isTimeOver = endTime < now;
+        const isEnded = lesson.status === 'ended' || isTimeOver;
+
+        if (isEnded) {
+          completedLessons.push({ ...lesson, isEnded: true });
+        } else {
+          upcomingLessons.push({ ...lesson, isEnded: false, isLive: lesson.status === 'live' && !isTimeOver });
+        }
+      });
+
+      // 수업 행 렌더링 함수
+      const renderLessonRow = (lesson) => {
+        const startTime = new Date(lesson.scheduled_at);
+        const timeStr = startTime.toLocaleString('ko-KR', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' });
+
+        let statusBadge, actionBtn, deleteBtn;
+        if (lesson.isEnded) {
+          statusBadge = '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600">완료</span>';
+          actionBtn = lesson.replay_url
+            ? \`<a href="\${lesson.replay_url}" target="_blank" class="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-xs font-medium rounded-lg">다시보기</a>\`
+            : '<span class="text-gray-400 text-xs">-</span>';
+          deleteBtn = '<span class="text-gray-300 text-xs" title="종료된 수업은 삭제 불가"><i class="fas fa-trash-alt"></i></span>';
+        } else if (lesson.isLive) {
+          statusBadge = '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-500 text-white animate-pulse">진행중</span>';
+          actionBtn = lesson.id
+            ? \`<a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true" target="_blank" class="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs font-medium rounded-lg">강의실 입장</a>\`
+            : '-';
+          deleteBtn = '<span class="text-gray-300 text-xs" title="진행중인 수업은 삭제 불가"><i class="fas fa-trash-alt"></i></span>';
+        } else {
+          statusBadge = '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">예정</span>';
+          actionBtn = lesson.id
+            ? \`<a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true" target="_blank" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium rounded-lg">강의실 입장</a>\`
+            : '-';
+          deleteBtn = \`<button onclick="deleteAdminLesson(\${lesson.id}, '\${lesson.lesson_title.replace(/'/g, "\\\\'")}', \${courseId})" class="text-red-400 hover:text-red-600 text-xs" title="수업 삭제"><i class="fas fa-trash-alt"></i></button>\`;
+        }
+
+        return \`
+          <tr class="\${lesson.isEnded ? 'bg-gray-100' : lesson.isLive ? 'bg-red-50' : 'bg-blue-50'} border-b border-gray-200">
+            <td class="px-4 py-2 text-sm font-medium text-gray-700">\${lesson.lesson_title}</td>
+            <td class="px-4 py-2 text-sm text-gray-600">\${timeStr}</td>
+            <td class="px-4 py-2 text-sm text-gray-600">\${lesson.duration_minutes}분</td>
+            <td class="px-4 py-2">\${statusBadge}</td>
+            <td class="px-4 py-2">\${actionBtn}</td>
+            <td class="px-4 py-2 text-center">\${deleteBtn}</td>
+          </tr>
+        \`;
+      };
+
+      let html = '<div class="px-4 py-2">';
+
+      // 강의중(전) 섹션
+      if (upcomingLessons.length > 0) {
+        html += \`
+          <div class="mb-4">
+            <h4 class="text-sm font-bold text-blue-700 mb-2 flex items-center gap-2">
+              <i class="fas fa-clock"></i> 예정/진행중 (\${upcomingLessons.length}개)
+            </h4>
+            <table class="w-full">
+              <thead class="bg-blue-100">
+                <tr>
+                  <th class="px-4 py-2 text-left text-xs font-semibold text-blue-700">수업명</th>
+                  <th class="px-4 py-2 text-left text-xs font-semibold text-blue-700">일시</th>
+                  <th class="px-4 py-2 text-left text-xs font-semibold text-blue-700">시간</th>
+                  <th class="px-4 py-2 text-left text-xs font-semibold text-blue-700">상태</th>
+                  <th class="px-4 py-2 text-left text-xs font-semibold text-blue-700">강사입장</th>
+                  <th class="px-4 py-2 text-center text-xs font-semibold text-blue-700">삭제</th>
+                </tr>
+              </thead>
+              <tbody>
+                \${upcomingLessons.map(renderLessonRow).join('')}
+              </tbody>
+            </table>
+          </div>
+        \`;
+      }
+
+      // 강의완료 섹션
+      if (completedLessons.length > 0) {
+        html += \`
+          <div>
+            <h4 class="text-sm font-bold text-gray-600 mb-2 flex items-center gap-2">
+              <i class="fas fa-check-circle"></i> 강의완료 (\${completedLessons.length}개)
+            </h4>
+            <table class="w-full">
+              <thead class="bg-gray-200">
+                <tr>
+                  <th class="px-4 py-2 text-left text-xs font-semibold text-gray-600">수업명</th>
+                  <th class="px-4 py-2 text-left text-xs font-semibold text-gray-600">일시</th>
+                  <th class="px-4 py-2 text-left text-xs font-semibold text-gray-600">시간</th>
+                  <th class="px-4 py-2 text-left text-xs font-semibold text-gray-600">상태</th>
+                  <th class="px-4 py-2 text-left text-xs font-semibold text-gray-600">다시보기</th>
+                  <th class="px-4 py-2 text-center text-xs font-semibold text-gray-600">삭제</th>
+                </tr>
+              </thead>
+              <tbody>
+                \${completedLessons.map(renderLessonRow).join('')}
+              </tbody>
+            </table>
+          </div>
+        \`;
+      }
+
+      html += '</div>';
+      contentDiv.innerHTML = html;
+    }
+
+    async function deleteAdminLesson(lessonId, lessonTitle, courseId) {
+      if (!confirm('수업 "' + lessonTitle + '"을 삭제하시겠습니까?\\n\\n주의: ClassIn에 등록된 수업도 함께 삭제됩니다.')) {
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/admin/lessons/' + lessonId, {
+          method: 'DELETE'
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          showModal('성공', '수업이 삭제되었습니다.');
+          loadCourseLessons(courseId);
+          loadClasses(); // 코스 목록 새로고침 (수업 수 업데이트)
+        } else {
+          showModal('오류', data.error || '수업 삭제에 실패했습니다.');
+        }
+      } catch (e) {
+        showModal('오류', '수업 삭제 중 오류가 발생했습니다.');
+      }
     }
 
     async function loadInstructorsForSelect() {
@@ -7625,7 +8900,7 @@ app.get('/admin', async (c) => {
 
     function openAddClassModal() {
       document.getElementById('editClassId').value = '';
-      document.getElementById('classModalTitle').innerHTML = '<i class="fas fa-book text-blue-500 mr-2"></i>클래스 추가';
+      document.getElementById('classModalTitle').innerHTML = '<i class="fas fa-book text-blue-500 mr-2"></i>코스 추가';
       document.getElementById('saveClassBtn').textContent = '추가';
 
       // Clear form
@@ -7635,7 +8910,6 @@ app.get('/admin', async (c) => {
       document.getElementById('classCategory').value = '';
       document.getElementById('classPrice').value = '';
       document.getElementById('classDuration').value = '60';
-      document.getElementById('classScheduleStart').value = '';
       document.getElementById('classLevel').value = 'all';
       document.getElementById('classThumbnail').value = '';
       document.getElementById('thumbnailPreview').classList.add('hidden');
@@ -7654,12 +8928,12 @@ app.get('/admin', async (c) => {
       const data = await res.json();
       const cls = data.classes.find(c => c.id === classId);
       if (!cls) {
-        showModal('오류', '클래스를 찾을 수 없습니다.');
+        showModal('오류', '코스를 찾을 수 없습니다.');
         return;
       }
 
       document.getElementById('editClassId').value = classId;
-      document.getElementById('classModalTitle').innerHTML = '<i class="fas fa-edit text-blue-500 mr-2"></i>클래스 수정';
+      document.getElementById('classModalTitle').innerHTML = '<i class="fas fa-edit text-blue-500 mr-2"></i>코스 수정';
       document.getElementById('saveClassBtn').textContent = '수정';
 
       // Fill form
@@ -7669,14 +8943,6 @@ app.get('/admin', async (c) => {
       document.getElementById('classDuration').value = cls.duration_minutes || 60;
       document.getElementById('classLevel').value = cls.level || 'all';
       document.getElementById('classThumbnail').value = cls.thumbnail || '';
-
-      if (cls.schedule_start) {
-        const d = new Date(cls.schedule_start);
-        const formatted = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + 'T' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
-        document.getElementById('classScheduleStart').value = formatted;
-      } else {
-        document.getElementById('classScheduleStart').value = '';
-      }
 
       document.getElementById('thumbnailUploading').classList.add('hidden');
       document.getElementById('thumbnailFileInput').value = '';
@@ -7709,7 +8975,6 @@ app.get('/admin', async (c) => {
       const categoryId = document.getElementById('classCategory').value;
       const price = document.getElementById('classPrice').value;
       const durationMinutes = document.getElementById('classDuration').value;
-      const scheduleStart = document.getElementById('classScheduleStart').value;
       const level = document.getElementById('classLevel').value;
       const thumbnail = document.getElementById('classThumbnail').value.trim();
 
@@ -7724,7 +8989,6 @@ app.get('/admin', async (c) => {
         categoryId: parseInt(categoryId),
         price: price ? parseInt(price) : 0,
         durationMinutes: durationMinutes ? parseInt(durationMinutes) : 60,
-        scheduleStart: scheduleStart ? new Date(scheduleStart).toISOString() : null,
         level, thumbnail
       };
 
@@ -7740,7 +9004,7 @@ app.get('/admin', async (c) => {
 
       if (data.success) {
         closeClassModal();
-        showModal('성공', classId ? '클래스가 수정되었습니다.' : '클래스가 추가되었습니다.');
+        showModal('성공', classId ? '코스가 수정되었습니다.' : '코스가 추가되었습니다.');
         loadClasses();
       } else {
         showModal('오류', data.error || '저장 실패');
@@ -7748,7 +9012,7 @@ app.get('/admin', async (c) => {
     }
 
     async function deleteClass(classId, classTitle) {
-      if (!confirm(classTitle + ' 클래스를 삭제하시겠습니까?')) return;
+      if (!confirm(classTitle + ' 코스를 삭제하시겠습니까?')) return;
 
       const res = await fetch('/api/admin/classes/' + classId, { method: 'DELETE' });
       const data = await res.json();
@@ -7845,26 +9109,65 @@ app.get('/admin', async (c) => {
       document.getElementById('thumbnailFileInput').value = '';
     }
 
-    function openCreateSession(classId, className, instructorName, scheduleStart) {
+    let lessonRowCounter = 0;
+
+    function openCreateSession(classId, className, instructorName, durationMinutes) {
       selectedClassId = classId;
       document.getElementById('sessionClassName').textContent = className;
       document.getElementById('sessionInstructor').textContent = instructorName;
+      document.getElementById('sessionClassId').value = classId;
+      document.getElementById('sessionDurationDefault').value = durationMinutes || 60;
 
-      // 항상 5분 후 시간으로 설정 (과거 시간 무시)
-      const defaultTime = new Date(Date.now() + 5 * 60 * 1000);
+      // 수업 행 초기화
+      document.getElementById('lessonRowsContainer').innerHTML = '';
+      lessonRowCounter = 0;
+      addLessonRow(); // 첫 번째 행 추가
 
-      // Format for datetime-local input (로컬 시간 YYYY-MM-DDTHH:MM)
+      document.getElementById('createSessionModal').classList.remove('hidden');
+    }
+
+    function getDefaultDateTime(offsetMinutes = 5) {
+      const defaultTime = new Date(Date.now() + offsetMinutes * 60 * 1000);
       const year = defaultTime.getFullYear();
       const month = String(defaultTime.getMonth() + 1).padStart(2, '0');
       const day = String(defaultTime.getDate()).padStart(2, '0');
       const hours = String(defaultTime.getHours()).padStart(2, '0');
       const minutes = String(defaultTime.getMinutes()).padStart(2, '0');
-      const formatted = year + '-' + month + '-' + day + 'T' + hours + ':' + minutes;
+      return year + '-' + month + '-' + day + 'T' + hours + ':' + minutes;
+    }
 
-      document.getElementById('sessionScheduledAt').value = formatted;
-      document.getElementById('sessionScheduledAt').min = formatted;
+    function addLessonRow() {
+      const container = document.getElementById('lessonRowsContainer');
+      const durationDefault = document.getElementById('sessionDurationDefault').value || 60;
+      const rowId = ++lessonRowCounter;
+      const minTime = getDefaultDateTime(5);
 
-      document.getElementById('createSessionModal').classList.remove('hidden');
+      const row = document.createElement('div');
+      row.id = 'lessonRow_' + rowId;
+      row.className = 'bg-gray-50 rounded-lg p-3 space-y-2';
+      row.innerHTML = \`
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-medium text-gray-600">수업 #\${rowId}</span>
+          \${lessonRowCounter > 1 ? '<button type="button" onclick="removeLessonRow(' + rowId + ')" class="text-red-500 hover:text-red-700 text-xs"><i class="fas fa-times"></i></button>' : ''}
+        </div>
+        <input type="text" id="lessonTitle_\${rowId}" placeholder="수업명 (선택, 기본: 코스명 #번호)" class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500">
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-xs text-gray-500">시작 일시</label>
+            <input type="datetime-local" id="lessonTime_\${rowId}" value="\${minTime}" min="\${minTime}" class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="text-xs text-gray-500">시간(분)</label>
+            <input type="number" id="lessonDuration_\${rowId}" value="\${durationDefault}" min="10" max="360" class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500">
+          </div>
+        </div>
+      \`;
+      container.appendChild(row);
+    }
+
+    function removeLessonRow(rowId) {
+      const row = document.getElementById('lessonRow_' + rowId);
+      if (row) row.remove();
     }
 
     function closeSessionModal() {
@@ -7875,9 +9178,24 @@ app.get('/admin', async (c) => {
     async function confirmCreateSession() {
       if (!selectedClassId) return;
 
-      const scheduledAt = document.getElementById('sessionScheduledAt').value;
-      if (!scheduledAt) {
-        showModal('오류', '수업 시간을 선택해주세요.');
+      // 모든 수업 행에서 데이터 수집
+      const lessons = [];
+      const rows = document.getElementById('lessonRowsContainer').children;
+      for (const row of rows) {
+        const rowId = row.id.replace('lessonRow_', '');
+        const title = document.getElementById('lessonTitle_' + rowId)?.value?.trim() || '';
+        const scheduledAt = document.getElementById('lessonTime_' + rowId)?.value;
+        const duration = parseInt(document.getElementById('lessonDuration_' + rowId)?.value) || 60;
+
+        if (!scheduledAt) {
+          showModal('오류', '모든 수업의 시작 시간을 입력해주세요.');
+          return;
+        }
+        lessons.push({ title, scheduledAt: new Date(scheduledAt).toISOString(), durationMinutes: duration });
+      }
+
+      if (lessons.length === 0) {
+        showModal('오류', '최소 1개의 수업을 추가해주세요.');
         return;
       }
 
@@ -7888,21 +9206,17 @@ app.get('/admin', async (c) => {
       btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>생성중...';
 
       try {
-        const res = await fetch('/api/admin/classes/' + selectedClassId + '/create-session', {
+        const res = await fetch('/api/admin/classes/' + selectedClassId + '/create-sessions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scheduledAt: new Date(scheduledAt).toISOString() })
+          body: JSON.stringify({ lessons })
         });
         const data = await res.json();
 
         closeSessionModal();
 
         if (data.success) {
-          if (data.alreadyExists) {
-            showModal('알림', '이미 생성된 수업이 있습니다.\\n\\n코스 ID: ' + data.courseId + '\\n수업 ID: ' + data.classId);
-          } else {
-            showModal('성공', 'ClassIn 수업이 생성되었습니다!\\n\\n코스 ID: ' + data.courseId + '\\n수업 ID: ' + data.classId);
-          }
+          showModal('성공', data.message || '수업이 생성되었습니다!');
           loadClasses();
         } else {
           showModal('오류', data.error || '수업 생성 실패');
@@ -7911,58 +9225,6 @@ app.get('/admin', async (c) => {
         btn.disabled = false;
         btn.innerHTML = '생성';
       }
-    }
-
-    // Lesson History modal functions
-    async function openLessonHistoryModal(classId, className) {
-      document.getElementById('lessonHistoryClassName').textContent = className;
-      document.getElementById('lessonHistoryContent').innerHTML = '<p class="text-gray-500 text-center py-4">로딩중...</p>';
-      document.getElementById('lessonHistoryModal').classList.remove('hidden');
-
-      const res = await fetch('/api/admin/classes/' + classId + '/lessons');
-      const data = await res.json();
-
-      if (data.lessons && data.lessons.length > 0) {
-        const now = Date.now();
-        document.getElementById('lessonHistoryContent').innerHTML = \`
-          <div class="space-y-3">
-            \${data.lessons.map(lesson => {
-              // 수업 종료 시간 계산 (시작시간 + 수업시간)
-              const endTime = new Date(lesson.scheduled_at).getTime() + (lesson.duration_minutes || 60) * 60 * 1000;
-              const isTimeOver = endTime < now;
-              const isEnded = lesson.status === 'ended' || isTimeOver;
-              const isLive = lesson.status === 'live' && !isTimeOver;
-
-              return \`
-              <div class="p-4 border rounded-xl \${isEnded ? 'bg-gray-50 border-gray-200' : isLive ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'}">
-                <div class="flex items-center justify-between mb-2">
-                  <span class="font-bold text-gray-800">\${lesson.lesson_title}</span>
-                  <span class="px-2 py-0.5 text-xs font-bold rounded-full \${isEnded ? 'bg-gray-200 text-gray-600' : isLive ? 'bg-red-500 text-white' : 'bg-blue-500 text-white'}">
-                    \${isEnded ? '종료' : isLive ? '진행중' : '예정'}
-                  </span>
-                </div>
-                <div class="text-sm text-gray-600 space-y-1">
-                  <p><i class="fas fa-calendar text-gray-400 w-4"></i> \${new Date(lesson.scheduled_at).toLocaleString('ko-KR')}</p>
-                  <p><i class="fas fa-clock text-gray-400 w-4"></i> \${lesson.duration_minutes}분</p>
-                  <p><i class="fas fa-video text-gray-400 w-4"></i> 수업 ID: \${lesson.classin_class_id || '-'}</p>
-                </div>
-                <div class="flex gap-2 mt-3">
-                  \${isEnded
-                    ? \`<span class="flex-1 py-1.5 bg-gray-300 text-gray-600 text-xs font-semibold rounded-lg text-center cursor-default">수업 종료</span>\`
-                    : (lesson.id ? \`<a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true" target="_blank" class="flex-1 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg text-center">강사 입장</a>\` : '')}
-                  \${lesson.replay_url ? \`<a href="\${lesson.replay_url}" target="_blank" class="flex-1 py-1.5 bg-green-500 hover:bg-green-600 text-white text-xs font-semibold rounded-lg text-center">다시보기</a>\` : ''}
-                </div>
-              </div>
-            \`}).join('')}
-          </div>
-        \`;
-      } else {
-        document.getElementById('lessonHistoryContent').innerHTML = '<p class="text-gray-500 text-center py-8">수업 이력이 없습니다.</p>';
-      }
-    }
-
-    function closeLessonHistoryModal() {
-      document.getElementById('lessonHistoryModal').classList.add('hidden');
     }
 
     // Settings modal functions
@@ -8346,7 +9608,7 @@ app.get('/admin/enrollments', async (c) => {
           <h2 class="text-lg font-bold text-gray-800"><i class="fas fa-user-graduate text-orange-500 mr-2"></i>수강신청자 목록</h2>
           <div class="flex items-center gap-2 flex-wrap">
             <select id="classFilter" onchange="currentPage=0;loadEnrollments()" class="px-3 py-2 border border-gray-200 rounded-lg text-sm">
-              <option value="">전체 클래스</option>
+              <option value="">전체 코스</option>
             </select>
             <select id="statusFilter" onchange="currentPage=0;loadEnrollments()" class="px-3 py-2 border border-gray-200 rounded-lg text-sm">
               <option value="">전체 상태</option>
@@ -8369,7 +9631,7 @@ app.get('/admin/enrollments', async (c) => {
           <thead class="bg-gray-50">
             <tr>
               <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">ID</th>
-              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">클래스</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">코스</th>
               <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">수강생</th>
               <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">이메일</th>
               <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">전화번호</th>
@@ -8429,7 +9691,7 @@ app.get('/admin/enrollments', async (c) => {
       const res = await fetch('/api/admin/classes');
       const data = await res.json();
       const select = document.getElementById('classFilter');
-      select.innerHTML = '<option value="">전체 클래스</option>' +
+      select.innerHTML = '<option value="">전체 코스</option>' +
         (data.classes || []).map(c => \`<option value="\${c.id}">\${c.title}</option>\`).join('');
     }
 
