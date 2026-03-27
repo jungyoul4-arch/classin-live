@@ -1514,6 +1514,23 @@ app.post('/api/auth/register', async (c) => {
   }
 })
 
+// Check if user is enrolled in a course
+app.get('/api/enrollments/check', async (c) => {
+  const userId = c.req.query('userId')
+  const classId = c.req.query('classId')
+
+  if (!userId || !classId) {
+    return c.json({ error: 'userId and classId required' }, 400)
+  }
+
+  const enrollment = await c.env.DB.prepare(`
+    SELECT id FROM enrollments
+    WHERE user_id = ? AND class_id = ? AND status = 'active'
+  `).bind(userId, classId).first()
+
+  return c.json({ enrolled: !!enrollment })
+})
+
 // Get user enrollments (with next lesson info from class_lessons)
 app.get('/api/user/:userId/enrollments', async (c) => {
   const userId = c.req.param('userId')
@@ -3164,27 +3181,21 @@ app.get('/api/lessons/:lessonId/stream-url', async (c) => {
   const isAdmin = userRole === 'admin'
   const isInstructor = userRole === 'instructor' && lesson.instructor_user_id === userId
 
-  // 무료 강의인 경우 결제 확인 생략
-  const isFree = !lesson.price && !lesson.course_price
+  // 무료 코스인 경우 결제 확인 생략
+  const isFree = !lesson.course_price
 
-  // 관리자/강사/무료는 결제 확인 없이 바로 재생
+  // 관리자/강사/무료 코스는 결제 확인 없이 바로 재생
   if (!isAdmin && !isInstructor && !isFree) {
-    // 결제 확인: lesson_enrollments 또는 enrollments 체크
-    const lessonEnrollment = await c.env.DB.prepare(`
-      SELECT * FROM lesson_enrollments
-      WHERE user_id = ? AND class_lesson_id = ? AND status = 'active'
-    `).bind(userId, lessonId).first()
-
+    // 코스 결제 확인
     const courseEnrollment = await c.env.DB.prepare(`
       SELECT * FROM enrollments
       WHERE user_id = ? AND class_id = ? AND status = 'active'
     `).bind(userId, lesson.class_id).first()
 
-    if (!lessonEnrollment && !courseEnrollment) {
+    if (!courseEnrollment) {
       return c.json({
-        error: '결제가 필요합니다.',
+        error: '코스 결제가 필요합니다.',
         requirePayment: true,
-        lessonPrice: lesson.price,
         coursePrice: lesson.course_price
       }, 403)
     }
@@ -7233,13 +7244,14 @@ ${navHTML}
 
             if (isRecorded) {
               // 녹화 강의
-              const lessonPrice = sl.price || cls.price || 0
               statusBadge = '<span class="px-2 py-0.5 bg-green-100 text-green-700 text-xs font-medium rounded-full">시청가능</span>'
-              if (lessonPrice > 0) {
-                const paymentData = JSON.stringify({lessonId: sl.id, lessonTitle: sl.lesson_title, classId: cls.id, classTitle: cls.title, price: lessonPrice, thumbnail: cls.thumbnail, instructor_name: cls.instructor_name, isRecorded: true})
-                actionButton = "<button onclick='openLessonPaymentModal(" + paymentData.replace(/'/g, "\\'") + ")' class=\"px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-purple-500/30\"><i class=\"fas fa-credit-card mr-1\"></i>결제 후 시청 · " + lessonPrice.toLocaleString() + "원</button>"
+              // 코스 가격 확인 (강의별 가격 없음)
+              if (cls.price > 0) {
+                // 유료 코스 - 수강 여부 확인 필요
+                actionButton = '<button onclick="checkEnrollmentAndWatch(' + sl.id + ', ' + cls.id + ')" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>'
               } else {
-                actionButton = '<button onclick="openWatchWindow(' + sl.id + ')" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>무료 시청</button>'
+                // 무료 코스 - 바로 시청
+                actionButton = '<button onclick="openWatchWindow(' + sl.id + ')" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>'
               }
               bgClass = 'bg-purple-50 border-purple-200'
               circleClass = 'bg-purple-500'
@@ -7252,14 +7264,20 @@ ${navHTML}
               circleClass = 'bg-gray-300'
             } else if (isLive) {
               statusBadge = '<span class="px-2 py-0.5 bg-red-500 text-white text-xs font-medium rounded-full animate-pulse">진행중</span>'
-              const livePaymentData = JSON.stringify({lessonId: sl.id, lessonTitle: sl.lesson_title, classId: cls.id, classTitle: cls.title, price: cls.price, thumbnail: cls.thumbnail, instructor_name: cls.instructor_name, scheduledAt: sl.scheduled_at})
-              actionButton = "<button onclick='openLessonPaymentModal(" + livePaymentData.replace(/'/g, "\\'") + ")' class=\"px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30\"><i class=\"fas fa-credit-card mr-1\"></i>바로 수강하기 · " + cls.price.toLocaleString() + "원</button>"
+              if (cls.price > 0) {
+                actionButton = "<button onclick=\"checkEnrollmentAndJoin(" + sl.id + ", " + cls.id + ")\" data-join-url=\"" + (sl.join_url || '') + "\" class=\"px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30\"><i class=\"fas fa-video mr-1\"></i>입장하기</button>"
+              } else {
+                actionButton = sl.join_url ? '<a href="' + sl.join_url + '" target="_blank" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-video mr-1"></i>입장하기</a>' : '<span class="text-gray-400 text-sm">입장 링크 없음</span>'
+              }
               bgClass = 'bg-red-50 border-red-200'
               circleClass = 'bg-red-500'
             } else {
               statusBadge = '<span class="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-medium rounded-full">예정</span>'
-              const upcomingPaymentData = JSON.stringify({lessonId: sl.id, lessonTitle: sl.lesson_title, classId: cls.id, classTitle: cls.title, price: cls.price, thumbnail: cls.thumbnail, instructor_name: cls.instructor_name, scheduledAt: sl.scheduled_at})
-              actionButton = "<button onclick='openLessonPaymentModal(" + upcomingPaymentData.replace(/'/g, "\\'") + ")' class=\"px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30\"><i class=\"fas fa-credit-card mr-1\"></i>바로 수강하기 · " + cls.price.toLocaleString() + "원</button>"
+              if (cls.price > 0) {
+                actionButton = "<button onclick=\"checkEnrollmentAndJoin(" + sl.id + ", " + cls.id + ")\" data-join-url=\"" + (sl.join_url || '') + "\" class=\"px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30\"><i class=\"fas fa-calendar-check mr-1\"></i>수강 예약</button>"
+              } else {
+                actionButton = '<span class="text-gray-500 text-sm"><i class="far fa-clock mr-1"></i>시작 대기</span>'
+              }
               bgClass = 'bg-blue-50 border-blue-200'
               circleClass = 'bg-blue-500'
             }
@@ -7476,6 +7494,73 @@ ${navHTML}
 // 녹화 강의 새 창에서 열기
 function openWatchWindow(lessonId) {
   window.open('/watch/' + lessonId, 'watchLesson', 'width=1200,height=800');
+}
+
+// 코스 수강 여부 확인 후 녹화 강의 시청
+async function checkEnrollmentAndWatch(lessonId, courseId) {
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  const token = localStorage.getItem('classin_token');
+
+  if (!user || !token) {
+    if (typeof openLoginModal === 'function') openLoginModal();
+    else window.location.href = '/login';
+    return;
+  }
+
+  // 강사 본인 코스면 바로 시청
+  if (user.role === 'instructor' || user.role === 'admin') {
+    openWatchWindow(lessonId);
+    return;
+  }
+
+  // 수강 여부 확인
+  try {
+    const res = await fetch('/api/enrollments/check?userId=' + user.id + '&classId=' + courseId);
+    const data = await res.json();
+    if (data.enrolled) {
+      openWatchWindow(lessonId);
+    } else {
+      alert('코스 결제가 필요합니다. 코스를 먼저 수강 신청해주세요.');
+    }
+  } catch (e) {
+    alert('수강 확인 중 오류가 발생했습니다.');
+  }
+}
+
+// 코스 수강 여부 확인 후 라이브 강의 입장
+async function checkEnrollmentAndJoin(lessonId, courseId) {
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  const token = localStorage.getItem('classin_token');
+  // 클릭된 버튼에서 join URL 가져오기
+  const btn = event.currentTarget;
+  const joinUrl = btn.dataset.joinUrl || '';
+
+  if (!user || !token) {
+    if (typeof openLoginModal === 'function') openLoginModal();
+    else window.location.href = '/login';
+    return;
+  }
+
+  // 강사/관리자면 바로 입장
+  if (user.role === 'instructor' || user.role === 'admin') {
+    if (joinUrl) window.open(joinUrl, '_blank');
+    else alert('입장 링크가 아직 없습니다.');
+    return;
+  }
+
+  // 수강 여부 확인
+  try {
+    const res = await fetch('/api/enrollments/check?userId=' + user.id + '&classId=' + courseId);
+    const data = await res.json();
+    if (data.enrolled) {
+      if (joinUrl) window.open(joinUrl, '_blank');
+      else alert('입장 링크가 아직 없습니다.');
+    } else {
+      alert('코스 결제가 필요합니다. 코스를 먼저 수강 신청해주세요.');
+    }
+  } catch (e) {
+    alert('수강 확인 중 오류가 발생했습니다.');
+  }
 }
 
 // ===== 커리큘럼 → 강의 입장 =====
@@ -8081,7 +8166,7 @@ app.get('/watch/:lessonId', async (c) => {
     return c.html('<html><body><h2>녹화 강의가 아닙니다.</h2><p><a href="/class/' + lesson.class_slug + '">코스로 이동</a></p></body></html>')
   }
 
-  const isFree = !lesson.price && !lesson.course_price
+  const isFree = !lesson.course_price
 
   const html = `${headHTML}
 <body class="bg-gray-900 min-h-screen">
