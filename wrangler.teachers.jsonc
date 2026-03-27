@@ -10,6 +10,11 @@
     "APP_BADGE": "TEACHERS",
     "CLASSIN_SID": "86799720",
     "CLASSIN_SECRET": "ReldwKsx"
+    // Cloudflare Stream (녹화 강의 스트리밍용) - 대시보드에서 설정
+    // "CF_ACCOUNT_ID": "your-account-id",
+    // "CF_STREAM_TOKEN": "your-stream-api-token"
+    // "CF_STREAM_SIGNING_KEY_ID": "your-signing-key-id",
+    // "CF_STREAM_SIGNING_KEY_JWK": "{...jwk-json...}"
   },
   "d1_databases": [
     {
