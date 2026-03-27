@@ -7326,7 +7326,7 @@ ${navHTML}
             } else {
               statusBadge = '<span class="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-medium rounded-full">예정</span>'
               if (cls.price > 0) {
-                actionButton = "<button onclick=\"checkEnrollmentAndJoin(" + sl.id + ", " + cls.id + ")\" data-join-url=\"" + (sl.join_url || '') + "\" class=\"px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30\"><i class=\"fas fa-calendar-check mr-1\"></i>수강 예약</button>"
+                actionButton = "<button onclick=\"checkEnrollmentAndJoin(" + sl.id + ", " + cls.id + ")\" data-join-url=\"" + (sl.join_url || '') + "\" class=\"px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30\"><i class=\"fas fa-door-open mr-1\"></i>입장하기</button>"
               } else {
                 actionButton = '<span class="text-gray-500 text-sm"><i class="far fa-clock mr-1"></i>시작 대기</span>'
               }
@@ -7890,14 +7890,14 @@ async function loadMyEnrollments() {
         actionBtn = lesson.replay_url
           ? '<a href="'+lesson.replay_url+'" target="_blank" class="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-xs font-medium rounded-lg">다시보기</a>'
           : '<span class="text-gray-400 text-xs">-</span>';
-      } else if (isEnrolled) {
+      } else {
+        // 코스 수강 중이면 모든 강의 입장 가능
         statusBadge = isLive
           ? '<span class="px-2 py-0.5 bg-red-500 text-white text-[10px] font-medium rounded-full animate-pulse">진행중</span>'
-          : '<span class="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-medium rounded-full">수강중</span>';
-        actionBtn = '<a href="/api/classin/enter/'+lesson.session_id+'?redirect=true" target="_blank" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium rounded-lg">입장</a>';
-      } else {
-        statusBadge = '<span class="px-2 py-0.5 bg-orange-100 text-orange-700 text-[10px] font-medium rounded-full">미수강</span>';
-        actionBtn = '<a href="/class/'+e.slug+'" class="px-3 py-1 bg-primary-500 hover:bg-primary-600 text-white text-xs font-medium rounded-lg">수강신청</a>';
+          : '<span class="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-medium rounded-full">예정</span>';
+        actionBtn = lesson.session_id
+          ? '<a href="/api/classin/enter/'+lesson.session_id+'?redirect=true" target="_blank" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium rounded-lg"><i class="fas fa-door-open mr-1"></i>입장하기</a>'
+          : '<span class="text-gray-400 text-xs"><i class="far fa-clock mr-1"></i>준비중</span>';
       }
 
       return '<div class="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0 '+(isEnded ? 'opacity-60' : '')+'">' +
