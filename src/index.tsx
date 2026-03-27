@@ -7337,30 +7337,33 @@ ${navHTML}
       </div>
       ` : ''}
 
-      <!-- Curriculum -->
+      <!-- Curriculum (챕터별 + 강의 입장 연결) -->
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
         <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-list-ol text-purple-500 mr-2"></i>커리큘럼 <span class="text-sm font-normal text-gray-500">(${lessons.length}강)</span></h2>
         <div class="space-y-3">
           ${Object.entries(chapters).map(([chapter, chLessons]: [string, any[]], ci) => `
             <div class="border border-gray-100 rounded-xl overflow-hidden">
-              <button onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('i:last-child').classList.toggle('rotate-180')" class="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-all">
+              <button onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.chev-icon').classList.toggle('rotate-180')" class="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-all">
                 <div class="flex items-center gap-2">
                   <span class="w-6 h-6 bg-primary-100 text-primary-600 text-xs font-bold rounded-full flex items-center justify-center">${ci + 1}</span>
                   <span class="text-sm font-semibold text-dark-800">${chapter}</span>
                   <span class="text-xs text-gray-400">(${chLessons.length}강)</span>
                 </div>
-                <i class="fas fa-chevron-down text-gray-400 text-xs transition-transform"></i>
+                <i class="fas fa-chevron-down text-gray-400 text-xs transition-transform chev-icon"></i>
               </button>
               <div class="${ci === 0 ? '' : 'hidden'}">
-                ${chLessons.map((lesson: any, li: number) => `
-                  <div class="flex items-center gap-3 px-4 py-3 border-t border-gray-50 hover:bg-gray-50 transition-all">
+                ${chLessons.map((lesson: any, li: number) => {
+                  const iconClass = lesson.lesson_type === 'live' ? 'fa-video text-red-400' : lesson.lesson_type === 'assignment' ? 'fa-pencil-alt text-blue-400' : 'fa-play-circle text-gray-400'
+                  return `
+                  <div class="curriculum-item flex items-center gap-3 px-4 py-3 border-t border-gray-50 hover:bg-purple-50 transition-all cursor-pointer group" data-lesson-title="${lesson.title.replace(/"/g, '&quot;')}" data-lesson-type="${lesson.lesson_type}" onclick="enterCurriculumLesson(this)">
                     <span class="text-xs text-gray-400 w-5">${li + 1}</span>
-                    <i class="fas ${lesson.lesson_type === 'live' ? 'fa-video text-red-400' : lesson.lesson_type === 'assignment' ? 'fa-pencil-alt text-blue-400' : 'fa-play-circle text-gray-400'} text-sm"></i>
-                    <span class="text-sm text-dark-700 flex-1">${lesson.title}</span>
+                    <i class="fas ${iconClass} text-sm"></i>
+                    <span class="text-sm text-dark-700 flex-1 group-hover:text-purple-700 transition-colors">${lesson.title}</span>
                     ${lesson.is_preview ? '<span class="text-[10px] text-primary-500 font-bold border border-primary-200 px-1.5 py-0.5 rounded">미리보기</span>' : ''}
                     <span class="text-xs text-gray-400">${lesson.duration_minutes}분</span>
-                  </div>
-                `).join('')}
+                    <i class="fas fa-chevron-right text-gray-300 text-xs group-hover:text-purple-400 transition-colors"></i>
+                  </div>`
+                }).join('')}
               </div>
             </div>
           `).join('')}
@@ -7403,7 +7406,7 @@ ${navHTML}
       <!-- Reviews -->
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
         <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-comments text-green-500 mr-2"></i>수강생 후기 <span class="text-sm font-normal text-gray-500">(${cls.review_count}개)</span></h2>
-        
+
         <div class="flex items-center gap-6 mb-6 p-4 bg-gray-50 rounded-xl">
           <div class="text-center">
             <p class="text-3xl font-extrabold text-dark-900">${cls.rating}</p>
@@ -7417,8 +7420,34 @@ ${navHTML}
             }).join('')}
           </div>
         </div>
-        
-        <div class="space-y-4">
+
+        <!-- 리뷰 작성 폼 (수강생 전용, JS에서 표시/숨김 제어) -->
+        <div id="reviewFormSection" class="hidden mb-6">
+          <div class="border border-gray-200 rounded-xl p-4 bg-gray-50">
+            <p class="text-sm font-semibold text-dark-800 mb-3"><i class="fas fa-pen mr-1 text-green-500"></i>후기 작성하기</p>
+            <div class="flex items-center gap-1 mb-3" id="reviewStarSelector">
+              <button type="button" onclick="setReviewRating(1)" class="review-star text-gray-300 hover:text-yellow-400 text-xl transition-colors"><i class="fas fa-star"></i></button>
+              <button type="button" onclick="setReviewRating(2)" class="review-star text-gray-300 hover:text-yellow-400 text-xl transition-colors"><i class="fas fa-star"></i></button>
+              <button type="button" onclick="setReviewRating(3)" class="review-star text-gray-300 hover:text-yellow-400 text-xl transition-colors"><i class="fas fa-star"></i></button>
+              <button type="button" onclick="setReviewRating(4)" class="review-star text-gray-300 hover:text-yellow-400 text-xl transition-colors"><i class="fas fa-star"></i></button>
+              <button type="button" onclick="setReviewRating(5)" class="review-star text-gray-300 hover:text-yellow-400 text-xl transition-colors"><i class="fas fa-star"></i></button>
+              <span id="reviewRatingText" class="text-sm text-gray-400 ml-2">별점을 선택해주세요</span>
+            </div>
+            <textarea id="reviewContent" rows="3" placeholder="수업에 대한 솔직한 후기를 남겨주세요. 다른 수강생에게 큰 도움이 됩니다!" class="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-green-400 focus:border-green-400 resize-none bg-white"></textarea>
+            <div class="flex items-center justify-between mt-3">
+              <p class="text-xs text-gray-400">작성한 후기는 수정/삭제가 불가합니다</p>
+              <button onclick="submitReview(${cls.id})" id="submitReviewBtn" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold rounded-lg transition-all disabled:bg-gray-300 disabled:cursor-not-allowed" disabled>후기 등록</button>
+            </div>
+          </div>
+        </div>
+        <!-- 이미 작성한 경우 -->
+        <div id="reviewAlreadyWritten" class="hidden mb-6">
+          <div class="p-3 bg-green-50 border border-green-200 rounded-xl text-center">
+            <p class="text-sm text-green-700"><i class="fas fa-check-circle mr-1"></i>이미 후기를 작성하셨습니다. 감사합니다!</p>
+          </div>
+        </div>
+
+        <div class="space-y-4" id="reviewsList">
           ${reviews.map((r: any) => `
             <div class="pb-4 border-b border-gray-50 last:border-0">
               <div class="flex items-center justify-between mb-2">
@@ -7448,6 +7477,163 @@ ${navHTML}
 function openWatchWindow(lessonId) {
   window.open('/watch/' + lessonId, 'watchLesson', 'width=1200,height=800');
 }
+
+// ===== 커리큘럼 → 강의 입장 =====
+const classLessonsData = ${JSON.stringify((scheduledLessons as any[]).map(sl => ({
+  id: sl.id,
+  title: sl.lesson_title,
+  type: sl.lesson_type || 'live',
+  status: sl.status,
+  scheduledAt: sl.scheduled_at,
+  durationMinutes: sl.duration_minutes,
+  price: sl.price,
+  replayUrl: sl.replay_url,
+  streamUid: sl.stream_uid
+})))};
+const classId = ${cls.id};
+const classPrice = ${cls.price || 0};
+const classThumbnail = '${cls.thumbnail || ''}';
+const classTitle = '${(cls.title || '').replace(/'/g, "\\'")}';
+const instructorName = '${(cls.instructor_name || '').replace(/'/g, "\\'")}';
+
+function enterCurriculumLesson(el) {
+  const title = el.dataset.lessonTitle;
+  const lessonType = el.dataset.lessonType;
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+
+  // 커리큘럼 제목과 매칭되는 class_lesson 찾기 (부분 매칭)
+  let matched = classLessonsData.find(cl => cl.title && cl.title.includes(title));
+  if (!matched && classLessonsData.length > 0) {
+    // 매칭 안 되면 순서 기반으로 연결 시도
+    const items = document.querySelectorAll('.curriculum-item');
+    const idx = Array.from(items).indexOf(el);
+    if (idx >= 0 && idx < classLessonsData.length) matched = classLessonsData[idx];
+  }
+
+  if (!user) {
+    // 로그인 안 한 경우
+    if (typeof openLoginModal === 'function') openLoginModal();
+    else window.location.href = '/login';
+    return;
+  }
+
+  if (matched) {
+    const now = Date.now();
+    const startTime = new Date(matched.scheduledAt).getTime();
+    const endTime = startTime + (matched.durationMinutes || 60) * 60 * 1000;
+    const isRecorded = matched.type === 'recorded';
+    const isEnded = !isRecorded && endTime < now;
+    const isLive = !isRecorded && !isEnded && startTime <= now && now < endTime;
+
+    if (isRecorded) {
+      // 녹화 강의 → 시청
+      openWatchWindow(matched.id);
+    } else if (isLive) {
+      // 라이브 진행중 → 수업 입장
+      window.open('/api/classin/enter/' + matched.id + '?redirect=true', '_blank');
+    } else if (isEnded && matched.replayUrl) {
+      // 종료됨 + 다시보기 → 다시보기
+      window.open(matched.replayUrl, '_blank');
+    } else {
+      // 예정된 강의 → 결제 유도
+      const paymentData = {lessonId: matched.id, lessonTitle: matched.title, classId: classId, classTitle: classTitle, price: classPrice, thumbnail: classThumbnail, instructor_name: instructorName, scheduledAt: matched.scheduledAt};
+      if (typeof openLessonPaymentModal === 'function') openLessonPaymentModal(paymentData);
+      else alert('강의 시작 예정: ' + new Date(matched.scheduledAt).toLocaleString('ko-KR'));
+    }
+  } else {
+    // 매칭 강의 없음 → 아직 일정 없음 안내
+    alert('아직 해당 강의의 일정이 등록되지 않았습니다.');
+  }
+}
+
+// ===== 리뷰 작성 기능 =====
+let selectedReviewRating = 0;
+const ratingLabels = ['', '별로예요', '그저 그래요', '괜찮아요', '좋아요', '최고예요!'];
+
+function setReviewRating(rating) {
+  selectedReviewRating = rating;
+  const stars = document.querySelectorAll('.review-star');
+  stars.forEach((star, i) => {
+    star.classList.toggle('text-yellow-400', i < rating);
+    star.classList.toggle('text-gray-300', i >= rating);
+  });
+  document.getElementById('reviewRatingText').textContent = ratingLabels[rating];
+  checkReviewReady();
+}
+
+function checkReviewReady() {
+  const content = document.getElementById('reviewContent').value.trim();
+  document.getElementById('submitReviewBtn').disabled = !(selectedReviewRating > 0 && content.length >= 5);
+}
+
+async function submitReview(classId) {
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  if (!user) return;
+  const content = document.getElementById('reviewContent').value.trim();
+  if (!selectedReviewRating || content.length < 5) return;
+
+  const btn = document.getElementById('submitReviewBtn');
+  btn.disabled = true;
+  btn.textContent = '등록 중...';
+
+  try {
+    const token = localStorage.getItem('classin_token');
+    const res = await fetch('/api/reviews', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ classId, userId: user.id, rating: selectedReviewRating, content })
+    });
+    const data = await res.json();
+    if (data.success) {
+      // 리뷰 목록에 추가
+      const reviewsList = document.getElementById('reviewsList');
+      const stars = Array.from({length:5}, (_, i) => '<i class="' + (i < selectedReviewRating ? 'fas' : 'far') + ' fa-star text-yellow-400 text-[10px]"></i>').join('');
+      const newReview = '<div class="pb-4 border-b border-gray-50"><div class="flex items-center justify-between mb-2"><div class="flex items-center gap-2"><div class="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center text-xs font-bold text-green-600">' + user.name.charAt(0) + '</div><div><p class="text-sm font-medium text-dark-800">' + user.name + '</p><div class="flex items-center gap-0.5">' + stars + '</div></div></div><span class="text-xs text-gray-400">방금 전</span></div><p class="text-sm text-dark-600 leading-relaxed">' + content.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</p></div>';
+      reviewsList.insertAdjacentHTML('afterbegin', newReview);
+      // 폼 숨기고 완료 표시
+      document.getElementById('reviewFormSection').classList.add('hidden');
+      document.getElementById('reviewAlreadyWritten').classList.remove('hidden');
+    } else {
+      alert(data.error || '리뷰 등록에 실패했습니다.');
+      btn.disabled = false;
+      btn.textContent = '후기 등록';
+    }
+  } catch(e) {
+    alert('오류가 발생했습니다.');
+    btn.disabled = false;
+    btn.textContent = '후기 등록';
+  }
+}
+
+// 리뷰 textarea 입력 감지
+document.getElementById('reviewContent')?.addEventListener('input', checkReviewReady);
+
+// 수강생인지 확인하여 리뷰 폼 표시
+(function initReviewForm() {
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  if (!user || user.role === 'instructor') return;
+  // 수강 여부 확인
+  fetch('/api/user/' + user.id + '/enrollments')
+    .then(r => r.json())
+    .then(data => {
+      const list = Array.isArray(data) ? data : (data.enrollments || []);
+      const enrolled = list.some(e => e.class_id === ${cls.id} || e.id === ${cls.id});
+      if (!enrolled) return;
+      // 이미 리뷰 작성했는지 확인 (서버 렌더된 리뷰 목록에서 이름 매칭)
+      const existingReviews = document.querySelectorAll('#reviewsList .pb-4');
+      let alreadyWritten = false;
+      existingReviews.forEach(el => {
+        const nameEl = el.querySelector('.font-medium');
+        if (nameEl && nameEl.textContent === user.name) alreadyWritten = true;
+      });
+      if (alreadyWritten) {
+        document.getElementById('reviewAlreadyWritten').classList.remove('hidden');
+      } else {
+        document.getElementById('reviewFormSection').classList.remove('hidden');
+      }
+    })
+    .catch(() => {});
+})();
 
 // 강사는 다른 코스 수강 불가
 document.addEventListener('DOMContentLoaded', () => {
