@@ -5645,7 +5645,7 @@ async function handleLogin() {
     currentUser = data.user; currentToken = data.token;
     localStorage.setItem('classin_user', JSON.stringify(data.user));
     localStorage.setItem('classin_token', data.token);
-    closeAuthModal(); updateAuthUI();
+    closeAuthModal(); updateAuthUI(); updateEnrolledBadges();
   } catch(e) { showError('loginError', '로그인에 실패했습니다.'); }
 }
 
@@ -5663,7 +5663,7 @@ async function handleRegister() {
     currentUser = data.user; currentToken = data.token;
     localStorage.setItem('classin_user', JSON.stringify(data.user));
     localStorage.setItem('classin_token', data.token);
-    closeAuthModal(); updateAuthUI();
+    closeAuthModal(); updateAuthUI(); updateEnrolledBadges();
   } catch(e) { showError('regError', '회원가입에 실패했습니다.'); }
 }
 
@@ -6548,11 +6548,12 @@ function formatPrice(price) { return price?.toLocaleString() + '원'; }
 // Class card HTML generator (코스 카드 - 항상 활성 상태, 강의 상태는 코스 클릭 후 강의 목록에서 확인)
 function classCardHTML(cls) {
   return \`
-    <a href="/class/\${cls.slug}" class="block bg-white rounded-2xl overflow-hidden card-hover border border-gray-100">
+    <a href="/class/\${cls.slug}" class="block bg-white rounded-2xl overflow-hidden card-hover border border-gray-100 course-card" data-course-id="\${cls.id}">
       <div class="relative aspect-[16/10] overflow-hidden">
         <img src="\${cls.thumbnail}" alt="\${cls.title}" class="w-full h-full object-cover transition-transform duration-500 hover:scale-105" loading="lazy">
-        \${cls.is_bestseller ? '<span class="absolute top-2.5 left-2.5 px-2 py-0.5 bg-primary-500 text-white text-[10px] font-bold rounded-md">BEST</span>' : ''}
-        \${cls.is_new ? '<span class="absolute top-2.5 left-2.5 px-2 py-0.5 bg-blue-500 text-white text-[10px] font-bold rounded-md">NEW</span>' : ''}
+        <span class="enrolled-badge absolute top-2.5 left-2.5 px-2 py-0.5 bg-green-500 text-white text-[10px] font-bold rounded-md hidden"><i class="fas fa-check mr-0.5"></i>수강중</span>
+        \${cls.is_bestseller ? '<span class="absolute top-2.5 left-2.5 px-2 py-0.5 bg-primary-500 text-white text-[10px] font-bold rounded-md bestseller-badge">BEST</span>' : ''}
+        \${cls.is_new ? '<span class="absolute top-2.5 left-2.5 px-2 py-0.5 bg-blue-500 text-white text-[10px] font-bold rounded-md new-badge">NEW</span>' : ''}
         \${cls.class_type === 'live' ? '<span class="absolute top-2.5 right-2.5 px-2 py-0.5 bg-red-500 text-white text-[10px] font-bold rounded-md badge-live"><i class="fas fa-circle text-[6px] mr-0.5"></i>LIVE</span>' : ''}
         <button onclick="event.preventDefault();event.stopPropagation();toggleWishlistItem(\${cls.id})" data-wishlist="\${cls.id}" class="absolute bottom-2.5 right-2.5 w-8 h-8 bg-white/90 rounded-full flex items-center justify-center hover:bg-white transition-all shadow-sm">
           <i class="far fa-heart text-gray-600 text-sm"></i>
@@ -6615,9 +6616,44 @@ async function reactivateSubscription(subId) {
   } catch(e) { showToast('오류가 발생했습니다.'); }
 }
 
+// 수강 중인 코스에 배지 표시
+async function updateEnrolledBadges() {
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  if (!user) return;
+
+  try {
+    // 사용자의 수강 목록 가져오기
+    const res = await fetch('/api/user/' + user.id + '/enrollments');
+    if (!res.ok) return;
+    const enrollments = await res.json();
+
+    // 수강 중인 코스 ID 목록
+    const enrolledIds = enrollments.map(e => e.class_id);
+
+    // 코스 카드에 배지 표시
+    document.querySelectorAll('.course-card').forEach(card => {
+      const courseId = parseInt(card.dataset.courseId);
+      if (enrolledIds.includes(courseId)) {
+        const badge = card.querySelector('.enrolled-badge');
+        const bestsellerBadge = card.querySelector('.bestseller-badge');
+        const newBadge = card.querySelector('.new-badge');
+        if (badge) {
+          badge.classList.remove('hidden');
+          // BEST/NEW 배지 숨기기 (수강중 배지와 겹치지 않도록)
+          if (bestsellerBadge) bestsellerBadge.classList.add('hidden');
+          if (newBadge) newBadge.classList.add('hidden');
+        }
+      }
+    });
+  } catch (e) {
+    console.log('Failed to load enrollments:', e);
+  }
+}
+
 // Search handling
 document.addEventListener('DOMContentLoaded', () => {
   updateAuthUI();
+  updateEnrolledBadges();
   // Clear search inputs (prevent Chrome autofill)
   const si = document.getElementById('searchInput');
   const sim = document.getElementById('searchInputMobile');
