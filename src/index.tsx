@@ -7507,6 +7507,39 @@ ${navHTML}
 </section>
 
 <script>
+// 페이지 로드 시 수강 여부 확인하여 버튼 업데이트
+(async function checkEnrollmentOnLoad() {
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  if (!user) return;
+
+  const courseId = ${cls.id};
+  const courseSlug = '${cls.slug}';
+
+  try {
+    const res = await fetch('/api/enrollments/check?userId=' + user.id + '&classId=' + courseId);
+    const data = await res.json();
+
+    if (data.enrolled) {
+      // 수강 중인 경우 - 버튼 변경
+      const payOnetimeDiv = document.getElementById('payOnetime');
+      const payMonthlyDiv = document.getElementById('payMonthly');
+      const payTabsDiv = document.querySelector('.pay-opt-tab')?.parentElement;
+
+      if (payOnetimeDiv) {
+        payOnetimeDiv.innerHTML = '<a href="/class/' + courseSlug + '#lessons" class="w-full h-12 bg-green-500 hover:bg-green-600 text-white font-bold rounded-xl transition-all flex items-center justify-center"><i class="fas fa-check-circle mr-2"></i>결제 완료 - 수강중</a>';
+      }
+      if (payMonthlyDiv) payMonthlyDiv.classList.add('hidden');
+      if (payTabsDiv) payTabsDiv.classList.add('hidden');
+
+      // 장바구니/찜하기 버튼도 숨김
+      const btnAddToCart = document.getElementById('btnAddToCart');
+      if (btnAddToCart) btnAddToCart.parentElement.classList.add('hidden');
+    }
+  } catch (e) {
+    console.log('Enrollment check failed:', e);
+  }
+})();
+
 // 녹화 강의 새 창에서 열기
 function openWatchWindow(lessonId) {
   window.open('/watch/' + lessonId, 'watchLesson', 'width=1200,height=800');
