@@ -6627,12 +6627,14 @@ async function updateEnrolledBadges() {
     if (!res.ok) return;
     const enrollments = await res.json();
 
-    // 수강 중인 코스 ID 목록
-    const enrolledIds = enrollments.map(e => e.class_id);
+    // 수강 중인 코스 ID 목록 (숫자로 변환)
+    const enrolledIds = enrollments.map(e => parseInt(e.class_id));
+    console.log('Enrolled course IDs:', enrolledIds);
 
     // 코스 카드에 배지 표시
     document.querySelectorAll('.course-card').forEach(card => {
       const courseId = parseInt(card.dataset.courseId);
+      console.log('Checking course card:', courseId, 'enrolled:', enrolledIds.includes(courseId));
       if (enrolledIds.includes(courseId)) {
         const badge = card.querySelector('.enrolled-badge');
         const bestsellerBadge = card.querySelector('.bestseller-badge');
@@ -7023,9 +7025,12 @@ async function loadClasses(append) {
     div.innerHTML = classCardHTML(cls);
     grid.appendChild(div.firstElementChild);
   });
-  
+
   document.getElementById('resultCount').textContent = (currentOffset + classes.length) + '개의 코스';
   document.getElementById('loadMoreArea').classList.toggle('hidden', classes.length < PAGE_SIZE);
+
+  // 수강중 배지 업데이트
+  updateEnrolledBadges();
   
   if (search) {
     document.getElementById('searchTag').classList.remove('hidden');
@@ -7401,8 +7406,8 @@ ${navHTML}
           <div class="flex items-start gap-3">
             <i class="fas fa-info-circle text-blue-500 mt-0.5"></i>
             <div class="text-sm text-blue-800">
-              <p class="font-semibold mb-1">강의별 개별 결제</p>
-              <p class="text-blue-600">각 강의을 개별적으로 결제하여 수강할 수 있습니다. 월간 자동결제 시 모든 강의을 자동으로 수강할 수 있습니다.</p>
+              <p class="font-semibold mb-1">코스 결제 안내</p>
+              <p class="text-blue-600">코스를 결제하시면 포함된 모든 강의를 수강하실 수 있습니다.</p>
             </div>
           </div>
         </div>
@@ -8745,11 +8750,12 @@ ${globalScripts}
 // Helper function for class card template (server-side)
 function classCardTemplate(cls: any): string {
   return `
-    <a href="/class/${cls.slug}" class="block bg-white rounded-2xl overflow-hidden card-hover border border-gray-100">
+    <a href="/class/${cls.slug}" class="block bg-white rounded-2xl overflow-hidden card-hover border border-gray-100 course-card" data-course-id="${cls.id}">
       <div class="relative aspect-[16/10] overflow-hidden">
         <img src="${cls.thumbnail}" alt="${cls.title}" class="w-full h-full object-cover transition-transform duration-500 hover:scale-105" loading="lazy">
-        ${cls.is_bestseller ? '<span class="absolute top-2.5 left-2.5 px-2 py-0.5 bg-primary-500 text-white text-[10px] font-bold rounded-md">BEST</span>' : ''}
-        ${cls.is_new ? '<span class="absolute top-2.5 left-2.5 px-2 py-0.5 bg-blue-500 text-white text-[10px] font-bold rounded-md">NEW</span>' : ''}
+        <span class="enrolled-badge absolute top-2.5 left-2.5 px-2 py-0.5 bg-green-500 text-white text-[10px] font-bold rounded-md hidden"><i class="fas fa-check mr-0.5"></i>수강중</span>
+        ${cls.is_bestseller ? '<span class="bestseller-badge absolute top-2.5 left-2.5 px-2 py-0.5 bg-primary-500 text-white text-[10px] font-bold rounded-md">BEST</span>' : ''}
+        ${cls.is_new ? '<span class="new-badge absolute top-2.5 left-2.5 px-2 py-0.5 bg-blue-500 text-white text-[10px] font-bold rounded-md">NEW</span>' : ''}
         ${cls.class_type === 'live' ? '<span class="absolute top-2.5 right-2.5 px-2 py-0.5 bg-red-500 text-white text-[10px] font-bold rounded-md badge-live"><i class="fas fa-circle text-[6px] mr-0.5"></i>LIVE</span>' : ''}
       </div>
       <div class="p-4">
