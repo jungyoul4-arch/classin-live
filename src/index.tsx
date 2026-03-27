@@ -5508,10 +5508,12 @@ const modalsHTML = `
     </div>
     
     <div class="flex gap-2">
-      <button onclick="closeSuccessModal()" class="flex-1 h-11 bg-gray-100 hover:bg-gray-200 text-dark-700 font-semibold rounded-xl transition-all">확인</button>
-      <a href="/mypage" id="goToMyClassBtn" class="flex-1 h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all flex items-center justify-center">
-        <i class="fas fa-book-open mr-1"></i>내 강의 보기
+      <a href="/mypage" class="flex-1 h-11 bg-gray-100 hover:bg-gray-200 text-dark-700 font-semibold rounded-xl transition-all flex items-center justify-center">
+        <i class="fas fa-user mr-1"></i>마이페이지
       </a>
+      <button onclick="goToCourseDetail()" id="goToCourseBtn" class="flex-1 h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all">
+        <i class="fas fa-book-open mr-1"></i>코스 상세 보기
+      </button>
     </div>
   </div>
 </div>
@@ -5943,6 +5945,17 @@ function closeSuccessModal() {
   }
 }
 
+// 결제 완료 후 코스 상세 페이지로 이동
+function goToCourseDetail() {
+  document.getElementById('successModal').classList.add('hidden');
+  if (paymentData.slug) {
+    window.location.href = '/class/' + paymentData.slug;
+  } else if (paymentData.id) {
+    // slug가 없으면 마이페이지로
+    window.location.href = '/mypage';
+  }
+}
+
 // ==================== Subscription (월간 자동결제) ====================
 let subscriptionData = {};
 
@@ -5956,6 +5969,9 @@ function openSubscriptionModal(data) {
   }
 
   subscriptionData = data;
+  // goToCourseDetail에서 사용할 수 있도록 paymentData에도 slug 저장
+  paymentData.slug = data.slug;
+  paymentData.id = data.classId;
   document.getElementById('paymentModal').classList.remove('hidden');
   
   const billingDay = new Date().getDate();
@@ -7152,7 +7168,7 @@ ${navHTML}
             
             <!-- 1회 결제 -->
             <div id="payOnetime">
-              <button id="btnEnrollOnetime" onclick='openPaymentModal(${JSON.stringify({id:cls.id, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30 mb-2">
+              <button id="btnEnrollOnetime" onclick='openPaymentModal(${JSON.stringify({id:cls.id, slug:cls.slug, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30 mb-2">
                 <i class="fas fa-credit-card mr-2"></i>바로 수강하기 · ${cls.price.toLocaleString()}원
               </button>
             </div>
@@ -7166,7 +7182,7 @@ ${navHTML}
                 </div>
                 <p class="text-[11px] text-blue-600">오늘 결제 시 매월 ${new Date().getDate()}일에 자동으로 결제됩니다</p>
               </div>
-              <button id="btnEnrollMonthly" onclick='openSubscriptionModal(${JSON.stringify({planType:"class_monthly", classId:cls.id, title:cls.title, amount:cls.price, originalAmount:cls.original_price, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/30 mb-2">
+              <button id="btnEnrollMonthly" onclick='openSubscriptionModal(${JSON.stringify({planType:"class_monthly", classId:cls.id, slug:cls.slug, title:cls.title, amount:cls.price, originalAmount:cls.original_price, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/30 mb-2">
                 <i class="fas fa-sync-alt mr-2"></i>월간 구독 시작 · ${cls.price.toLocaleString()}원/월
               </button>
             </div>
