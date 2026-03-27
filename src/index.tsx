@@ -2860,7 +2860,7 @@ app.post('/api/admin/stream/upload-url', async (c) => {
 // 관리자: 녹화 강의 생성
 app.post('/api/admin/classes/:classId/create-recorded-lesson', async (c) => {
   const classId = parseInt(c.req.param('classId'))
-  const { title, streamUid, price } = await c.req.json()
+  const { title, streamUid, price, description, curriculumItems, materials } = await c.req.json()
 
   if (!streamUid) {
     return c.json({ error: '동영상 UID(streamUid)가 필요합니다.' }, 400)
@@ -2902,12 +2902,17 @@ app.post('/api/admin/classes/:classId/create-recorded-lesson', async (c) => {
   const lessonStatus = isProcessing ? 'processing' : 'ready'
 
   // class_lessons에 저장
+  const desc = description || ''
+  const currItems = JSON.stringify(curriculumItems || [])
+  const mats = JSON.stringify(materials || [])
+
   const result = await c.env.DB.prepare(`
     INSERT INTO class_lessons (
       class_id, lesson_number, lesson_title,
       lesson_type, stream_uid, stream_url, stream_thumbnail,
-      duration_minutes, price, status, scheduled_at
-    ) VALUES (?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, datetime('now'))
+      duration_minutes, price, status, scheduled_at,
+      description, curriculum_items, materials
+    ) VALUES (?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
   `).bind(
     classId,
     lessonNumber,
@@ -2917,7 +2922,8 @@ app.post('/api/admin/classes/:classId/create-recorded-lesson', async (c) => {
     isVideoReady ? (videoInfo.thumbnail || '') : '',
     durationMinutes,
     price || null,
-    lessonStatus
+    lessonStatus,
+    desc, currItems, mats
   ).run()
 
   // classes 테이블 업데이트
@@ -3355,7 +3361,7 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
 // 관리자: 여러 강의 한 번에 생성
 app.post('/api/admin/classes/:classId/create-sessions', async (c) => {
   const classId = parseInt(c.req.param('classId'))
-  const { lessons } = await c.req.json() as { lessons: Array<{ title?: string; scheduledAt: string; durationMinutes?: number }> }
+  const { lessons } = await c.req.json() as { lessons: Array<{ title?: string; scheduledAt: string; durationMinutes?: number; description?: string; curriculumItems?: any[]; materials?: any[] }> }
 
   if (!lessons || !Array.isArray(lessons) || lessons.length === 0) {
     return c.json({ error: '최소 1개의 강의 정보가 필요합니다.' }, 400)
@@ -3446,11 +3452,16 @@ app.post('/api/admin/classes/:classId/create-sessions', async (c) => {
       `https://www.eeo.cn/client/invoke/index.html?uid=${teacherUid}&classId=${lessonResult.classId}&courseId=${courseId}&schoolId=${config.SID}`
 
     // DB에 저장
+    const desc = lesson.description || ''
+    const currItems = JSON.stringify(lesson.curriculumItems || [])
+    const mats = JSON.stringify(lesson.materials || [])
+
     await c.env.DB.prepare(`
       INSERT INTO class_lessons (class_id, lesson_number, lesson_title, classin_course_id, classin_class_id,
-                                 classin_instructor_url, scheduled_at, duration_minutes, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
-    `).bind(classId, lessonNumber, lessonTitle, courseId, lessonResult.classId, instructorUrl, lesson.scheduledAt, durationMinutes).run()
+                                 classin_instructor_url, scheduled_at, duration_minutes, status,
+                                 description, curriculum_items, materials)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?)
+    `).bind(classId, lessonNumber, lessonTitle, courseId, lessonResult.classId, instructorUrl, lesson.scheduledAt, durationMinutes, desc, currItems, mats).run()
 
     createdLessons.push({
       lessonNumber,
@@ -3535,7 +3546,14 @@ app.get('/api/admin/classes/:classId/lessons', async (c) => {
     // 전체 처리 실패 시 무시하고 기본 결과 반환
   }
 
-  return c.json({ lessons: results })
+  // 코스 정보 (강의 추가 버튼용)
+  const courseInfo = await c.env.DB.prepare(`
+    SELECT c.id, c.title, c.duration_minutes, i.display_name as instructor_name, i.classin_uid as instructor_classin_uid
+    FROM classes c LEFT JOIN instructors i ON c.instructor_id = i.id
+    WHERE c.id = ?
+  `).bind(classId).first() as any
+
+  return c.json({ lessons: results, courseInfo: courseInfo || {} })
 })
 
 // 관리자: 강의 상태 업데이트 (ended로 변경 등)
@@ -7249,22 +7267,61 @@ ${navHTML}
             const iconClass = isRecorded ? 'fas fa-video' : 'far fa-calendar'
             const timeSpan = timeStr ? '<span><i class="far fa-clock mr-1"></i>' + timeStr + '</span>' : ''
 
-            return '<div class="flex flex-col sm:flex-row sm:items-center gap-4 p-4 border border-gray-100 rounded-xl ' + bgClass + ' hover:shadow-sm transition-all">' +
-              '<div class="flex items-center gap-3 flex-1">' +
-                '<div class="w-10 h-10 rounded-full ' + circleClass + ' flex items-center justify-center text-white font-bold text-sm">' + (idx + 1) + '</div>' +
-                '<div>' +
-                  '<p class="font-semibold text-dark-800">' + typeBadge + sl.lesson_title + '</p>' +
-                  '<div class="flex items-center gap-2 text-sm text-gray-500 mt-1">' +
-                    '<span><i class="' + iconClass + ' mr-1"></i>' + dateStr + '</span>' +
-                    timeSpan +
-                    '<span><i class="fas fa-hourglass-half mr-1"></i>' + sl.duration_minutes + '분</span>' +
+            // 커리큘럼/자료 파싱
+            let slCurrItems = []
+            let slMatItems = []
+            try { slCurrItems = JSON.parse(sl.curriculum_items || '[]') } catch(e) {}
+            try { slMatItems = JSON.parse(sl.materials || '[]') } catch(e) {}
+            const slHasDetail = slCurrItems.length > 0 || slMatItems.length > 0 || (sl.description && sl.description.trim())
+            const slDetailId = 'slDetail_' + sl.id
+
+            let slDetailSection = ''
+            if (slHasDetail) {
+              slDetailSection = '<div id="' + slDetailId + '" class="hidden mt-3 pt-3 border-t border-gray-200 space-y-3">'
+              if (sl.description && sl.description.trim()) {
+                slDetailSection += '<div><p class="text-xs font-semibold text-gray-500 mb-1"><i class="fas fa-align-left mr-1"></i>강의 소개</p><p class="text-sm text-gray-700 whitespace-pre-line">' + sl.description + '</p></div>'
+              }
+              if (slCurrItems.length > 0) {
+                slDetailSection += '<div><p class="text-xs font-semibold text-gray-500 mb-1"><i class="fas fa-list-ol mr-1"></i>커리큘럼</p><div class="space-y-1.5">'
+                slCurrItems.forEach(function(ci: any, i: number) {
+                  slDetailSection += '<div class="flex items-start gap-2 pl-1"><span class="w-5 h-5 bg-indigo-100 text-indigo-600 text-[10px] font-bold rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">' + (i+1) + '</span><div><p class="text-sm font-medium text-dark-800">' + (ci.title || '') + '</p>' + (ci.desc ? '<p class="text-xs text-gray-500">' + ci.desc + '</p>' : '') + '</div></div>'
+                })
+                slDetailSection += '</div></div>'
+              }
+              if (slMatItems.length > 0) {
+                slDetailSection += '<div><p class="text-xs font-semibold text-gray-500 mb-1"><i class="fas fa-paperclip mr-1"></i>강의 자료</p><div class="flex flex-wrap gap-2">'
+                slMatItems.forEach(function(m: any) {
+                  slDetailSection += '<a href="' + m.url + '" target="_blank" download class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 hover:border-purple-300 hover:bg-purple-50 rounded-lg text-xs text-gray-700 transition-all shadow-sm"><i class="fas fa-file-download text-purple-500"></i>' + (m.filename || '파일') + '</a>'
+                })
+                slDetailSection += '</div></div>'
+              }
+              slDetailSection += '</div>'
+            }
+
+            const slExpandBtn = slHasDetail ? '<button onclick="event.stopPropagation(); var el=document.getElementById(\'' + slDetailId + '\'); el.classList.toggle(\'hidden\'); this.querySelector(\'i\').classList.toggle(\'rotate-180\')" class="text-gray-400 hover:text-gray-600 text-xs transition-all"><i class="fas fa-chevron-down transition-transform"></i> 상세보기</button>' : ''
+            const slCurrBadge = slCurrItems.length > 0 ? '<span class="px-1.5 py-0.5 bg-indigo-100 text-indigo-600 text-[10px] font-medium rounded"><i class="fas fa-list-ol mr-0.5"></i>' + slCurrItems.length + '</span>' : ''
+            const slMatBadge = slMatItems.length > 0 ? '<span class="text-amber-500 text-xs"><i class="fas fa-paperclip"></i></span>' : ''
+
+            return '<div class="p-4 border border-gray-100 rounded-xl ' + bgClass + ' hover:shadow-sm transition-all">' +
+              '<div class="flex flex-col sm:flex-row sm:items-center gap-4">' +
+                '<div class="flex items-center gap-3 flex-1">' +
+                  '<div class="w-10 h-10 rounded-full ' + circleClass + ' flex items-center justify-center text-white font-bold text-sm">' + (idx + 1) + '</div>' +
+                  '<div>' +
+                    '<p class="font-semibold text-dark-800">' + typeBadge + sl.lesson_title + ' ' + slCurrBadge + slMatBadge + '</p>' +
+                    '<div class="flex items-center gap-2 text-sm text-gray-500 mt-1">' +
+                      '<span><i class="' + iconClass + ' mr-1"></i>' + dateStr + '</span>' +
+                      timeSpan +
+                      '<span><i class="fas fa-hourglass-half mr-1"></i>' + sl.duration_minutes + '분</span>' +
+                      slExpandBtn +
+                    '</div>' +
                   '</div>' +
                 '</div>' +
+                '<div class="flex items-center gap-3">' +
+                  statusBadge +
+                  actionButton +
+                '</div>' +
               '</div>' +
-              '<div class="flex items-center gap-3">' +
-                statusBadge +
-                actionButton +
-              '</div>' +
+              slDetailSection +
             '</div>'
           }).join('')}
         </div>
@@ -8622,6 +8679,68 @@ app.get('/api/images/*', async (c) => {
   }
 })
 
+// Upload material files (PDF, DOCX, etc.) to R2
+app.post('/api/admin/upload-material', async (c) => {
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+  if (!isLoggedIn) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  try {
+    const formData = await c.req.formData()
+    const file = formData.get('file') as File
+    if (!file) return c.json({ error: '파일이 필요합니다.' }, 400)
+
+    const allowedTypes = [
+      'application/pdf',
+      'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'application/haansofthwp', 'application/x-hwp',
+      'application/zip', 'application/x-zip-compressed',
+      'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'text/plain'
+    ]
+    const allowedExts = ['pdf','doc','docx','ppt','pptx','hwp','zip','xls','xlsx','txt']
+    const ext = (file.name.split('.').pop() || '').toLowerCase()
+
+    if (!allowedTypes.includes(file.type) && !allowedExts.includes(ext)) {
+      return c.json({ error: '지원하지 않는 파일 형식입니다. (PDF, DOCX, PPTX, HWP, ZIP, XLS, TXT 가능)' }, 400)
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      return c.json({ error: '파일 크기는 50MB 이하여야 합니다.' }, 400)
+    }
+
+    const timestamp = Date.now()
+    const randomStr = Math.random().toString(36).substring(2, 8)
+    const filename = 'materials/' + timestamp + '-' + randomStr + '.' + ext
+
+    const arrayBuffer = await file.arrayBuffer()
+    await c.env.IMAGES.put(filename, arrayBuffer, {
+      httpMetadata: { contentType: file.type || 'application/octet-stream' },
+    })
+
+    return c.json({ success: true, url: '/api/materials/' + filename, filename: file.name })
+  } catch (error) {
+    console.error('Material upload error:', error)
+    return c.json({ error: '파일 업로드 중 오류가 발생했습니다.' }, 500)
+  }
+})
+
+// Serve material files from R2
+app.get('/api/materials/*', async (c) => {
+  const path = c.req.path.replace('/api/materials/', '')
+  try {
+    const object = await c.env.IMAGES.get(path)
+    if (!object) return c.json({ error: 'File not found' }, 404)
+
+    const headers = new Headers()
+    headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream')
+    headers.set('Cache-Control', 'public, max-age=31536000')
+    return new Response(object.body, { headers })
+  } catch (error) {
+    return c.json({ error: 'Failed to serve file' }, 500)
+  }
+})
+
 // ==================== Admin Page - Virtual Account Management ====================
 
 // Auth check helper for admin pages
@@ -9002,6 +9121,33 @@ app.get('/admin', async (c) => {
           <label class="block text-sm font-medium text-gray-700 mb-1">개별 강의 가격 (원)</label>
           <input type="number" id="recordedLessonPrice" placeholder="0 (무료)" min="0" step="1000" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
           <p class="text-xs text-gray-500 mt-1">0 또는 비워두면 무료로 제공됩니다.</p>
+        </div>
+
+        <!-- 강의 설명 -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">강의 설명</label>
+          <textarea id="recordedLessonDesc" placeholder="이 강의에서 다루는 내용을 간단히 설명해주세요" rows="2" class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 resize-none"></textarea>
+        </div>
+
+        <!-- 커리큘럼 항목 -->
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <label class="text-xs font-semibold text-gray-600"><i class="fas fa-list-ol mr-1"></i>커리큘럼 항목</label>
+            <button type="button" onclick="addRecordedCurriculumItem()" class="text-xs text-purple-500 hover:text-purple-700 font-medium"><i class="fas fa-plus mr-1"></i>항목 추가</button>
+          </div>
+          <div id="recordedCurriculumItems" class="space-y-2"></div>
+        </div>
+
+        <!-- 강의 자료 -->
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <label class="text-xs font-semibold text-gray-600"><i class="fas fa-paperclip mr-1"></i>강의 자료 <span class="text-gray-400 font-normal">(최대 5개)</span></label>
+            <label class="text-xs text-purple-500 hover:text-purple-700 font-medium cursor-pointer">
+              <i class="fas fa-cloud-upload-alt mr-1"></i>파일 추가
+              <input type="file" class="hidden" accept=".pdf,.doc,.docx,.ppt,.pptx,.hwp,.zip,.xls,.xlsx,.txt" onchange="uploadRecordedMaterial(this)">
+            </label>
+          </div>
+          <div id="recordedMaterialsList" class="space-y-1"></div>
         </div>
 
         <!-- 동영상 업로드 -->
@@ -9773,8 +9919,12 @@ app.get('/admin', async (c) => {
       const res = await fetch('/api/admin/classes/' + courseId + '/lessons');
       const data = await res.json();
 
+      // 코스 정보 가져오기 (강의 추가 버튼용)
+      const courseInfo = data.courseInfo || {};
+      const addBtnsHtml = buildLessonAddButtons(courseId, courseInfo);
+
       if (!data.lessons || data.lessons.length === 0) {
-        contentDiv.innerHTML = '<div class="p-4 text-gray-400 text-center text-sm">강의이 없습니다. 위의 + 버튼으로 강의을 생성하세요.</div>';
+        contentDiv.innerHTML = '<div class="p-6 text-center"><div class="w-14 h-14 bg-gray-100 rounded-2xl flex items-center justify-center mx-auto mb-3"><i class="fas fa-chalkboard-teacher text-xl text-gray-300"></i></div><p class="text-sm text-gray-400 mb-4">아직 등록된 강의가 없습니다</p>' + addBtnsHtml + '</div>';
         return;
       }
 
@@ -9836,16 +9986,52 @@ app.get('/admin', async (c) => {
 
         const rowBgClass = isRecorded ? 'bg-purple-50' : (lesson.isEnded ? 'bg-gray-100' : lesson.isLive ? 'bg-red-50' : 'bg-blue-50');
 
+        // 커리큘럼/자료 배지
+        let currItems = [];
+        let matItems = [];
+        try { currItems = JSON.parse(lesson.curriculum_items || '[]'); } catch(e) {}
+        try { matItems = JSON.parse(lesson.materials || '[]'); } catch(e) {}
+        const currBadge = currItems.length > 0 ? '<span class="ml-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-100 text-indigo-600" title="커리큘럼 ' + currItems.length + '개"><i class="fas fa-list-ol mr-0.5"></i>' + currItems.length + '</span>' : '';
+        const matBadge = matItems.length > 0 ? '<span class="ml-1 text-amber-500 text-xs" title="자료 ' + matItems.length + '개"><i class="fas fa-paperclip"></i></span>' : '';
+        const hasDetail = currItems.length > 0 || matItems.length > 0 || (lesson.description && lesson.description.trim());
+        const detailId = 'lessonDetail_' + lesson.id;
+
+        // 상세 확장 영역 (커리큘럼 + 자료)
+        let detailHtml = '';
+        if (hasDetail) {
+          detailHtml = '<tr id="' + detailId + '" class="hidden"><td colspan="6" class="px-4 py-3 bg-white border-b border-gray-200">';
+          if (lesson.description && lesson.description.trim()) {
+            detailHtml += '<div class="mb-2"><p class="text-xs font-semibold text-gray-500 mb-1"><i class="fas fa-align-left mr-1"></i>강의 설명</p><p class="text-sm text-gray-700 whitespace-pre-line">' + lesson.description + '</p></div>';
+          }
+          if (currItems.length > 0) {
+            detailHtml += '<div class="mb-2"><p class="text-xs font-semibold text-gray-500 mb-1"><i class="fas fa-list-ol mr-1"></i>커리큘럼 (' + currItems.length + ')</p><div class="space-y-1">';
+            currItems.forEach(function(item, i) {
+              detailHtml += '<div class="flex items-start gap-2 pl-2"><span class="text-xs text-gray-400 font-mono mt-0.5">' + (i+1) + '.</span><div><p class="text-sm text-gray-800">' + (item.title || '') + '</p>' + (item.desc ? '<p class="text-xs text-gray-500">' + item.desc + '</p>' : '') + '</div></div>';
+            });
+            detailHtml += '</div></div>';
+          }
+          if (matItems.length > 0) {
+            detailHtml += '<div><p class="text-xs font-semibold text-gray-500 mb-1"><i class="fas fa-paperclip mr-1"></i>강의 자료 (' + matItems.length + ')</p><div class="flex flex-wrap gap-2">';
+            matItems.forEach(function(mat) {
+              detailHtml += '<a href="' + mat.url + '" target="_blank" class="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-xs text-gray-700 transition-all"><i class="fas fa-file-download text-purple-400"></i>' + (mat.filename || '파일') + '</a>';
+            });
+            detailHtml += '</div></div>';
+          }
+          detailHtml += '</td></tr>';
+        }
+
+        const toggleAttr = hasDetail ? ' onclick="document.getElementById(\\'' + detailId + '\\').classList.toggle(\\\'hidden\\\')" style="cursor:pointer" title="클릭하여 상세 보기"' : '';
+
         return \`
-          <tr class="\${rowBgClass} border-b border-gray-200">
-            <td class="px-4 py-2 text-sm font-medium text-gray-700">\${typeBadge}\${lesson.lesson_title}</td>
+          <tr class="\${rowBgClass} border-b border-gray-200 hover:brightness-95 transition-all"\${toggleAttr}>
+            <td class="px-4 py-2 text-sm font-medium text-gray-700">\${typeBadge}\${lesson.lesson_title}\${currBadge}\${matBadge}\${hasDetail ? '<i class="fas fa-chevron-down text-gray-300 text-[10px] ml-1"></i>' : ''}</td>
             <td class="px-4 py-2 text-sm text-gray-600">\${timeStr}</td>
             <td class="px-4 py-2 text-sm text-gray-600">\${lesson.duration_minutes}분</td>
             <td class="px-4 py-2">\${statusBadge}</td>
             <td class="px-4 py-2">\${actionBtn}</td>
             <td class="px-4 py-2 text-center">\${deleteBtn}</td>
           </tr>
-        \`;
+        \` + detailHtml;
       };
 
       let html = '<div class="px-4 py-2">';
@@ -9902,8 +10088,24 @@ app.get('/admin', async (c) => {
         \`;
       }
 
+      // 강의 추가 버튼 (하단)
+      html += '<div class="mt-3 pt-3 border-t border-gray-200">' + addBtnsHtml + '</div>';
+
       html += '</div>';
       contentDiv.innerHTML = html;
+    }
+
+    function buildLessonAddButtons(courseId, courseInfo) {
+      const safeTitle = (courseInfo.title || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      const safeInstructor = (courseInfo.instructor_name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      const duration = courseInfo.duration_minutes || 60;
+      const hasClassinUid = !!courseInfo.instructor_classin_uid;
+
+      const liveBtn = '<button onclick="event.stopPropagation(); openCreateSession(' + courseId + ', \\'' + safeTitle + '\\', \\'' + safeInstructor + '\\', ' + duration + ')" class="flex items-center gap-2 px-4 py-2.5 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium rounded-xl transition-all shadow-sm"><i class="fas fa-video"></i>라이브 강의 추가</button>';
+
+      const recordedBtn = '<button onclick="event.stopPropagation(); openRecordedLessonModal(' + courseId + ', \\'' + safeTitle + '\\', \\'' + safeInstructor + '\\')" class="flex items-center gap-2 px-4 py-2.5 bg-purple-500 hover:bg-purple-600 text-white text-sm font-medium rounded-xl transition-all shadow-sm"><i class="fas fa-cloud-upload-alt"></i>녹화 강의 추가</button>';
+
+      return '<div class="flex items-center justify-center gap-3">' + liveBtn + recordedBtn + '</div>';
     }
 
     async function deleteAdminLesson(lessonId, lessonTitle, courseId) {
@@ -10193,22 +10395,43 @@ app.get('/admin', async (c) => {
 
       const row = document.createElement('div');
       row.id = 'lessonRow_' + rowId;
-      row.className = 'bg-gray-50 rounded-lg p-3 space-y-2';
+      row.className = 'bg-gray-50 rounded-xl p-4 space-y-3 border border-gray-200';
       row.innerHTML = \`
         <div class="flex items-center justify-between">
-          <span class="text-xs font-medium text-gray-600">강의 #\${rowId}</span>
-          \${lessonRowCounter > 1 ? '<button type="button" onclick="removeLessonRow(' + rowId + ')" class="text-red-500 hover:text-red-700 text-xs"><i class="fas fa-times"></i></button>' : ''}
+          <span class="text-sm font-bold text-gray-700"><i class="fas fa-play-circle text-blue-500 mr-1"></i>강의 #\${rowId}</span>
+          \${lessonRowCounter > 1 ? '<button type="button" onclick="removeLessonRow(' + rowId + ')" class="text-red-400 hover:text-red-600 text-xs"><i class="fas fa-trash-alt"></i></button>' : ''}
         </div>
-        <input type="text" id="lessonTitle_\${rowId}" placeholder="강의명 (선택, 기본: 코스명 #번호)" class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500">
+        <input type="text" id="lessonTitle_\${rowId}" placeholder="강의명 (선택, 기본: 코스명 #번호)" class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
         <div class="grid grid-cols-2 gap-2">
           <div>
             <label class="text-xs text-gray-500">시작 일시</label>
-            <input type="datetime-local" id="lessonTime_\${rowId}" value="\${minTime}" min="\${minTime}" class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500">
+            <input type="datetime-local" id="lessonTime_\${rowId}" value="\${minTime}" min="\${minTime}" class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
           </div>
           <div>
             <label class="text-xs text-gray-500">시간(분)</label>
-            <input type="number" id="lessonDuration_\${rowId}" value="\${durationDefault}" min="10" max="360" class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500">
+            <input type="number" id="lessonDuration_\${rowId}" value="\${durationDefault}" min="10" max="360" class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500">
           </div>
+        </div>
+        <div>
+          <label class="text-xs text-gray-500">강의 설명</label>
+          <textarea id="lessonDesc_\${rowId}" placeholder="이 강의에서 다루는 내용을 간단히 설명해주세요" rows="2" class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 resize-none"></textarea>
+        </div>
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <label class="text-xs font-semibold text-gray-600"><i class="fas fa-list-ol mr-1"></i>커리큘럼 항목</label>
+            <button type="button" onclick="addCurriculumItem(\${rowId})" class="text-xs text-blue-500 hover:text-blue-700 font-medium"><i class="fas fa-plus mr-1"></i>항목 추가</button>
+          </div>
+          <div id="curriculumItems_\${rowId}" class="space-y-2"></div>
+        </div>
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <label class="text-xs font-semibold text-gray-600"><i class="fas fa-paperclip mr-1"></i>강의 자료 <span class="text-gray-400 font-normal">(최대 5개)</span></label>
+            <label class="text-xs text-purple-500 hover:text-purple-700 font-medium cursor-pointer">
+              <i class="fas fa-cloud-upload-alt mr-1"></i>파일 추가
+              <input type="file" class="hidden" accept=".pdf,.doc,.docx,.ppt,.pptx,.hwp,.zip,.xls,.xlsx,.txt" onchange="uploadMaterial(this, \${rowId})">
+            </label>
+          </div>
+          <div id="materialsList_\${rowId}" class="space-y-1"></div>
         </div>
       \`;
       container.appendChild(row);
@@ -10217,6 +10440,105 @@ app.get('/admin', async (c) => {
     function removeLessonRow(rowId) {
       const row = document.getElementById('lessonRow_' + rowId);
       if (row) row.remove();
+    }
+
+    // 커리큘럼 항목 추가
+    let curriculumItemCounters = {};
+    function addCurriculumItem(rowId) {
+      if (!curriculumItemCounters[rowId]) curriculumItemCounters[rowId] = 0;
+      curriculumItemCounters[rowId]++;
+      const itemId = curriculumItemCounters[rowId];
+      const container = document.getElementById('curriculumItems_' + rowId);
+      const item = document.createElement('div');
+      item.id = 'currItem_' + rowId + '_' + itemId;
+      item.className = 'flex gap-2 items-start bg-white rounded-lg p-2 border border-gray-100';
+      item.innerHTML = '<span class="text-xs text-gray-400 mt-2 font-mono">' + itemId + '.</span>' +
+        '<div class="flex-1 space-y-1">' +
+        '<input type="text" placeholder="항목 제목" class="curr-title w-full px-2 py-1 text-sm border border-gray-200 rounded focus:ring-1 focus:ring-blue-400">' +
+        '<input type="text" placeholder="항목 설명 (선택)" class="curr-desc w-full px-2 py-1 text-xs border border-gray-100 rounded text-gray-500 focus:ring-1 focus:ring-blue-400">' +
+        '</div>' +
+        '<button type="button" onclick="document.getElementById(\\\'currItem_' + rowId + '_' + itemId + '\\\').remove()" class="text-red-300 hover:text-red-500 mt-2"><i class="fas fa-times text-xs"></i></button>';
+      container.appendChild(item);
+    }
+
+    // 강의 자료 업로드
+    async function uploadMaterial(input, rowId) {
+      const file = input.files[0];
+      if (!file) return;
+      input.value = '';
+
+      const container = document.getElementById('materialsList_' + rowId);
+      const currentCount = container.querySelectorAll('.material-item').length;
+      if (currentCount >= 5) {
+        showModal('알림', '강의 자료는 최대 5개까지 첨부할 수 있습니다.');
+        return;
+      }
+      if (file.size > 50 * 1024 * 1024) {
+        showModal('오류', '파일 크기는 50MB 이하여야 합니다.');
+        return;
+      }
+
+      // 업로드 중 표시
+      const tempId = 'matTemp_' + Date.now();
+      container.insertAdjacentHTML('beforeend',
+        '<div id="' + tempId + '" class="material-item flex items-center gap-2 bg-white rounded-lg px-3 py-2 border border-gray-100 text-sm">' +
+        '<i class="fas fa-spinner fa-spin text-blue-400"></i>' +
+        '<span class="flex-1 text-gray-500 truncate">' + file.name + ' 업로드 중...</span>' +
+        '</div>');
+
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch('/api/admin/upload-material', { method: 'POST', body: formData });
+        const data = await res.json();
+
+        if (data.success) {
+          const el = document.getElementById(tempId);
+          el.innerHTML = '<i class="fas fa-file-alt text-purple-400"></i>' +
+            '<span class="flex-1 truncate text-gray-700">' + data.filename + '</span>' +
+            '<input type="hidden" class="mat-url" value="' + data.url + '">' +
+            '<input type="hidden" class="mat-name" value="' + data.filename + '">' +
+            '<button type="button" onclick="this.closest(\\\'.material-item\\\').remove()" class="text-red-300 hover:text-red-500"><i class="fas fa-times text-xs"></i></button>';
+        } else {
+          document.getElementById(tempId).remove();
+          showModal('오류', data.error || '업로드 실패');
+        }
+      } catch (e) {
+        document.getElementById(tempId).remove();
+        showModal('오류', '파일 업로드 중 오류: ' + e.message);
+      }
+    }
+
+    // 강의 행에서 커리큘럼/자료 데이터 수집
+    function collectLessonData(rowId) {
+      const title = document.getElementById('lessonTitle_' + rowId)?.value || '';
+      const time = document.getElementById('lessonTime_' + rowId)?.value || '';
+      const duration = parseInt(document.getElementById('lessonDuration_' + rowId)?.value || '60');
+      const desc = document.getElementById('lessonDesc_' + rowId)?.value || '';
+
+      // 커리큘럼 항목 수집
+      const currItems = [];
+      const currContainer = document.getElementById('curriculumItems_' + rowId);
+      if (currContainer) {
+        currContainer.querySelectorAll('[id^="currItem_"]').forEach(item => {
+          const t = item.querySelector('.curr-title')?.value || '';
+          const d = item.querySelector('.curr-desc')?.value || '';
+          if (t) currItems.push({ title: t, desc: d });
+        });
+      }
+
+      // 자료 수집
+      const mats = [];
+      const matsContainer = document.getElementById('materialsList_' + rowId);
+      if (matsContainer) {
+        matsContainer.querySelectorAll('.material-item').forEach(item => {
+          const url = item.querySelector('.mat-url')?.value;
+          const name = item.querySelector('.mat-name')?.value;
+          if (url && name) mats.push({ url: url, filename: name });
+        });
+      }
+
+      return { title, scheduledAt: time, durationMinutes: duration, description: desc, curriculumItems: currItems, materials: mats };
     }
 
     function closeSessionModal() {
@@ -10229,14 +10551,82 @@ app.get('/admin', async (c) => {
     let recordedStreamUid = '';
     let tusUpload = null;
 
+    let recordedCurrCounter = 0;
+
     function openRecordedLessonModal(classId, className, instructorName) {
       document.getElementById('recordedClassName').textContent = className;
       document.getElementById('recordedInstructor').textContent = instructorName;
       document.getElementById('recordedClassId').value = classId;
       document.getElementById('recordedLessonTitle').value = '';
       document.getElementById('recordedLessonPrice').value = '';
+      document.getElementById('recordedLessonDesc').value = '';
+      document.getElementById('recordedCurriculumItems').innerHTML = '';
+      document.getElementById('recordedMaterialsList').innerHTML = '';
+      recordedCurrCounter = 0;
       resetVideoUpload();
       document.getElementById('recordedLessonModal').classList.remove('hidden');
+    }
+
+    function addRecordedCurriculumItem() {
+      recordedCurrCounter++;
+      const itemId = recordedCurrCounter;
+      const container = document.getElementById('recordedCurriculumItems');
+      const item = document.createElement('div');
+      item.id = 'recCurrItem_' + itemId;
+      item.className = 'flex gap-2 items-start bg-white rounded-lg p-2 border border-gray-100';
+      item.innerHTML = '<span class="text-xs text-gray-400 mt-2 font-mono">' + itemId + '.</span>' +
+        '<div class="flex-1 space-y-1">' +
+        '<input type="text" placeholder="항목 제목" class="rec-curr-title w-full px-2 py-1 text-sm border border-gray-200 rounded focus:ring-1 focus:ring-purple-400">' +
+        '<input type="text" placeholder="항목 설명 (선택)" class="rec-curr-desc w-full px-2 py-1 text-xs border border-gray-100 rounded text-gray-500 focus:ring-1 focus:ring-purple-400">' +
+        '</div>' +
+        '<button type="button" onclick="document.getElementById(\\\'recCurrItem_' + itemId + '\\\').remove()" class="text-red-300 hover:text-red-500 mt-2"><i class="fas fa-times text-xs"></i></button>';
+      container.appendChild(item);
+    }
+
+    async function uploadRecordedMaterial(input) {
+      const file = input.files[0];
+      if (!file) return;
+      input.value = '';
+
+      const container = document.getElementById('recordedMaterialsList');
+      const currentCount = container.querySelectorAll('.material-item').length;
+      if (currentCount >= 5) {
+        showModal('알림', '강의 자료는 최대 5개까지 첨부할 수 있습니다.');
+        return;
+      }
+      if (file.size > 50 * 1024 * 1024) {
+        showModal('오류', '파일 크기는 50MB 이하여야 합니다.');
+        return;
+      }
+
+      const tempId = 'recMatTemp_' + Date.now();
+      container.insertAdjacentHTML('beforeend',
+        '<div id="' + tempId + '" class="material-item flex items-center gap-2 bg-white rounded-lg px-3 py-2 border border-gray-100 text-sm">' +
+        '<i class="fas fa-spinner fa-spin text-purple-400"></i>' +
+        '<span class="flex-1 text-gray-500 truncate">' + file.name + ' 업로드 중...</span>' +
+        '</div>');
+
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch('/api/admin/upload-material', { method: 'POST', body: formData });
+        const data = await res.json();
+
+        if (data.success) {
+          const el = document.getElementById(tempId);
+          el.innerHTML = '<i class="fas fa-file-alt text-purple-400"></i>' +
+            '<span class="flex-1 truncate text-gray-700">' + data.filename + '</span>' +
+            '<input type="hidden" class="mat-url" value="' + data.url + '">' +
+            '<input type="hidden" class="mat-name" value="' + data.filename + '">' +
+            '<button type="button" onclick="this.closest(\\\'.material-item\\\').remove()" class="text-red-300 hover:text-red-500"><i class="fas fa-times text-xs"></i></button>';
+        } else {
+          document.getElementById(tempId).remove();
+          showModal('오류', data.error || '업로드 실패');
+        }
+      } catch (e) {
+        document.getElementById(tempId).remove();
+        showModal('오류', '파일 업로드 중 오류: ' + e.message);
+      }
     }
 
     function closeRecordedLessonModal() {
@@ -10392,6 +10782,23 @@ app.get('/admin', async (c) => {
       const title = document.getElementById('recordedLessonTitle').value.trim();
       const price = parseInt(document.getElementById('recordedLessonPrice').value) || 0;
       const streamUid = document.getElementById('recordedStreamUid').value || recordedStreamUid;
+      const description = document.getElementById('recordedLessonDesc').value.trim();
+
+      // 커리큘럼 항목 수집
+      const curriculumItems = [];
+      document.getElementById('recordedCurriculumItems').querySelectorAll('[id^="recCurrItem_"]').forEach(function(item) {
+        const t = item.querySelector('.rec-curr-title')?.value || '';
+        const d = item.querySelector('.rec-curr-desc')?.value || '';
+        if (t) curriculumItems.push({ title: t, desc: d });
+      });
+
+      // 자료 수집
+      const materials = [];
+      document.getElementById('recordedMaterialsList').querySelectorAll('.material-item').forEach(function(item) {
+        const url = item.querySelector('.mat-url')?.value;
+        const name = item.querySelector('.mat-name')?.value;
+        if (url && name) materials.push({ url: url, filename: name });
+      });
 
       if (!streamUid) {
         showModal('오류', '동영상을 먼저 업로드해주세요.');
@@ -10409,7 +10816,10 @@ app.get('/admin', async (c) => {
           body: JSON.stringify({
             title: title || null,
             streamUid: streamUid,
-            price: price || null
+            price: price || null,
+            description: description || null,
+            curriculumItems: curriculumItems,
+            materials: materials
           })
         });
 
@@ -10435,20 +10845,19 @@ app.get('/admin', async (c) => {
     async function confirmCreateSession() {
       if (!selectedClassId) return;
 
-      // 모든 강의 행에서 데이터 수집
+      // 모든 강의 행에서 데이터 수집 (커리큘럼 + 자료 포함)
       const lessons = [];
       const rows = document.getElementById('lessonRowsContainer').children;
       for (const row of rows) {
         const rowId = row.id.replace('lessonRow_', '');
-        const title = document.getElementById('lessonTitle_' + rowId)?.value?.trim() || '';
-        const scheduledAt = document.getElementById('lessonTime_' + rowId)?.value;
-        const duration = parseInt(document.getElementById('lessonDuration_' + rowId)?.value) || 60;
+        const data = collectLessonData(rowId);
 
-        if (!scheduledAt) {
+        if (!data.scheduledAt) {
           showModal('오류', '모든 강의의 시작 시간을 입력해주세요.');
           return;
         }
-        lessons.push({ title, scheduledAt: new Date(scheduledAt).toISOString(), durationMinutes: duration });
+        data.scheduledAt = new Date(data.scheduledAt).toISOString();
+        lessons.push(data);
       }
 
       if (lessons.length === 0) {
