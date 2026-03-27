@@ -7299,8 +7299,8 @@ ${navHTML}
               statusBadge = '<span class="px-2 py-0.5 bg-green-100 text-green-700 text-xs font-medium rounded-full">시청가능</span>'
               // 코스 가격 확인 (강의별 가격 없음)
               if (cls.price > 0) {
-                // 유료 코스 - 수강 여부 확인 필요
-                actionButton = '<button onclick="checkEnrollmentAndWatch(' + sl.id + ', ' + cls.id + ')" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>'
+                // 유료 코스 - 미결제 상태로 기본 표시, 수강 여부 확인 후 시청하기로 변경
+                actionButton = "<span class=\"lesson-action-btn\" data-lesson-id=\"" + sl.id + "\" data-course-id=\"" + cls.id + "\" data-state=\"recorded\"><span class=\"unpaid-btn px-4 py-2 bg-gray-300 text-gray-500 text-sm font-medium rounded-xl inline-block\"><i class=\"fas fa-lock mr-1\"></i>미결제</span></span>"
               } else {
                 // 무료 코스 - 바로 시청
                 actionButton = '<button onclick="openWatchWindow(' + sl.id + ')" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>'
@@ -7317,7 +7317,8 @@ ${navHTML}
             } else if (isLive) {
               statusBadge = '<span class="px-2 py-0.5 bg-red-500 text-white text-xs font-medium rounded-full animate-pulse">진행중</span>'
               if (cls.price > 0) {
-                actionButton = "<button onclick=\"checkEnrollmentAndJoin(" + sl.id + ", " + cls.id + ")\" data-join-url=\"" + (sl.join_url || '') + "\" class=\"px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30\"><i class=\"fas fa-video mr-1\"></i>입장하기</button>"
+                // 미결제 상태로 기본 표시, 수강 여부 확인 후 입장하기로 변경
+                actionButton = "<span class=\"lesson-action-btn\" data-lesson-id=\"" + sl.id + "\" data-course-id=\"" + cls.id + "\" data-join-url=\"" + (sl.join_url || '') + "\" data-state=\"live\"><span class=\"unpaid-btn px-4 py-2 bg-gray-300 text-gray-500 text-sm font-medium rounded-xl inline-block\"><i class=\"fas fa-lock mr-1\"></i>미결제</span></span>"
               } else {
                 actionButton = sl.join_url ? '<a href="' + sl.join_url + '" target="_blank" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-video mr-1"></i>입장하기</a>' : '<span class="text-gray-400 text-sm">입장 링크 없음</span>'
               }
@@ -7326,7 +7327,8 @@ ${navHTML}
             } else {
               statusBadge = '<span class="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-medium rounded-full">예정</span>'
               if (cls.price > 0) {
-                actionButton = "<button onclick=\"checkEnrollmentAndJoin(" + sl.id + ", " + cls.id + ")\" data-join-url=\"" + (sl.join_url || '') + "\" class=\"px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30\"><i class=\"fas fa-door-open mr-1\"></i>입장하기</button>"
+                // 미결제 상태로 기본 표시, 수강 여부 확인 후 입장하기로 변경
+                actionButton = "<span class=\"lesson-action-btn\" data-lesson-id=\"" + sl.id + "\" data-course-id=\"" + cls.id + "\" data-join-url=\"" + (sl.join_url || '') + "\" data-state=\"scheduled\"><span class=\"unpaid-btn px-4 py-2 bg-gray-300 text-gray-500 text-sm font-medium rounded-xl inline-block\"><i class=\"fas fa-lock mr-1\"></i>미결제</span></span>"
               } else {
                 actionButton = '<span class="text-gray-500 text-sm"><i class="far fa-clock mr-1"></i>시작 대기</span>'
               }
@@ -7543,6 +7545,27 @@ ${navHTML}
 </section>
 
 <script>
+// 강의 버튼 활성화 함수
+function activateLessonButtons() {
+  document.querySelectorAll('.lesson-action-btn').forEach(function(wrapper) {
+    const lessonId = wrapper.dataset.lessonId;
+    const joinUrl = wrapper.dataset.joinUrl;
+    const state = wrapper.dataset.state;
+
+    if (state === 'recorded') {
+      wrapper.innerHTML = '<button onclick="openWatchWindow(' + lessonId + ')" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>';
+    } else if (state === 'live') {
+      wrapper.innerHTML = joinUrl
+        ? '<a href="' + joinUrl + '" target="_blank" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-video mr-1"></i>입장하기</a>'
+        : '<span class="text-gray-400 text-sm">입장 링크 없음</span>';
+    } else {
+      wrapper.innerHTML = joinUrl
+        ? '<a href="' + joinUrl + '" target="_blank" class="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30"><i class="fas fa-door-open mr-1"></i>입장하기</a>'
+        : '<span class="text-gray-500 text-sm"><i class="far fa-clock mr-1"></i>준비중</span>';
+    }
+  });
+}
+
 // 페이지 로드 시 수강 여부 확인하여 버튼 업데이트
 (async function checkEnrollmentOnLoad() {
   const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
@@ -7551,12 +7574,18 @@ ${navHTML}
   const courseId = ${cls.id};
   const courseSlug = '${cls.slug}';
 
+  // 강사/관리자는 모든 강의 접근 가능
+  if (user.role === 'instructor' || user.role === 'admin') {
+    activateLessonButtons();
+    return;
+  }
+
   try {
     const res = await fetch('/api/enrollments/check?userId=' + user.id + '&classId=' + courseId);
     const data = await res.json();
 
     if (data.enrolled) {
-      // 수강 중인 경우 - 버튼 변경
+      // 수강 중인 경우 - 결제 버튼 변경
       const payOnetimeDiv = document.getElementById('payOnetime');
       const payMonthlyDiv = document.getElementById('payMonthly');
       const payTabsDiv = document.querySelector('.pay-opt-tab')?.parentElement;
@@ -7570,6 +7599,9 @@ ${navHTML}
       // 장바구니/찜하기 버튼도 숨김
       const btnAddToCart = document.getElementById('btnAddToCart');
       if (btnAddToCart) btnAddToCart.parentElement.classList.add('hidden');
+
+      // 수강 중인 경우 - 강의 입장 버튼 활성화 (미결제 → 입장하기/시청하기)
+      activateLessonButtons();
     }
   } catch (e) {
     console.log('Enrollment check failed:', e);
