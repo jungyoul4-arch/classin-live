@@ -597,15 +597,16 @@ async function getClassInLoginUrl(
         const courseIdParam = params.get('courseId')
         const schoolIdParam = params.get('schoolId')
 
-        // authTicket이 있으면 포함, 없으면 웹 교실 URL 사용
+        // authTicket이 있으면 자동 로그인 가능
         if (authTicket && authTicket !== 'null') {
-          // Build web URL with authTicket (자동 로그인 가능)
+          // Build web URL with authTicket (자동 로그인)
           url = `https://www.eeo.cn/client/invoke/index.html?telephone=${telephone}&authTicket=${authTicket}&classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
+          return { url }
         } else {
-          // authTicket 없으면 웹 교실 URL 사용 (로그인 필요)
-          console.log('getLoginLinked: authTicket is null or missing, using web classroom URL')
-          // live.eeo.cn 웹 교실 형식 사용
-          url = `https://live.eeo.cn/pc.html?classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
+          // authTicket 없으면 수동 로그인 필요 (2021년 6월 이후 일부 계정)
+          console.log('getLoginLinked: authTicket is null or missing, manual login required')
+          url = `https://www.eeo.cn/client/invoke/index.html?telephone=${telephone}&classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
+          return { url, requiresManualLogin: true }
         }
       }
       return { url }
@@ -945,7 +946,7 @@ async function addSchoolStudent(
   config: ClassInConfig,
   studentAccount: string,  // 전화번호 형식: 0065-20000531700
   studentName: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; rawResponse?: string }> {
   const timestamp = Math.floor(Date.now() / 1000)
   const safeKey = await generateSafeKey(config.SECRET, timestamp)
 
@@ -962,12 +963,98 @@ async function addSchoolStudent(
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: formData.toString()
     })
-    const data = await res.json() as any
-    console.log('addSchoolStudent response:', JSON.stringify(data))
-    if (data.error_info?.errno === 1) {
-      return { success: true }
+    const text = await res.text()
+    console.log('addSchoolStudent response:', text)
+    let data: any
+    try {
+      data = JSON.parse(text)
+    } catch {
+      return { success: false, error: 'Invalid JSON', rawResponse: text }
     }
-    return { success: false, error: translateClassInError(data.error_info?.error || 'Failed to add student to school') }
+    if (data.error_info?.errno === 1) {
+      return { success: true, rawResponse: text }
+    }
+    return { success: false, error: translateClassInError(data.error_info?.error || 'Failed to add student to school'), rawResponse: text }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
+// ClassIn API: Add teacher to school (기관에 교사 추가 - 강사용)
+// https://docs.eeo.cn/api/en/user/addTeacher.html
+async function addTeacher(
+  config: ClassInConfig,
+  teacherAccount: string,  // 전화번호 또는 이메일
+  teacherName: string
+): Promise<{ success: boolean; error?: string; rawResponse?: string }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('teacherAccount', teacherAccount)
+  formData.set('teacherName', teacherName)
+
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addTeacher`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const text = await res.text()
+    console.log('addTeacher response:', text)
+    let data: any
+    try {
+      data = JSON.parse(text)
+    } catch {
+      return { success: false, error: 'Invalid JSON', rawResponse: text }
+    }
+    // errno 1 = 성공, errno 133 = 이미 교사로 등록됨 (성공으로 처리)
+    if (data.error_info?.errno === 1 || data.error_info?.errno === 133) {
+      return { success: true, rawResponse: text, alreadyExists: data.error_info?.errno === 133 }
+    }
+    return { success: false, error: translateClassInError(data.error_info?.error || 'Failed to add teacher to school'), rawResponse: text }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
+// ClassIn API: Add member to school (기관에 멤버 추가 - authTicket용)
+async function addToSchoolMember(
+  config: ClassInConfig,
+  uid: string,  // ClassIn UID
+  memberName: string
+): Promise<{ success: boolean; error?: string; rawResponse?: string }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('uid', uid)
+  formData.set('memberName', memberName)
+
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=addToSchoolMember`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const text = await res.text()
+    console.log('addToSchoolMember response:', text)
+    let data: any
+    try {
+      data = JSON.parse(text)
+    } catch {
+      return { success: false, error: 'Invalid JSON', rawResponse: text }
+    }
+    if (data.error_info?.errno === 1) {
+      return { success: true, rawResponse: text }
+    }
+    return { success: false, error: translateClassInError(data.error_info?.error || 'Failed to add member to school'), rawResponse: text }
   } catch (e: any) {
     return { success: false, error: e.message || 'Network error' }
   }
@@ -1049,9 +1136,12 @@ async function addTeacherToCourse(
       return { success: true }
     }
     // 이미 존재하는 경우도 성공으로 처리
+    const errno = data.error_info?.errno
     const errorMsg = data.error_info?.error || ''
-    if (errorMsg.includes('已经存在') || errorMsg.includes('already exists')) {
-      return { success: true }
+    // errno 133: 이미 존재
+    // errno 332: 이미 강사/조교로 등록되어 있음 (학생으로 추가 불가 = 이미 강사임)
+    if (errno === 133 || errno === 332 || errorMsg.includes('已经存在') || errorMsg.includes('already exists')) {
+      return { success: true, alreadyTeacher: errno === 332 }
     }
     return { success: false, error: translateClassInError(errorMsg || 'Failed to add teacher to course'), rawResponse: text.substring(0, 500) }
   } catch (e: any) {
@@ -1060,8 +1150,11 @@ async function addTeacherToCourse(
 }
 
 // Generate default password for virtual accounts
+// 강사용 표준 비밀번호 (ClassIn에서 authTicket 제거 후 수동 로그인 필요)
+const INSTRUCTOR_DEFAULT_PASSWORD = 'ClassIn2024!'
+
 function generateDefaultPassword(): string {
-  return 'ClassIn' + Math.random().toString(36).substr(2, 6).toUpperCase()
+  return INSTRUCTOR_DEFAULT_PASSWORD
 }
 
 // Register instructor with ClassIn and get UID (강사 ClassIn 등록)
@@ -1082,19 +1175,17 @@ async function registerInstructorWithClassIn(
     return { error: 'Instructor not found' }
   }
 
-  // If already registered, return existing UID
-  if (instructor.classin_uid) {
-    return { uid: instructor.classin_uid }
-  }
-
   // 이메일인지 전화번호인지 판단
   const account = accountInput || instructor.email
+  if (!account) {
+    return { error: '이메일 또는 전화번호가 필요합니다.' }
+  }
   const isEmail = account.includes('@')
   const accountValue = isEmail ? account : formatKoreanPhoneForClassIn(account)
   const teacherName = instructor.display_name || instructor.user_name || 'Teacher'
 
   try {
-    // Step 1: register API로 UID 조회 (addToSchoolMember 없이 - 기존 계정도 UID 반환)
+    // Step 1: register API로 UID 조회 + 학교 멤버 등록 (authTicket 필수)
     const timestamp1 = Math.floor(Date.now() / 1000)
     const safeKey1 = await generateSafeKey(config.SECRET, timestamp1)
 
@@ -1108,6 +1199,8 @@ async function registerInstructorWithClassIn(
       registerForm.set('telephone', accountValue)
     }
     registerForm.set('password', generateDefaultPassword())
+    registerForm.set('nickname', teacherName)
+    // addToSchoolMember 제거 - addSchoolStudent로 별도 등록 (학생과 동일한 방식으로 authTicket 발급)
 
     const registerRes = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=register`, {
       method: 'POST',
@@ -1131,7 +1224,11 @@ async function registerInstructorWithClassIn(
       return { error: translateClassInError(errorMsg) }
     }
 
-    // Step 2: addTeacher API로 기관 교사로 등록
+    // Step 2: addSchoolStudent API로 학교 멤버 등록 (authTicket 발급을 위해 - 학생과 동일한 방식)
+    const schoolResult = await addSchoolStudent(config, accountValue, teacherName)
+    console.log('addSchoolStudent (instructor) result:', JSON.stringify(schoolResult))
+
+    // Step 3: addTeacher API로 기관 교사로 등록
     const timestamp2 = Math.floor(Date.now() / 1000)
     const safeKey2 = await generateSafeKey(config.SECRET, timestamp2)
 
@@ -4174,25 +4271,27 @@ app.put('/api/admin/instructors/:id', async (c) => {
     WHERE id = ?
   `).bind(name || null, email || null, phone || null, instructor.user_id).run()
 
-  // 전화번호/이메일이 변경되었거나 ClassIn 미등록 상태면 재등록
+  // ClassIn 등록 (변경되었거나 UID 없을 때만)
   let classInResult = null
   const phoneChanged = phone && phone !== instructor.user_phone
   const emailChanged = email && email !== instructor.user_email
-  const needReregister = (classInMethod === 'phone' && phoneChanged) || (classInMethod === 'email' && emailChanged) || !instructor.classin_uid
+  const needRegister = phoneChanged || emailChanged || !instructor.classin_uid
 
-  if (needReregister && c.env.CLASSIN_SID && c.env.CLASSIN_SECRET) {
-    const config = {
+  if (needRegister && c.env.CLASSIN_SID && c.env.CLASSIN_SECRET) {
+    const config: ClassInConfig = {
       SID: c.env.CLASSIN_SID,
       SECRET: c.env.CLASSIN_SECRET,
       API_BASE: 'https://api.eeo.cn'
     }
 
-    // 기존 UID 초기화
-    await c.env.DB.prepare(`
-      UPDATE instructors SET classin_uid = NULL, classin_registered_at = NULL WHERE id = ?
-    `).bind(instructorId).run()
+    // 전화번호/이메일 변경 시 기존 UID 초기화
+    if (phoneChanged || emailChanged) {
+      await c.env.DB.prepare(`
+        UPDATE instructors SET classin_uid = NULL, classin_registered_at = NULL WHERE id = ?
+      `).bind(instructorId).run()
+    }
 
-    // 선택한 방식으로 ClassIn 재등록
+    // 선택한 방식으로 ClassIn 등록
     const classInAccountValue = classInMethod === 'email' ? (email || instructor.user_email) : (phone || instructor.user_phone)
     classInResult = await registerInstructorWithClassIn(c.env.DB, instructorId, config, classInAccountValue)
   }
@@ -4830,23 +4929,26 @@ app.get('/api/classin/enter/:sessionId', async (c) => {
 })
 
 // Generate fresh login URL for instructor entering a class (강사 입장 URL 동적 생성)
-// 강사도 가상 계정을 사용하여 authTicket을 받음 (학생과 동일한 방식)
+// 강사 본인의 ClassIn 계정(classin_uid)을 사용하여 입장
 app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
   const lessonId = c.req.param('lessonId')
   const shouldRedirect = c.req.query('redirect') === 'true'
 
-  // Get lesson info with instructor details
+  // Get lesson info with instructor details (including virtual account)
   const lesson = await c.env.DB.prepare(`
-    SELECT cl.*, c.instructor_id, i.user_id as instructor_user_id, i.classin_uid as instructor_classin_uid, i.display_name as instructor_name
+    SELECT cl.*, c.instructor_id, i.user_id as instructor_user_id, i.classin_uid as instructor_classin_uid,
+           i.classin_virtual_account as instructor_virtual_account, i.display_name as instructor_name,
+           u.email as instructor_email, u.phone as instructor_phone
     FROM class_lessons cl
     JOIN classes c ON cl.class_id = c.id
     JOIN instructors i ON c.instructor_id = i.id
+    JOIN users u ON i.user_id = u.id
     WHERE cl.id = ?
   `).bind(lessonId).first() as any
 
   if (!lesson) {
     if (shouldRedirect) {
-      return c.html('<html><body><h2>강의을 찾을 수 없습니다.</h2></body></html>')
+      return c.html('<html><body><h2>강의를 찾을 수 없습니다.</h2></body></html>')
     }
     return c.json({ error: 'Lesson not found' }, 404)
   }
@@ -4862,74 +4964,95 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
     return c.json({ error: 'ClassIn API not configured' }, 400)
   }
 
-  // Step 1: 강사의 가상 계정 확인 또는 할당
-  let virtualAccount = await c.env.DB.prepare(`
-    SELECT * FROM classin_virtual_accounts
-    WHERE user_id = ? AND status = 'assigned'
-    ORDER BY assigned_at DESC LIMIT 1
-  `).bind(lesson.instructor_user_id).first() as any
+  // 가상계정 방식으로 강사 입장 (학생과 동일한 방식 - SMS 인증 없이 authTicket 발급)
+  let virtualAccount = lesson.instructor_virtual_account || ''
+  let instructorUid = lesson.instructor_classin_uid || ''
 
-  // 가상 계정이 없으면 새로 할당
+  // 가상계정이 없으면 할당
   if (!virtualAccount) {
-    virtualAccount = await c.env.DB.prepare(`
+    const available = await c.env.DB.prepare(`
       SELECT * FROM classin_virtual_accounts
       WHERE status = 'available' AND (expires_at IS NULL OR expires_at > datetime('now'))
       ORDER BY id LIMIT 1
     `).first() as any
 
-    if (!virtualAccount) {
+    if (!available) {
       if (shouldRedirect) {
-        return c.html('<html><body><h2>사용 가능한 ClassIn 계정이 없습니다. 관리자에게 문의하세요.</h2></body></html>')
+        return c.html('<html><body><h2>사용 가능한 가상계정이 없습니다.</h2><p>관리자에게 문의하세요.</p></body></html>')
       }
-      return c.json({ error: 'No available ClassIn virtual accounts' }, 400)
+      return c.json({ error: '사용 가능한 가상계정이 없습니다.' }, 400)
     }
 
-    // 가상 계정 등록 (아직 등록 안 된 경우)
-    if (!virtualAccount.is_registered) {
-      const password = 'ClassIn' + Math.random().toString(36).substr(2, 6).toUpperCase()
-      const regResult = await registerVirtualAccount(classInConfig, virtualAccount.account_uid, lesson.instructor_name, password)
-      console.log('registerVirtualAccount for instructor:', JSON.stringify(regResult))
+    virtualAccount = available.account_uid
 
-      if (regResult.uid) {
-        virtualAccount.classin_uid = regResult.uid
-        virtualAccount.is_registered = true
-        virtualAccount.account_password = password
-      }
-    }
+    // 강사에게 가상계정 할당
+    await c.env.DB.prepare(`UPDATE instructors SET classin_virtual_account = ? WHERE id = ?`)
+      .bind(virtualAccount, lesson.instructor_id).run()
 
-    // 기관(school)에 학생으로 추가 (필수! - 강사도 학생으로 추가해야 authTicket 발급됨)
-    await addSchoolStudent(classInConfig, virtualAccount.account_uid, lesson.instructor_name)
-
-    // 가상 계정 할당
+    // 가상계정 상태 업데이트 (강사용으로 표시)
     await c.env.DB.prepare(`
       UPDATE classin_virtual_accounts
-      SET user_id = ?, assigned_at = datetime('now'), assigned_name = ?,
-          account_password = ?, is_registered = ?, classin_uid = ?, status = 'assigned', updated_at = datetime('now')
+      SET status = 'assigned', assigned_name = ?, assigned_at = datetime('now')
       WHERE id = ?
-    `).bind(
-      lesson.instructor_user_id,
-      lesson.instructor_name,
-      virtualAccount.account_password || '',
-      virtualAccount.is_registered ? 1 : 0,
-      virtualAccount.classin_uid || virtualAccount.account_uid,
-      virtualAccount.id
-    ).run()
+    `).bind('INSTRUCTOR:' + lesson.instructor_name, available.id).run()
+
+    console.log('Assigned virtual account to instructor:', virtualAccount)
   }
 
-  const accountUid = virtualAccount.classin_uid || virtualAccount.account_uid
+  // 가상계정으로 ClassIn 등록 (학생과 동일한 방식)
+  const regResult = await registerVirtualAccount(classInConfig, virtualAccount, lesson.instructor_name || 'Instructor', INSTRUCTOR_DEFAULT_PASSWORD)
+  console.log('Virtual account register result:', JSON.stringify(regResult))
 
-  // Step 2: 코스에 강사/조교(identity=3)로 추가 (칠판 권한 필요)
-  await addTeacherToCourse(classInConfig, lesson.classin_course_id, accountUid)
+  if (regResult.uid) {
+    instructorUid = regResult.uid
 
-  // Step 3: Generate fresh login URL with token (identity=3: 강사/조교)
+    // addSchoolStudent API로 학교 멤버 등록 (authTicket 발급을 위해)
+    const schoolResult = await addSchoolStudent(classInConfig, virtualAccount, lesson.instructor_name || 'Instructor')
+    console.log('addSchoolStudent (instructor) result:', JSON.stringify(schoolResult))
+
+    // 가상계정 등록 상태 업데이트 (classin_uid, password도 저장 - 학생과 동일하게)
+    await c.env.DB.prepare(`
+      UPDATE classin_virtual_accounts
+      SET is_registered = 1, registered_at = datetime('now'), classin_uid = ?, account_password = ?, updated_at = datetime('now')
+      WHERE account_uid = ?
+    `).bind(instructorUid, INSTRUCTOR_DEFAULT_PASSWORD, virtualAccount).run()
+
+    // 강사 DB 업데이트
+    await c.env.DB.prepare('UPDATE instructors SET classin_uid = ? WHERE id = ?')
+      .bind(instructorUid, lesson.instructor_id).run()
+
+    console.log('Instructor virtual account registered:', virtualAccount, 'UID:', instructorUid)
+  }
+
+  if (!instructorUid) {
+    instructorUid = regResult.uid || ''
+  }
+
+  if (!instructorUid) {
+    const errorMsg = '가상계정 등록 실패'
+    console.log('Instructor registration failed:', errorMsg)
+    if (shouldRedirect) {
+      return c.html(`<html><body><h2>강사 ClassIn 등록 실패</h2><p>${errorMsg}</p></body></html>`)
+    }
+    return c.json({ error: errorMsg }, 400)
+  }
+
+  // 코스에 학생(identity=1)으로 추가 (authTicket URL과 identity 일치 필요)
+  // 강의 생성 시 이미 teacherUid로 설정되어 있어서 교실 내 강사 권한은 유지됨
+  const addToCourseResult = await addStudentToCourse(classInConfig, lesson.classin_course_id, instructorUid)
+  console.log('addStudentToCourse (instructor) result:', JSON.stringify(addToCourseResult))
+
+  // Generate fresh login URL with token (identity=1: authTicket 발급을 위해 학생으로 설정)
+  // 실제 교실 권한은 addTeacherToCourse에서 identity=3으로 설정됨
   const loginUrlResult = await getClassInLoginUrl(
     classInConfig,
-    accountUid,
+    instructorUid,  // ClassIn UID 사용
     lesson.classin_course_id,
     lesson.classin_class_id,
     1,  // PC
-    3   // 강사/조교로 입장 (칠판 권한)
+    1   // 학생 identity로 URL 생성 (authTicket 발급)
   )
+  console.log('getClassInLoginUrl result:', JSON.stringify(loginUrlResult))
 
   if (loginUrlResult.url) {
     // Update the lesson with the fresh URL
@@ -4941,17 +5064,34 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
       .bind(loginUrlResult.url, lesson.class_id).run()
 
     if (shouldRedirect) {
+      // authTicket이 있으면 바로 리다이렉트 (자동 로그인)
       return c.redirect(loginUrlResult.url)
     }
-    return c.json({ success: true, url: loginUrlResult.url })
+    return c.json({ success: true, url: loginUrlResult.url, requiresManualLogin: loginUrlResult.requiresManualLogin })
   }
 
-  // Fallback to basic URL
-  const fallbackUrl = `https://www.eeo.cn/client/invoke/index.html?uid=${accountUid}&classId=${lesson.classin_class_id}&courseId=${lesson.classin_course_id}&schoolId=${classInConfig.SID}`
-  if (shouldRedirect) {
-    return c.redirect(fallbackUrl)
+  // URL 생성 실패 - 디버그 정보 표시
+  const debugInfo = {
+    instructorUid,
+    virtualAccount,
+    courseId: lesson.classin_course_id,
+    classId: lesson.classin_class_id,
+    error: loginUrlResult.error,
+    rawResponse: loginUrlResult.rawResponse
   }
-  return c.json({ success: true, url: fallbackUrl, warning: loginUrlResult.error || 'authTicket 생성 실패' })
+  console.log('getClassInLoginUrl failed:', JSON.stringify(debugInfo))
+
+  if (shouldRedirect) {
+    return c.html(`
+      <html><body style="font-family: sans-serif; padding: 20px;">
+        <h2>ClassIn 입장 URL 생성 실패</h2>
+        <p><strong>오류:</strong> ${loginUrlResult.error || 'URL 생성 실패'}</p>
+        <h3>디버그 정보:</h3>
+        <pre style="background: #f5f5f5; padding: 10px; overflow: auto;">${JSON.stringify(debugInfo, null, 2)}</pre>
+      </body></html>
+    `)
+  }
+  return c.json({ success: false, error: loginUrlResult.error, debug: debugInfo })
 })
 
 // ==================== Subscription API Routes ====================
@@ -6321,7 +6461,7 @@ async function loadMyPageTab(tab) {
             lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><p class="text-xs text-gray-400 text-center">아직 예정된 강의이 없습니다</p></div>';
           }
 
-          return '<div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100"><a href="/class/' + c.slug + '" class="flex gap-3"><div class="relative flex-shrink-0"><img src="' + (c.thumbnail || 'https://via.placeholder.com/80x56?text=No+Image') + '" class="w-20 h-14 rounded-lg object-cover">' + (hasNextLesson ? '<span class="absolute -top-1 -right-1 w-5 h-5 bg-indigo-500 rounded-full flex items-center justify-center"><i class="fas fa-video text-white text-[8px]"></i></span>' : '') + '</div><div class="flex-1 min-w-0"><p class="text-sm font-medium text-dark-800 line-clamp-1">' + c.title + '</p><p class="text-xs text-gray-500">' + (c.category_name || '') + ' · 수강생 ' + (c.active_students || 0) + '명</p><div class="flex items-center gap-2 mt-1"><div class="flex-1 bg-gray-200 rounded-full h-1.5"><div class="bg-indigo-500 h-1.5 rounded-full" style="width:' + progress + '%"></div></div><span class="text-[10px] text-gray-400">' + (c.completed_lesson_count || 0) + '/' + (c.total_lesson_count || 0) + '회</span></div></div></a>' + lessonSection + '</div>';
+          return '<div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100"><a href="/class/' + c.slug + '" class="flex gap-3"><div class="relative flex-shrink-0"><img src="' + (c.thumbnail || '') + '" class="w-20 h-14 rounded-lg object-cover bg-gray-200" onerror="this.onerror=null; this.style.display=&apos;none&apos;">' + (hasNextLesson ? '<span class="absolute -top-1 -right-1 w-5 h-5 bg-indigo-500 rounded-full flex items-center justify-center"><i class="fas fa-video text-white text-[8px]"></i></span>' : '') + '</div><div class="flex-1 min-w-0"><p class="text-sm font-medium text-dark-800 line-clamp-1">' + c.title + '</p><p class="text-xs text-gray-500">' + (c.category_name || '') + ' · 수강생 ' + (c.active_students || 0) + '명</p><div class="flex items-center gap-2 mt-1"><div class="flex-1 bg-gray-200 rounded-full h-1.5"><div class="bg-indigo-500 h-1.5 rounded-full" style="width:' + progress + '%"></div></div><span class="text-[10px] text-gray-400">' + (c.completed_lesson_count || 0) + '/' + (c.total_lesson_count || 0) + '회</span></div></div></a>' + lessonSection + '</div>';
         }).join('');
     } else if (tab === 'completed') {
       // 강의완료된 코스
@@ -6337,7 +6477,7 @@ async function loadMyPageTab(tab) {
           <div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100">
             <a href="/class/\${c.slug}" class="flex gap-3">
               <div class="relative flex-shrink-0">
-                <img src="\${c.thumbnail || 'https://via.placeholder.com/80x56?text=No+Image'}" class="w-20 h-14 rounded-lg object-cover">
+                <img src="\${c.thumbnail || ''}" class="w-20 h-14 rounded-lg object-cover bg-gray-200" onerror="this.onerror=null; this.style.display='none'">
                 <span class="absolute -top-1 -right-1 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center"><i class="fas fa-check text-white text-[8px]"></i></span>
               </div>
               <div class="flex-1 min-w-0">
@@ -7954,7 +8094,7 @@ async function loadMyEnrollments() {
 
     return '<div class="mb-6 last:mb-0 p-4 bg-gray-50 rounded-xl border border-gray-100">' +
       '<a href="/class/'+e.slug+'" class="flex gap-4 mb-4">' +
-        '<img src="'+(e.thumbnail || 'https://via.placeholder.com/120x80')+'" class="w-24 h-16 rounded-lg object-cover flex-shrink-0">' +
+        '<img src="'+(e.thumbnail || '')+'" class="w-24 h-16 rounded-lg object-cover flex-shrink-0 bg-gray-200" onerror="this.onerror=null; this.style.display=&apos;none&apos;">' +
         '<div class="flex-1 min-w-0">' +
           '<div class="flex items-center gap-2 mb-1"><p class="text-base font-bold text-dark-800 truncate">'+e.title+'</p>'+subscriptionBadge+'</div>' +
           '<p class="text-sm text-gray-500">'+e.instructor_name+'</p>' +
@@ -8101,7 +8241,7 @@ async function loadInstructorCourses() {
 
     return '<div class="mb-6 last:mb-0 p-4 bg-gray-50 rounded-xl border border-gray-100">' +
       '<div class="flex gap-4 mb-4">' +
-        '<img src="'+(course.thumbnail || 'https://via.placeholder.com/120x80')+'" class="w-24 h-16 rounded-lg object-cover flex-shrink-0">' +
+        '<img src="'+(course.thumbnail || '')+'" class="w-24 h-16 rounded-lg object-cover flex-shrink-0 bg-gray-200" onerror="this.onerror=null; this.style.display=&apos;none&apos;">' +
         '<div class="flex-1 min-w-0">' +
           '<p class="text-base font-bold text-dark-800 truncate">'+course.title+'</p>' +
           '<p class="text-sm text-gray-500">'+(course.category_name || '')+'</p>' +
@@ -10153,10 +10293,10 @@ app.get('/admin', async (c) => {
       const data = await res.json();
 
       if (data.success) {
-        showModal('성공', data.message);
         loadInstructors();
+        alert('강사가 삭제되었습니다.');
       } else {
-        showModal('오류', data.error || '삭제 실패');
+        alert(data.error || '삭제 실패');
       }
     }
 
@@ -10226,7 +10366,7 @@ app.get('/admin', async (c) => {
       const now = Date.now();
 
       tbody.innerHTML = data.classes.map(cls => {
-        const thumbnail = cls.thumbnail || 'https://via.placeholder.com/60x40?text=No+Image';
+        const thumbnail = cls.thumbnail || '';
         const safeTitle = cls.title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
         const safeInstructor = (cls.instructor_name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
         const isExpanded = expandedCourses.has(cls.id);
@@ -10253,7 +10393,7 @@ app.get('/admin', async (c) => {
               <i class="fas fa-chevron-\${isExpanded ? 'down' : 'right'} text-xs transition-transform" id="chevron-\${cls.id}"></i>
             </td>
             <td class="px-3 py-2">
-              <img src="\${thumbnail}" alt="" class="w-16 h-10 object-cover rounded" onerror="this.src='https://via.placeholder.com/60x40?text=No+Image'">
+              <img src="\${thumbnail}" alt="" class="w-16 h-10 object-cover rounded bg-gray-200" onerror="this.onerror=null; this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2760%27 height=%2740%27%3E%3Crect fill=%27%23e5e7eb%27 width=%27100%25%27 height=%27100%25%27/%3E%3C/svg%3E'">
             </td>
             <td class="px-3 py-2">
               <div class="font-medium text-sm line-clamp-1 max-w-[200px]">\${cls.title}</div>
@@ -10308,6 +10448,11 @@ app.get('/admin', async (c) => {
 
     async function loadCourseLessons(courseId) {
       const contentDiv = document.getElementById('lessons-content-' + courseId);
+      if (!contentDiv) {
+        // 코스가 삭제되었거나 DOM이 아직 없음 - expandedCourses에서 제거
+        expandedCourses.delete(courseId);
+        return;
+      }
       contentDiv.innerHTML = '<div class="p-4 text-gray-500 text-center text-sm">강의 목록 로딩 중...</div>';
 
       const res = await fetch('/api/admin/classes/' + courseId + '/lessons');
@@ -11432,11 +11577,11 @@ app.get('/admin/users', async (c) => {
         <div class="flex items-center justify-between">
           <h2 class="text-lg font-bold text-gray-800"><i class="fas fa-users text-emerald-500 mr-2"></i>회원 목록</h2>
           <div class="flex items-center gap-2">
-            <input type="text" id="userSearch" placeholder="이름/이메일/전화번호 검색" class="px-3 py-2 border border-gray-200 rounded-lg text-sm w-64" onkeyup="if(event.key==='Enter'){currentPage=0;loadUsers();}">
+            <input type="text" id="userSearch" placeholder="이름/이메일/전화번호 검색" class="px-3 py-2 border border-gray-200 rounded-lg text-sm w-64" onkeyup="if(event.key===&apos;Enter&apos;){currentPage=0;loadUsers();}">
             <button onclick="currentPage=0;loadUsers()" class="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-lg transition-all text-sm">
               <i class="fas fa-search mr-1"></i>검색
             </button>
-            <button onclick="document.getElementById('userSearch').value='';currentPage=0;loadUsers()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg transition-all">
+            <button onclick="document.getElementById(&apos;userSearch&apos;).value=&apos;&apos;;currentPage=0;loadUsers()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg transition-all">
               <i class="fas fa-times"></i>
             </button>
           </div>
