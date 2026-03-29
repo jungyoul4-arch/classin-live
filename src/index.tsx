@@ -11223,42 +11223,72 @@ app.get('/admin', async (c) => {
           const formData = new FormData();
           formData.append('file', file, safeFilename);
 
-          await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', urlData.uploadURL, true);
-            xhr.timeout = 600000; // 10분 타임아웃
+          // 동적 타임아웃: 최소 10분, GB당 10분 추가
+          const fileSizeGB = file.size / (1024 * 1024 * 1024);
+          const dynamicTimeout = Math.max(600000, Math.ceil(fileSizeGB) * 600000);
 
-            xhr.upload.onprogress = function(e) {
-              if (e.lengthComputable) {
-                const percentage = Math.round((e.loaded / e.total) * 100);
-                document.getElementById('uploadProgressBar').style.width = percentage + '%';
-                document.getElementById('uploadPercentText').textContent = percentage + '%';
+          // 재시도 로직이 포함된 업로드 함수
+          const uploadWithRetry = async (maxRetries = 3) => {
+            let lastError;
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+              try {
+                await new Promise((resolve, reject) => {
+                  const xhr = new XMLHttpRequest();
+                  xhr.open('POST', urlData.uploadURL, true);
+                  xhr.timeout = dynamicTimeout;
+
+                  xhr.upload.onprogress = function(e) {
+                    if (e.lengthComputable) {
+                      const percentage = Math.round((e.loaded / e.total) * 100);
+                      document.getElementById('uploadProgressBar').style.width = percentage + '%';
+                      document.getElementById('uploadPercentText').textContent = percentage + '%';
+                      if (attempt > 1) {
+                        document.getElementById('uploadStatusText').textContent = '재시도 ' + attempt + '/' + maxRetries + ' - ' + percentage + '%';
+                      }
+                    }
+                  };
+
+                  xhr.onload = function() {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                      console.log('Upload success:', xhr.responseText);
+                      resolve(xhr.response);
+                    } else {
+                      console.error('Upload failed:', xhr.status, xhr.responseText);
+                      reject(new Error('업로드 실패: ' + xhr.status + ' - ' + (xhr.responseText || 'Unknown error')));
+                    }
+                  };
+
+                  xhr.onerror = function() {
+                    console.error('Upload network error (attempt ' + attempt + ')');
+                    const onlineStatus = navigator.onLine ? '서버 응답 없음' : '인터넷 연결 끊김';
+                    reject(new Error('네트워크 오류: ' + onlineStatus));
+                  };
+
+                  xhr.ontimeout = function() {
+                    console.error('Upload timeout (attempt ' + attempt + ')');
+                    reject(new Error('업로드 시간 초과 (타임아웃: ' + Math.round(dynamicTimeout / 60000) + '분)'));
+                  };
+
+                  xhr.send(formData);
+                });
+                return; // 성공하면 종료
+              } catch (err) {
+                lastError = err;
+                console.warn('Upload attempt ' + attempt + ' failed:', err.message);
+                if (attempt < maxRetries) {
+                  // 재시도 전 대기 (exponential backoff: 2초, 4초, 8초...)
+                  const waitTime = Math.pow(2, attempt) * 1000;
+                  document.getElementById('uploadStatusText').textContent = '재시도 대기 중... (' + (waitTime / 1000) + '초)';
+                  document.getElementById('uploadProgressBar').style.width = '0%';
+                  document.getElementById('uploadPercentText').textContent = '0%';
+                  await new Promise(r => setTimeout(r, waitTime));
+                }
               }
-            };
+            }
+            throw lastError; // 모든 재시도 실패
+          };
 
-            xhr.onload = function() {
-              if (xhr.status >= 200 && xhr.status < 300) {
-                console.log('Upload success:', xhr.responseText);
-                resolve(xhr.response);
-              } else {
-                console.error('Upload failed:', xhr.status, xhr.responseText);
-                reject(new Error('업로드 실패: ' + xhr.status + ' - ' + (xhr.responseText || 'Unknown error')));
-              }
-            };
-
-            xhr.onerror = function() {
-              console.error('Upload network error');
-              reject(new Error('네트워크 오류가 발생했습니다. 파일 크기가 너무 크거나 연결이 불안정합니다.'));
-            };
-
-            xhr.ontimeout = function() {
-              console.error('Upload timeout');
-              reject(new Error('업로드 시간이 초과되었습니다.'));
-            };
-
-            // FormData로 전송 (Content-Type은 자동으로 multipart/form-data 설정됨)
-            xhr.send(formData);
-          });
+          await uploadWithRetry(3);
           // 업로드 성공
           document.getElementById('uploadProgress').classList.add('hidden');
           document.getElementById('uploadComplete').classList.remove('hidden');
