@@ -1,13 +1,15 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "classin-live",
+  "name": "classin-teachers",
   "compatibility_date": "2026-02-13",
   "pages_build_output_dir": "./dist",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "APP_NAME": "ClassIn Live",
-    "APP_NAME_KO": "클래신 라이브",
-    "APP_BADGE": "LIVE"
+    "APP_NAME": "ClassIn Teachers",
+    "APP_NAME_KO": "클래신 티쳐스",
+    "APP_BADGE": "TEACHERS",
+    "CLASSIN_SID": "86799720",
+    "CLASSIN_SECRET": "ReldwKsx"
     // Cloudflare Stream (녹화 강의 스트리밍용) - 대시보드에서 설정
     // "CF_ACCOUNT_ID": "your-account-id",
     // "CF_STREAM_TOKEN": "your-stream-api-token"
@@ -17,14 +19,14 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "classin-live-db",
-      "database_id": "b428a4e3-8210-4c79-91f5-7d238730ac4c"
+      "database_name": "classin-teachers-db-v2",
+      "database_id": "4faae997-d33b-477b-bc3a-925202f9572f"
     }
   ],
   "r2_buckets": [
     {
       "binding": "IMAGES",
-      "bucket_name": "classin-live-images"
+      "bucket_name": "classin-teachers-images"
     }
   ]
 }
