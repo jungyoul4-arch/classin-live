@@ -2974,7 +2974,7 @@ app.post('/api/admin/stream/upload-url', async (c) => {
 // 관리자: 녹화 강의 생성
 app.post('/api/admin/classes/:classId/create-recorded-lesson', async (c) => {
   const classId = parseInt(c.req.param('classId'))
-  const { title, streamUid, price, description, curriculumItems, materials } = await c.req.json()
+  const { title, streamUid, description, curriculumItems, materials } = await c.req.json()
 
   if (!streamUid) {
     return c.json({ error: '동영상 UID(streamUid)가 필요합니다.' }, 400)
@@ -3024,9 +3024,9 @@ app.post('/api/admin/classes/:classId/create-recorded-lesson', async (c) => {
     INSERT INTO class_lessons (
       class_id, lesson_number, lesson_title,
       lesson_type, stream_uid, stream_url, stream_thumbnail,
-      duration_minutes, price, status, scheduled_at,
+      duration_minutes, status, scheduled_at,
       description, curriculum_items, materials
-    ) VALUES (?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+    ) VALUES (?, ?, ?, 'recorded', ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
   `).bind(
     classId,
     lessonNumber,
@@ -3035,7 +3035,6 @@ app.post('/api/admin/classes/:classId/create-recorded-lesson', async (c) => {
     isVideoReady ? (videoInfo.playback?.hls || '') : '',
     isVideoReady ? (videoInfo.thumbnail || '') : '',
     durationMinutes,
-    price || null,
     lessonStatus,
     desc, currItems, mats
   ).run()
@@ -9650,13 +9649,6 @@ app.get('/admin', async (c) => {
           <input type="text" id="recordedLessonTitle" placeholder="강의 제목 (비워두면 자동 생성)" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
         </div>
 
-        <!-- 가격 -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">개별 강의 가격 (원)</label>
-          <input type="number" id="recordedLessonPrice" placeholder="0 (무료)" min="0" step="1000" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500">
-          <p class="text-xs text-gray-500 mt-1">0 또는 비워두면 무료로 제공됩니다.</p>
-        </div>
-
         <!-- 강의 설명 -->
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">강의 설명</label>
@@ -11097,7 +11089,6 @@ app.get('/admin', async (c) => {
       document.getElementById('recordedInstructor').textContent = instructorName;
       document.getElementById('recordedClassId').value = classId;
       document.getElementById('recordedLessonTitle').value = '';
-      document.getElementById('recordedLessonPrice').value = '';
       document.getElementById('recordedLessonDesc').value = '';
       document.getElementById('recordedCurriculumItems').innerHTML = '';
       document.getElementById('recordedMaterialsList').innerHTML = '';
@@ -11319,7 +11310,6 @@ app.get('/admin', async (c) => {
     async function confirmCreateRecordedLesson() {
       const classId = document.getElementById('recordedClassId').value;
       const title = document.getElementById('recordedLessonTitle').value.trim();
-      const price = parseInt(document.getElementById('recordedLessonPrice').value) || 0;
       const streamUid = document.getElementById('recordedStreamUid').value || recordedStreamUid;
       const description = document.getElementById('recordedLessonDesc').value.trim();
 
@@ -11355,7 +11345,6 @@ app.get('/admin', async (c) => {
           body: JSON.stringify({
             title: title || null,
             streamUid: streamUid,
-            price: price || null,
             description: description || null,
             curriculumItems: curriculumItems,
             materials: materials
