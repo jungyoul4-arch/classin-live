@@ -3531,7 +3531,8 @@ app.get('/api/lessons/:lessonId/stream-url', async (c) => {
     return c.json({ error: '강의를 찾을 수 없습니다.' }, 404)
   }
 
-  if (lesson.lesson_type !== 'recorded') {
+  // lesson_type이 'recorded'이거나 stream_uid가 있으면 녹화 강의로 처리
+  if (lesson.lesson_type !== 'recorded' && !lesson.stream_uid) {
     return c.json({ error: '녹화 강의가 아닙니다.' }, 400)
   }
 
@@ -5189,6 +5190,146 @@ app.get('/api/classin/enter/:sessionId', async (c) => {
   return c.json({ success: true, url: fallbackUrl, warning: loginUrlResult.error })
 })
 
+// 학생이 강의 ID로 직접 입장 (수강 여부 확인 후 ClassIn 입장 URL 생성)
+app.get('/api/classin/lesson-enter/:lessonId', async (c) => {
+  const lessonId = c.req.param('lessonId')
+  const shouldRedirect = c.req.query('redirect') === 'true'
+  const userId = c.req.query('userId')
+
+  if (!userId) {
+    if (shouldRedirect) {
+      return c.html('<html><body><h2>로그인이 필요합니다.</h2><script>setTimeout(function(){window.close()},2000)</script></body></html>')
+    }
+    return c.json({ error: 'userId required' }, 400)
+  }
+
+  // 1. 강의 정보 가져오기
+  const lesson = await c.env.DB.prepare(`
+    SELECT cl.*, c.id as course_id, c.price as course_price, c.title as course_title
+    FROM class_lessons cl
+    JOIN classes c ON cl.class_id = c.id
+    WHERE cl.id = ?
+  `).bind(lessonId).first() as any
+
+  if (!lesson) {
+    if (shouldRedirect) {
+      return c.html('<html><body><h2>강의를 찾을 수 없습니다.</h2><script>setTimeout(function(){window.close()},2000)</script></body></html>')
+    }
+    return c.json({ error: 'Lesson not found' }, 404)
+  }
+
+  // 2. 수강 여부 확인 (무료 코스는 바로 입장)
+  const isFree = !lesson.course_price
+  let enrollment: any = null
+
+  if (!isFree) {
+    enrollment = await c.env.DB.prepare(`
+      SELECT e.*, u.name as user_name
+      FROM enrollments e
+      JOIN users u ON e.user_id = u.id
+      WHERE e.user_id = ? AND e.class_id = ? AND e.status = 'active'
+    `).bind(userId, lesson.course_id).first()
+
+    if (!enrollment) {
+      if (shouldRedirect) {
+        return c.html('<html><body><h2>코스 결제가 필요합니다.</h2><p>이 강의에 입장하려면 먼저 코스를 결제해주세요.</p><script>setTimeout(function(){window.close()},3000)</script></body></html>')
+      }
+      return c.json({ error: 'Enrollment required' }, 403)
+    }
+  } else {
+    // 무료 코스는 사용자 정보만 가져옴
+    enrollment = await c.env.DB.prepare('SELECT id, name as user_name FROM users WHERE id = ?').bind(userId).first()
+  }
+
+  // 3. ClassIn 설정 확인
+  const classInConfig = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  if (!classInConfig) {
+    // ClassIn 미설정 - join_url이 있으면 사용
+    if (lesson.join_url) {
+      if (shouldRedirect) return c.redirect(lesson.join_url)
+      return c.json({ success: true, url: lesson.join_url })
+    }
+    if (shouldRedirect) {
+      return c.html('<html><body><h2>강의 입장 URL이 준비되지 않았습니다.</h2><script>setTimeout(function(){window.close()},2000)</script></body></html>')
+    }
+    return c.json({ error: 'No ClassIn config and no join_url' }, 400)
+  }
+
+  // 4. ClassIn 계정 확보 (enrollment에서 또는 가상계정)
+  let studentUid = enrollment?.classin_account_uid
+
+  if (!studentUid) {
+    // 가상 계정 할당 시도
+    const virtualAccount = await c.env.DB.prepare(`
+      SELECT id, account_uid FROM classin_virtual_accounts
+      WHERE is_used = 0 OR is_used IS NULL
+      ORDER BY id ASC LIMIT 1
+    `).first() as any
+
+    if (virtualAccount) {
+      studentUid = virtualAccount.account_uid
+      // 사용 표시 및 enrollment에 저장
+      await c.env.DB.prepare('UPDATE classin_virtual_accounts SET is_used = 1, used_by_user_id = ? WHERE id = ?')
+        .bind(userId, virtualAccount.id).run()
+      if (!isFree && enrollment) {
+        await c.env.DB.prepare('UPDATE enrollments SET classin_account_uid = ? WHERE id = ?')
+          .bind(studentUid, enrollment.id).run()
+      }
+    }
+  }
+
+  if (!studentUid) {
+    if (shouldRedirect) {
+      return c.html('<html><body><h2>ClassIn 계정이 준비되지 않았습니다.</h2><p>관리자에게 문의해주세요.</p><script>setTimeout(function(){window.close()},3000)</script></body></html>')
+    }
+    return c.json({ error: 'No ClassIn account available' }, 400)
+  }
+
+  // 5. 강의에 ClassIn 정보가 있는지 확인
+  if (!lesson.classin_course_id || !lesson.classin_class_id) {
+    // ClassIn 강의 정보가 없음 - join_url 사용
+    if (lesson.join_url) {
+      if (shouldRedirect) return c.redirect(lesson.join_url)
+      return c.json({ success: true, url: lesson.join_url })
+    }
+    if (shouldRedirect) {
+      return c.html('<html><body><h2>강의 입장 정보가 준비되지 않았습니다.</h2><script>setTimeout(function(){window.close()},2000)</script></body></html>')
+    }
+    return c.json({ error: 'Lesson has no ClassIn info' }, 400)
+  }
+
+  const userName = enrollment?.user_name || 'Student'
+
+  // 6. 학생을 기관과 코스에 추가
+  const schoolResult = await addSchoolStudent(classInConfig, studentUid, userName)
+  console.log('lesson-enter addSchoolStudent:', JSON.stringify(schoolResult))
+
+  const courseResult = await addStudentToCourse(classInConfig, lesson.classin_course_id, studentUid)
+  console.log('lesson-enter addStudentToCourse:', JSON.stringify(courseResult))
+
+  // 7. 로그인 URL 생성
+  const loginUrlResult = await getClassInLoginUrl(
+    classInConfig,
+    studentUid,
+    lesson.classin_course_id,
+    lesson.classin_class_id,
+    1  // PC
+  )
+
+  if (loginUrlResult.url) {
+    if (shouldRedirect) return c.redirect(loginUrlResult.url)
+    return c.json({ success: true, url: loginUrlResult.url })
+  }
+
+  // Fallback URL
+  const fallbackUrl = `https://www.eeo.cn/client/invoke/index.html?uid=${studentUid}&classId=${lesson.classin_class_id}&courseId=${lesson.classin_course_id}&schoolId=${classInConfig.SID}`
+  if (shouldRedirect) return c.redirect(fallbackUrl)
+  return c.json({ success: true, url: fallbackUrl, warning: loginUrlResult.error })
+})
+
 // Generate fresh login URL for instructor entering a class (강사 입장 URL 동적 생성)
 // 강사 본인의 ClassIn 계정(classin_uid)을 사용하여 입장
 app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
@@ -6221,7 +6362,7 @@ function openLessonPaymentModal(lessonData) {
   };
   document.getElementById('paymentModal').classList.remove('hidden');
 
-  const lessonDate = new Date(lessonData.scheduledAt).toLocaleString('ko-KR', { month:'long', day:'numeric', weekday:'short', hour:'2-digit', minute:'2-digit' });
+  const lessonDate = new Date(lessonData.scheduledAt).toLocaleString('ko-KR', { timeZone:'Asia/Seoul', month:'long', day:'numeric', weekday:'short', hour:'2-digit', minute:'2-digit' });
 
   document.getElementById('paymentOrderSummary').innerHTML = \`
     <div class="flex gap-3">
@@ -6713,7 +6854,7 @@ async function loadMyPageTab(tab) {
 
           let lessonSection = '';
           if (hasNextLesson) {
-            const dateStr = c.next_lesson_scheduled_at ? new Date(c.next_lesson_scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+            const dateStr = c.next_lesson_scheduled_at ? new Date(c.next_lesson_scheduled_at).toLocaleDateString('ko-KR', {timeZone:'Asia/Seoul', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
             const enterBtn = c.next_lesson_id
               ? '<a href="/api/classin/instructor-enter/' + c.next_lesson_id + '?redirect=true" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all"><i class="fas fa-door-open"></i> 강의실 입장</a>'
               : '<span class="flex-1 h-8 bg-gray-200 text-gray-600 text-xs font-semibold rounded-lg flex items-center justify-center gap-1"><i class="fas fa-clock"></i> 강의 준비중</span>';
@@ -6782,7 +6923,7 @@ async function loadMyPageTab(tab) {
 
         let lessonSection = '';
         if (hasNextLesson) {
-          const dateStr = e.next_lesson_scheduled_at ? new Date(e.next_lesson_scheduled_at).toLocaleDateString('ko-KR', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+          const dateStr = e.next_lesson_scheduled_at ? new Date(e.next_lesson_scheduled_at).toLocaleDateString('ko-KR', {timeZone:'Asia/Seoul', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
           const enterBtn = e.next_lesson_session_id
             ? '<a href="/api/classin/enter/' + e.next_lesson_session_id + '?redirect=true" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="flex-1 h-8 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1 transition-all"><i class="fas fa-door-open"></i> 강의 입장</a>'
             : (e.next_lesson_join_url
@@ -7683,15 +7824,16 @@ ${navHTML}
         <div class="space-y-3">
           ${scheduledLessons.map((sl: any, idx: number) => {
             const now = Date.now()
-            const isRecorded = sl.lesson_type === 'recorded'
+            // lesson_type이 'recorded'이거나 stream_uid가 있으면 녹화 강의로 처리
+            const isRecorded = sl.lesson_type === 'recorded' || !!sl.stream_uid
             const startTime = new Date(sl.scheduled_at).getTime()
             const endTime = startTime + (sl.duration_minutes || 60) * 60 * 1000
             const isEnded = !isRecorded && endTime < now
             const isLive = !isRecorded && !isEnded && startTime <= now && now < endTime
             const isUpcoming = !isRecorded && startTime > now
 
-            const dateStr = isRecorded ? '즉시 시청 가능' : new Date(sl.scheduled_at).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' })
-            const timeStr = isRecorded ? '' : new Date(sl.scheduled_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
+            const dateStr = isRecorded ? '즉시 시청 가능' : new Date(sl.scheduled_at).toLocaleDateString('ko-KR', { timeZone: 'Asia/Seoul', month: 'long', day: 'numeric', weekday: 'short' })
+            const timeStr = isRecorded ? '' : new Date(sl.scheduled_at).toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit' })
 
             let typeBadge, statusBadge, actionButton, bgClass, circleClass
 
@@ -7715,9 +7857,14 @@ ${navHTML}
               circleClass = 'bg-purple-500'
             } else if (isEnded) {
               statusBadge = '<span class="px-2 py-0.5 bg-gray-200 text-gray-600 text-xs font-medium rounded-full">종료</span>'
-              actionButton = sl.replay_url
-                ? '<a href="' + sl.replay_url + '" target="_blank" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>다시보기</a>'
-                : '<span class="text-gray-400 text-sm">다시보기 없음</span>'
+              if (cls.price > 0) {
+                // 유료 코스 - 미결제 상태로 기본 표시, 수강 여부 확인 후 다시보기로 변경
+                actionButton = "<span class=\"lesson-action-btn\" data-lesson-id=\"" + sl.id + "\" data-course-id=\"" + cls.id + "\" data-replay-url=\"" + (sl.replay_url || '') + "\" data-state=\"ended\"><span class=\"unpaid-btn px-4 py-2 bg-gray-300 text-gray-500 text-sm font-medium rounded-xl inline-block\"><i class=\"fas fa-lock mr-1\"></i>미결제</span></span>"
+              } else {
+                actionButton = sl.replay_url
+                  ? '<a href="' + sl.replay_url + '" target="_blank" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>다시보기</a>'
+                  : '<span class="text-gray-400 text-sm">다시보기 없음</span>'
+              }
               bgClass = 'bg-gray-50'
               circleClass = 'bg-gray-300'
             } else if (isLive) {
@@ -7956,18 +8103,26 @@ function activateLessonButtons() {
   document.querySelectorAll('.lesson-action-btn').forEach(function(wrapper) {
     const lessonId = wrapper.dataset.lessonId;
     const joinUrl = wrapper.dataset.joinUrl;
+    const replayUrl = wrapper.dataset.replayUrl;
     const state = wrapper.dataset.state;
+
+    // 사용자 ID 가져오기
+    const currentUser = JSON.parse(localStorage.getItem('classin_user') || 'null');
+    const currentUserId = currentUser ? currentUser.id : '';
 
     if (state === 'recorded') {
       wrapper.innerHTML = '<button onclick="openWatchWindow(' + lessonId + ')" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>';
+    } else if (state === 'ended') {
+      // 종료된 강의 - 다시보기
+      wrapper.innerHTML = replayUrl
+        ? '<a href="' + replayUrl + '" target="_blank" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>다시보기</a>'
+        : '<span class="text-gray-400 text-sm">다시보기 없음</span>';
     } else if (state === 'live') {
-      wrapper.innerHTML = joinUrl
-        ? '<a href="' + joinUrl + '" target="_blank" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-video mr-1"></i>입장하기</a>'
-        : '<span class="text-gray-400 text-sm">입장 링크 없음</span>';
+      // 라이브 진행중 - 새 API로 입장 (수강 여부 확인 + ClassIn 입장)
+      wrapper.innerHTML = '<a href="/api/classin/lesson-enter/' + lessonId + '?redirect=true&userId=' + currentUserId + '" target="_blank" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-video mr-1"></i>입장하기</a>';
     } else {
-      wrapper.innerHTML = joinUrl
-        ? '<a href="' + joinUrl + '" target="_blank" class="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30"><i class="fas fa-door-open mr-1"></i>입장하기</a>'
-        : '<span class="text-gray-500 text-sm"><i class="far fa-clock mr-1"></i>준비중</span>';
+      // 예정된 강의 - 새 API로 입장
+      wrapper.innerHTML = '<a href="/api/classin/lesson-enter/' + lessonId + '?redirect=true&userId=' + currentUserId + '" target="_blank" class="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30"><i class="fas fa-door-open mr-1"></i>입장하기</a>';
     }
   });
 }
@@ -8090,7 +8245,7 @@ async function checkEnrollmentAndJoin(lessonId, courseId) {
 const classLessonsData = ${JSON.stringify((scheduledLessons as any[]).map(sl => ({
   id: sl.id,
   title: sl.lesson_title,
-  type: sl.lesson_type || 'live',
+  type: sl.lesson_type === 'recorded' || sl.stream_uid ? 'recorded' : 'live',
   status: sl.status,
   scheduledAt: sl.scheduled_at,
   durationMinutes: sl.duration_minutes,
@@ -8129,7 +8284,8 @@ function enterCurriculumLesson(el) {
     const now = Date.now();
     const startTime = new Date(matched.scheduledAt).getTime();
     const endTime = startTime + (matched.durationMinutes || 60) * 60 * 1000;
-    const isRecorded = matched.type === 'recorded';
+    // type이 'recorded'이거나 streamUid가 있으면 녹화 강의로 처리
+    const isRecorded = matched.type === 'recorded' || !!matched.streamUid;
     const isEnded = !isRecorded && endTime < now;
     const isLive = !isRecorded && !isEnded && startTime <= now && now < endTime;
 
@@ -8137,16 +8293,17 @@ function enterCurriculumLesson(el) {
       // 녹화 강의 → 시청
       openWatchWindow(matched.id);
     } else if (isLive) {
-      // 라이브 진행중 → 수업 입장
-      window.open('/api/classin/enter/' + matched.id + '?redirect=true', '_blank');
+      // 라이브 진행중 → 수업 입장 (새 API로 수강 여부 확인 + ClassIn 입장)
+      window.open('/api/classin/lesson-enter/' + matched.id + '?redirect=true&userId=' + user.id, '_blank');
     } else if (isEnded && matched.replayUrl) {
       // 종료됨 + 다시보기 → 다시보기
       window.open(matched.replayUrl, '_blank');
+    } else if (isEnded) {
+      // 종료됨 but 다시보기 없음
+      alert('이 강의의 다시보기가 아직 준비되지 않았습니다.');
     } else {
-      // 예정된 강의 → 결제 유도
-      const paymentData = {lessonId: matched.id, lessonTitle: matched.title, classId: classId, classTitle: classTitle, price: classPrice, thumbnail: classThumbnail, instructor_name: instructorName, scheduledAt: matched.scheduledAt};
-      if (typeof openLessonPaymentModal === 'function') openLessonPaymentModal(paymentData);
-      else alert('강의 시작 예정: ' + new Date(matched.scheduledAt).toLocaleString('ko-KR'));
+      // 예정된 강의 → 입장 (수강 여부에 따라 서버에서 처리)
+      window.open('/api/classin/lesson-enter/' + matched.id + '?redirect=true&userId=' + user.id, '_blank');
     }
   } else {
     // 매칭 강의 없음 → 아직 일정 없음 안내
@@ -8320,7 +8477,7 @@ async function loadMyEnrollments() {
       const isLive = !isEnded && startTime <= now && now < endTime;
       const isEnrolled = lesson.is_enrolled;
 
-      const dateStr = new Date(lesson.scheduled_at).toLocaleDateString('ko-KR', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+      const dateStr = new Date(lesson.scheduled_at).toLocaleDateString('ko-KR', { timeZone:'Asia/Seoul', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
 
       let statusBadge, actionBtn;
       if (isEnded) {
@@ -8440,8 +8597,8 @@ async function loadInstructorCourses() {
     const lessonsHtml = course.lessons && course.lessons.length > 0 ? course.lessons.map((lesson, idx) => {
       const safeLessonTitle = (lesson.lesson_title || '').replace(/'/g, "\\\\'");
 
-      // 녹화 강의인 경우
-      if (lesson.lesson_type === 'recorded') {
+      // 녹화 강의인 경우 (lesson_type이 'recorded'이거나 stream_uid가 있으면)
+      if (lesson.lesson_type === 'recorded' || lesson.stream_uid) {
         const isProcessing = lesson.status === 'processing';
         const statusBadge = isProcessing
           ? '<span class="px-2 py-0.5 bg-yellow-100 text-yellow-700 text-[10px] font-medium rounded-full">처리중</span>'
@@ -8469,7 +8626,7 @@ async function loadInstructorCourses() {
       const isEnded = endTime < now;
       const isLive = !isEnded && startTime <= now && now < endTime;
 
-      const dateStr = new Date(lesson.scheduled_at).toLocaleDateString('ko-KR', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+      const dateStr = new Date(lesson.scheduled_at).toLocaleDateString('ko-KR', { timeZone:'Asia/Seoul', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
 
       let statusBadge, actionBtn, deleteBtn;
       if (isEnded) {
@@ -8685,7 +8842,8 @@ app.get('/watch/:lessonId', async (c) => {
     return c.html('<html><body><h2>강의를 찾을 수 없습니다.</h2></body></html>')
   }
 
-  if (lesson.lesson_type !== 'recorded') {
+  // lesson_type이 'recorded'이거나 stream_uid가 있으면 녹화 강의로 처리
+  if (lesson.lesson_type !== 'recorded' && !lesson.stream_uid) {
     return c.html('<html><body><h2>녹화 강의가 아닙니다.</h2><p><a href="/class/' + lesson.class_slug + '">코스로 이동</a></p></body></html>')
   }
 
@@ -10741,9 +10899,10 @@ app.get('/admin', async (c) => {
 
       // 강의 행 렌더링 함수
       const renderLessonRow = (lesson) => {
-        const isRecorded = lesson.lesson_type === 'recorded';
+        // lesson_type이 'recorded'이거나 stream_uid가 있으면 녹화 강의로 처리
+        const isRecorded = lesson.lesson_type === 'recorded' || !!lesson.stream_uid;
         const startTime = new Date(lesson.scheduled_at);
-        const timeStr = isRecorded ? '-' : startTime.toLocaleString('ko-KR', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' });
+        const timeStr = isRecorded ? '-' : startTime.toLocaleString('ko-KR', { timeZone:'Asia/Seoul', month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' });
 
         let typeBadge, statusBadge, actionBtn, deleteBtn;
 
