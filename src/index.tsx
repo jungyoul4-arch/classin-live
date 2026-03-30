@@ -2971,6 +2971,214 @@ app.post('/api/admin/stream/upload-url', async (c) => {
   })
 })
 
+// ==================== 청크 업로드 API (대용량 파일 지원) ====================
+const CHUNK_SIZE = 100 * 1024 * 1024 // 100MB
+
+// 청크 업로드 초기화
+app.post('/api/admin/stream/init-chunked-upload', async (c) => {
+  const { filename, totalSize, totalChunks } = await c.req.json()
+
+  if (!filename || !totalSize || !totalChunks) {
+    return c.json({ error: 'filename, totalSize, totalChunks가 필요합니다.' }, 400)
+  }
+
+  // 고유 uploadId 생성
+  const uploadId = crypto.randomUUID()
+
+  // DB에 업로드 세션 저장
+  await c.env.DB.prepare(`
+    INSERT INTO chunked_uploads (upload_id, filename, total_size, total_chunks, status)
+    VALUES (?, ?, ?, ?, 'uploading')
+  `).bind(uploadId, filename, totalSize, totalChunks).run()
+
+  return c.json({
+    uploadId,
+    chunkSize: CHUNK_SIZE
+  })
+})
+
+// 개별 청크 업로드
+app.post('/api/admin/stream/upload-chunk', async (c) => {
+  const formData = await c.req.formData()
+  const uploadId = formData.get('uploadId') as string
+  const chunkIndex = parseInt(formData.get('chunkIndex') as string)
+  const chunk = formData.get('chunk') as File
+
+  if (!uploadId || isNaN(chunkIndex) || !chunk) {
+    return c.json({ error: 'uploadId, chunkIndex, chunk가 필요합니다.' }, 400)
+  }
+
+  // 업로드 세션 확인
+  const session = await c.env.DB.prepare(
+    'SELECT * FROM chunked_uploads WHERE upload_id = ?'
+  ).bind(uploadId).first() as any
+
+  if (!session) {
+    return c.json({ error: '업로드 세션을 찾을 수 없습니다.' }, 404)
+  }
+
+  if (session.status !== 'uploading') {
+    return c.json({ error: '이미 완료되었거나 실패한 업로드입니다.' }, 400)
+  }
+
+  // R2에 청크 저장 (chunks/{uploadId}/{00000, 00001, ...})
+  const chunkKey = `chunks/${uploadId}/${chunkIndex.toString().padStart(5, '0')}`
+  const arrayBuffer = await chunk.arrayBuffer()
+  await c.env.IMAGES.put(chunkKey, arrayBuffer)
+
+  // DB 업데이트 (업로드된 청크 수 증가)
+  await c.env.DB.prepare(`
+    UPDATE chunked_uploads
+    SET uploaded_chunks = uploaded_chunks + 1, updated_at = datetime('now')
+    WHERE upload_id = ?
+  `).bind(uploadId).run()
+
+  return c.json({
+    success: true,
+    chunkIndex,
+    chunkKey
+  })
+})
+
+// 청크 병합 및 Stream 업로드 완료
+app.post('/api/admin/stream/complete-chunked-upload', async (c) => {
+  const { uploadId } = await c.req.json()
+
+  if (!uploadId) {
+    return c.json({ error: 'uploadId가 필요합니다.' }, 400)
+  }
+
+  // 업로드 세션 확인
+  const session = await c.env.DB.prepare(
+    'SELECT * FROM chunked_uploads WHERE upload_id = ?'
+  ).bind(uploadId).first() as any
+
+  if (!session) {
+    return c.json({ error: '업로드 세션을 찾을 수 없습니다.' }, 404)
+  }
+
+  if (session.uploaded_chunks < session.total_chunks) {
+    return c.json({
+      error: `모든 청크가 업로드되지 않았습니다. (${session.uploaded_chunks}/${session.total_chunks})`
+    }, 400)
+  }
+
+  // 상태를 merging으로 변경
+  await c.env.DB.prepare(`
+    UPDATE chunked_uploads SET status = 'merging', updated_at = datetime('now') WHERE upload_id = ?
+  `).bind(uploadId).run()
+
+  try {
+    // Stream 설정 확인
+    if (!c.env.CF_ACCOUNT_ID || !c.env.CF_STREAM_TOKEN) {
+      throw new Error('Cloudflare Stream이 설정되지 않았습니다.')
+    }
+
+    // Stream 업로드 URL 발급
+    const streamUrlRes = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${c.env.CF_ACCOUNT_ID}/stream/direct_upload`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${c.env.CF_STREAM_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          maxDurationSeconds: 7200,
+          requireSignedURLs: false
+        })
+      }
+    )
+    const streamUrlData = await streamUrlRes.json() as any
+    if (!streamUrlData.success || !streamUrlData.result?.uploadURL) {
+      throw new Error('Stream 업로드 URL 발급 실패')
+    }
+
+    const streamUploadURL = streamUrlData.result.uploadURL
+    const streamUid = streamUrlData.result.uid
+
+    // R2에서 청크들을 읽어서 병합 후 Stream에 업로드
+    // ReadableStream을 사용하여 메모리 효율적으로 처리
+    const chunks: ArrayBuffer[] = []
+    for (let i = 0; i < session.total_chunks; i++) {
+      const chunkKey = `chunks/${uploadId}/${i.toString().padStart(5, '0')}`
+      const chunkObj = await c.env.IMAGES.get(chunkKey)
+      if (!chunkObj) {
+        throw new Error(`청크 ${i}를 찾을 수 없습니다.`)
+      }
+      chunks.push(await chunkObj.arrayBuffer())
+    }
+
+    // 청크들을 하나의 Blob으로 병합
+    const mergedBlob = new Blob(chunks)
+
+    // Stream API에 업로드
+    const formData = new FormData()
+    formData.append('file', mergedBlob, session.filename)
+
+    const uploadRes = await fetch(streamUploadURL, {
+      method: 'POST',
+      body: formData
+    })
+
+    if (!uploadRes.ok) {
+      throw new Error(`Stream 업로드 실패: ${uploadRes.status}`)
+    }
+
+    // 임시 청크 파일들 삭제
+    for (let i = 0; i < session.total_chunks; i++) {
+      const chunkKey = `chunks/${uploadId}/${i.toString().padStart(5, '0')}`
+      await c.env.IMAGES.delete(chunkKey)
+    }
+
+    // DB 업데이트 (완료)
+    await c.env.DB.prepare(`
+      UPDATE chunked_uploads
+      SET status = 'completed', stream_uid = ?, updated_at = datetime('now')
+      WHERE upload_id = ?
+    `).bind(streamUid, uploadId).run()
+
+    return c.json({
+      success: true,
+      streamUid,
+      message: '청크 업로드가 완료되었습니다.'
+    })
+
+  } catch (error: any) {
+    // 실패 시 상태 업데이트
+    await c.env.DB.prepare(`
+      UPDATE chunked_uploads SET status = 'failed', updated_at = datetime('now') WHERE upload_id = ?
+    `).bind(uploadId).run()
+
+    console.error('Chunked upload complete error:', error)
+    return c.json({ error: error.message || '청크 병합 중 오류가 발생했습니다.' }, 500)
+  }
+})
+
+// 청크 업로드 상태 조회
+app.get('/api/admin/stream/chunked-upload-status/:uploadId', async (c) => {
+  const uploadId = c.req.param('uploadId')
+
+  const session = await c.env.DB.prepare(
+    'SELECT * FROM chunked_uploads WHERE upload_id = ?'
+  ).bind(uploadId).first() as any
+
+  if (!session) {
+    return c.json({ error: '업로드 세션을 찾을 수 없습니다.' }, 404)
+  }
+
+  return c.json({
+    uploadId: session.upload_id,
+    filename: session.filename,
+    totalSize: session.total_size,
+    totalChunks: session.total_chunks,
+    uploadedChunks: session.uploaded_chunks,
+    status: session.status,
+    streamUid: session.stream_uid,
+    progress: Math.round((session.uploaded_chunks / session.total_chunks) * 100)
+  })
+})
+
 // 관리자: 녹화 강의 생성
 app.post('/api/admin/classes/:classId/create-recorded-lesson', async (c) => {
   const classId = parseInt(c.req.param('classId'))
@@ -11182,6 +11390,11 @@ app.get('/admin', async (c) => {
       }
     }
 
+    // 청크 업로드 설정
+    const CHUNK_SIZE = 100 * 1024 * 1024; // 100MB
+    const CHUNK_UPLOAD_THRESHOLD = 500 * 1024 * 1024; // 500MB 이상이면 청크 업로드
+    const PARALLEL_CHUNKS = 3; // 동시 업로드 청크 수
+
     async function handleVideoSelect(input) {
       const file = input.files[0];
       if (!file) return;
@@ -11197,116 +11410,270 @@ app.get('/admin', async (c) => {
       document.getElementById('uploadPlaceholder').classList.add('hidden');
       document.getElementById('uploadProgress').classList.remove('hidden');
       document.getElementById('uploadComplete').classList.add('hidden');
-      document.getElementById('uploadStatusText').textContent = '업로드 URL 발급 중...';
 
       try {
-        // 1. 업로드 URL 발급
-        const urlRes = await fetch('/api/admin/stream/upload-url', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ maxDurationSeconds: 7200 })
-        });
-        const urlData = await urlRes.json();
-
-        if (!urlData.uploadURL) {
-          throw new Error(urlData.error || '업로드 URL 발급 실패');
+        // 500MB 이상이면 청크 업로드, 아니면 기존 방식
+        if (file.size >= CHUNK_UPLOAD_THRESHOLD) {
+          await handleChunkedUpload(file);
+        } else {
+          await handleDirectUpload(file);
         }
-
-        recordedStreamUid = urlData.uid;
-        document.getElementById('recordedStreamUid').value = urlData.uid;
-        document.getElementById('uploadStatusText').textContent = '업로드 중...';
-
-        // 2. Cloudflare Stream 기본 업로드 (POST + FormData)
-        try {
-          // 파일명 sanitize (한글 등 특수문자 제거)
-          const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, '_') || 'video.mp4';
-          const formData = new FormData();
-          formData.append('file', file, safeFilename);
-
-          // 동적 타임아웃: 최소 10분, GB당 10분 추가
-          const fileSizeGB = file.size / (1024 * 1024 * 1024);
-          const dynamicTimeout = Math.max(600000, Math.ceil(fileSizeGB) * 600000);
-
-          // 재시도 로직이 포함된 업로드 함수
-          const uploadWithRetry = async (maxRetries = 3) => {
-            let lastError;
-            for (let attempt = 1; attempt <= maxRetries; attempt++) {
-              try {
-                await new Promise((resolve, reject) => {
-                  const xhr = new XMLHttpRequest();
-                  xhr.open('POST', urlData.uploadURL, true);
-                  xhr.timeout = dynamicTimeout;
-
-                  xhr.upload.onprogress = function(e) {
-                    if (e.lengthComputable) {
-                      const percentage = Math.round((e.loaded / e.total) * 100);
-                      document.getElementById('uploadProgressBar').style.width = percentage + '%';
-                      document.getElementById('uploadPercentText').textContent = percentage + '%';
-                      if (attempt > 1) {
-                        document.getElementById('uploadStatusText').textContent = '재시도 ' + attempt + '/' + maxRetries + ' - ' + percentage + '%';
-                      }
-                    }
-                  };
-
-                  xhr.onload = function() {
-                    if (xhr.status >= 200 && xhr.status < 300) {
-                      console.log('Upload success:', xhr.responseText);
-                      resolve(xhr.response);
-                    } else {
-                      console.error('Upload failed:', xhr.status, xhr.responseText);
-                      reject(new Error('업로드 실패: ' + xhr.status + ' - ' + (xhr.responseText || 'Unknown error')));
-                    }
-                  };
-
-                  xhr.onerror = function() {
-                    console.error('Upload network error (attempt ' + attempt + ')');
-                    const onlineStatus = navigator.onLine ? '서버 응답 없음' : '인터넷 연결 끊김';
-                    reject(new Error('네트워크 오류: ' + onlineStatus));
-                  };
-
-                  xhr.ontimeout = function() {
-                    console.error('Upload timeout (attempt ' + attempt + ')');
-                    reject(new Error('업로드 시간 초과 (타임아웃: ' + Math.round(dynamicTimeout / 60000) + '분)'));
-                  };
-
-                  xhr.send(formData);
-                });
-                return; // 성공하면 종료
-              } catch (err) {
-                lastError = err;
-                console.warn('Upload attempt ' + attempt + ' failed:', err.message);
-                if (attempt < maxRetries) {
-                  // 재시도 전 대기 (exponential backoff: 2초, 4초, 8초...)
-                  const waitTime = Math.pow(2, attempt) * 1000;
-                  document.getElementById('uploadStatusText').textContent = '재시도 대기 중... (' + (waitTime / 1000) + '초)';
-                  document.getElementById('uploadProgressBar').style.width = '0%';
-                  document.getElementById('uploadPercentText').textContent = '0%';
-                  await new Promise(r => setTimeout(r, waitTime));
-                }
-              }
-            }
-            throw lastError; // 모든 재시도 실패
-          };
-
-          await uploadWithRetry(3);
-          // 업로드 성공
-          document.getElementById('uploadProgress').classList.add('hidden');
-          document.getElementById('uploadComplete').classList.remove('hidden');
-          document.getElementById('createRecordedLessonBtn').disabled = false;
-
-          // 비디오 정보 폴링 (duration 등)
-          pollVideoStatus(recordedStreamUid);
-        } catch (uploadErr) {
-          console.error('Upload error:', uploadErr);
-          showModal('오류', uploadErr.message || '업로드 중 오류가 발생했습니다.');
-          resetVideoUpload();
-        }
-
       } catch (e) {
-        console.error('Upload setup error:', e);
-        showModal('오류', e.message || '업로드 준비 중 오류가 발생했습니다.');
+        console.error('Upload error:', e);
+        showModal('오류', e.message || '업로드 중 오류가 발생했습니다.');
         resetVideoUpload();
       }
+    }
+
+    // 청크 업로드 (500MB 이상 대용량 파일)
+    async function handleChunkedUpload(file) {
+      const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, '_') || 'video.mp4';
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+      document.getElementById('uploadStatusText').textContent = '청크 업로드 준비 중... (총 ' + totalChunks + '개 청크)';
+      console.log('Chunked upload starting:', { filename: safeFilename, totalSize: file.size, totalChunks });
+
+      // 1. 청크 업로드 초기화
+      let initData;
+      try {
+        const initRes = await fetch('/api/admin/stream/init-chunked-upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: safeFilename,
+            totalSize: file.size,
+            totalChunks: totalChunks
+          })
+        });
+        console.log('Init response status:', initRes.status);
+        if (!initRes.ok) {
+          const errText = await initRes.text();
+          console.error('Init failed:', errText);
+          throw new Error('초기화 실패: ' + initRes.status);
+        }
+        initData = await initRes.json();
+        console.log('Init response:', initData);
+      } catch (initErr) {
+        console.error('Init error:', initErr);
+        throw new Error('청크 업로드 초기화 실패: ' + initErr.message);
+      }
+
+      if (!initData.uploadId) {
+        throw new Error(initData.error || '청크 업로드 초기화 실패 - uploadId 없음');
+      }
+      const uploadId = initData.uploadId;
+      console.log('Got uploadId:', uploadId);
+
+      // 2. 파일을 청크로 분할
+      console.log('Splitting file into chunks...');
+      const chunks = [];
+      let offset = 0;
+      for (let i = 0; i < totalChunks; i++) {
+        chunks.push({
+          index: i,
+          blob: file.slice(offset, offset + CHUNK_SIZE)
+        });
+        offset += CHUNK_SIZE;
+      }
+      console.log('Chunks created:', chunks.length);
+      document.getElementById('uploadStatusText').textContent = '업로드 시작... (0/' + totalChunks + ' 청크)';
+
+      // 3. 병렬 청크 업로드 (동시 3개)
+      console.log('Starting parallel upload...');
+      let completedChunks = 0;
+      const failedChunks = [];
+
+      const uploadChunkWithRetry = async (chunk, maxRetries = 3) => {
+        console.log('Uploading chunk', chunk.index, 'size:', chunk.blob.size);
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            const formData = new FormData();
+            formData.append('uploadId', uploadId);
+            formData.append('chunkIndex', chunk.index.toString());
+            formData.append('chunk', chunk.blob);
+
+            const res = await fetch('/api/admin/stream/upload-chunk', {
+              method: 'POST',
+              body: formData
+            });
+
+            if (!res.ok) {
+              const errData = await res.json().catch(() => ({}));
+              throw new Error(errData.error || '청크 업로드 실패');
+            }
+
+            completedChunks++;
+            const percentage = Math.round((completedChunks / totalChunks) * 100);
+            document.getElementById('uploadProgressBar').style.width = percentage + '%';
+            document.getElementById('uploadPercentText').textContent = percentage + '%';
+            document.getElementById('uploadStatusText').textContent = '업로드 중... (' + completedChunks + '/' + totalChunks + ' 청크)';
+            return true;
+          } catch (err) {
+            console.warn('Chunk ' + chunk.index + ' attempt ' + attempt + ' failed:', err.message);
+            if (attempt < maxRetries) {
+              const waitTime = Math.pow(2, attempt) * 1000;
+              await new Promise(r => setTimeout(r, waitTime));
+            }
+          }
+        }
+        return false;
+      };
+
+      // 동시성 제한 병렬 실행
+      const parallelLimit = async (items, limit, fn) => {
+        const results = [];
+        const executing = [];
+        for (const item of items) {
+          const p = Promise.resolve().then(() => fn(item));
+          results.push(p);
+          if (limit <= items.length) {
+            const e = p.then(() => executing.splice(executing.indexOf(e), 1));
+            executing.push(e);
+            if (executing.length >= limit) {
+              await Promise.race(executing);
+            }
+          }
+        }
+        return Promise.all(results);
+      };
+
+      console.log('Calling parallelLimit with', chunks.length, 'chunks, concurrency:', PARALLEL_CHUNKS);
+      const uploadResults = await parallelLimit(chunks, PARALLEL_CHUNKS, async (chunk) => {
+        const success = await uploadChunkWithRetry(chunk);
+        if (!success) failedChunks.push(chunk.index);
+        return success;
+      });
+      console.log('All chunks uploaded, results:', uploadResults);
+
+      if (failedChunks.length > 0) {
+        throw new Error('일부 청크 업로드 실패: ' + failedChunks.join(', '));
+      }
+
+      // 4. 청크 병합 및 Stream 업로드
+      document.getElementById('uploadStatusText').textContent = '파일 병합 중... (잠시 기다려주세요)';
+      document.getElementById('uploadProgressBar').style.width = '100%';
+
+      const completeRes = await fetch('/api/admin/stream/complete-chunked-upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uploadId })
+      });
+      const completeData = await completeRes.json();
+
+      if (!completeData.success || !completeData.streamUid) {
+        throw new Error(completeData.error || '청크 병합 실패');
+      }
+
+      // 업로드 성공
+      recordedStreamUid = completeData.streamUid;
+      document.getElementById('recordedStreamUid').value = completeData.streamUid;
+      document.getElementById('uploadProgress').classList.add('hidden');
+      document.getElementById('uploadComplete').classList.remove('hidden');
+      document.getElementById('createRecordedLessonBtn').disabled = false;
+
+      // 비디오 정보 폴링
+      pollVideoStatus(recordedStreamUid);
+    }
+
+    // 기존 직접 업로드 (500MB 미만)
+    async function handleDirectUpload(file) {
+      document.getElementById('uploadStatusText').textContent = '업로드 URL 발급 중...';
+
+      // 1. 업로드 URL 발급
+      const urlRes = await fetch('/api/admin/stream/upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxDurationSeconds: 7200 })
+      });
+      const urlData = await urlRes.json();
+
+      if (!urlData.uploadURL) {
+        throw new Error(urlData.error || '업로드 URL 발급 실패');
+      }
+
+      recordedStreamUid = urlData.uid;
+      document.getElementById('recordedStreamUid').value = urlData.uid;
+      document.getElementById('uploadStatusText').textContent = '업로드 중...';
+
+      // 2. Cloudflare Stream 기본 업로드 (POST + FormData)
+      const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, '_') || 'video.mp4';
+      const formData = new FormData();
+      formData.append('file', file, safeFilename);
+
+      // 동적 타임아웃: 최소 10분, GB당 10분 추가
+      const fileSizeGB = file.size / (1024 * 1024 * 1024);
+      const dynamicTimeout = Math.max(600000, Math.ceil(fileSizeGB) * 600000);
+
+      // 재시도 로직이 포함된 업로드 함수
+      const uploadWithRetry = async (maxRetries = 3) => {
+        let lastError;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            await new Promise((resolve, reject) => {
+              const xhr = new XMLHttpRequest();
+              xhr.open('POST', urlData.uploadURL, true);
+              xhr.timeout = dynamicTimeout;
+
+              xhr.upload.onprogress = function(e) {
+                if (e.lengthComputable) {
+                  const percentage = Math.round((e.loaded / e.total) * 100);
+                  document.getElementById('uploadProgressBar').style.width = percentage + '%';
+                  document.getElementById('uploadPercentText').textContent = percentage + '%';
+                  if (attempt > 1) {
+                    document.getElementById('uploadStatusText').textContent = '재시도 ' + attempt + '/' + maxRetries + ' - ' + percentage + '%';
+                  }
+                }
+              };
+
+              xhr.onload = function() {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                  console.log('Upload success:', xhr.responseText);
+                  resolve(xhr.response);
+                } else {
+                  console.error('Upload failed:', xhr.status, xhr.responseText);
+                  reject(new Error('업로드 실패: ' + xhr.status + ' - ' + (xhr.responseText || 'Unknown error')));
+                }
+              };
+
+              xhr.onerror = function() {
+                console.error('Upload network error (attempt ' + attempt + ')');
+                const onlineStatus = navigator.onLine ? '서버 응답 없음' : '인터넷 연결 끊김';
+                reject(new Error('네트워크 오류: ' + onlineStatus));
+              };
+
+              xhr.ontimeout = function() {
+                console.error('Upload timeout (attempt ' + attempt + ')');
+                reject(new Error('업로드 시간 초과 (타임아웃: ' + Math.round(dynamicTimeout / 60000) + '분)'));
+              };
+
+              xhr.send(formData);
+            });
+            return; // 성공하면 종료
+          } catch (err) {
+            lastError = err;
+            console.warn('Upload attempt ' + attempt + ' failed:', err.message);
+            if (attempt < maxRetries) {
+              // 재시도 전 대기 (exponential backoff: 2초, 4초, 8초...)
+              const waitTime = Math.pow(2, attempt) * 1000;
+              document.getElementById('uploadStatusText').textContent = '재시도 대기 중... (' + (waitTime / 1000) + '초)';
+              document.getElementById('uploadProgressBar').style.width = '0%';
+              document.getElementById('uploadPercentText').textContent = '0%';
+              await new Promise(r => setTimeout(r, waitTime));
+            }
+          }
+        }
+        throw lastError; // 모든 재시도 실패
+      };
+
+      await uploadWithRetry(3);
+
+      // 업로드 성공
+      document.getElementById('uploadProgress').classList.add('hidden');
+      document.getElementById('uploadComplete').classList.remove('hidden');
+      document.getElementById('createRecordedLessonBtn').disabled = false;
+
+      // 비디오 정보 폴링 (duration 등)
+      pollVideoStatus(recordedStreamUid);
     }
 
     function loadScript(src) {
