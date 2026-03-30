@@ -4006,8 +4006,9 @@ app.delete('/api/admin/lessons/:lessonId', async (c) => {
     return c.json({ error: '강의을 찾을 수 없습니다.' }, 404)
   }
 
-  // ClassIn에서 강의 삭제 시도 (진행중/종료된 강의은 삭제 불가)
-  if (lesson.classin_course_id && lesson.classin_class_id) {
+  // 녹화 강의가 아닌 경우에만 ClassIn에서 삭제 시도 (진행중/종료된 강의은 삭제 불가)
+  const isRecorded = lesson.lesson_type === 'recorded' || !!lesson.stream_uid
+  if (!isRecorded && lesson.classin_course_id && lesson.classin_class_id) {
     const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
       ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
       : null
@@ -4068,8 +4069,9 @@ app.delete('/api/instructor/lessons/:lessonId', async (c) => {
     return c.json({ error: '강의을 찾을 수 없거나 권한이 없습니다.' }, 404)
   }
 
-  // ClassIn에서 강의 삭제 시도
-  if (lesson.classin_course_id && lesson.classin_class_id) {
+  // 녹화 강의가 아닌 경우에만 ClassIn에서 삭제 시도
+  const isRecorded = lesson.lesson_type === 'recorded' || !!lesson.stream_uid
+  if (!isRecorded && lesson.classin_course_id && lesson.classin_class_id) {
     const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
       ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
       : null
@@ -8647,7 +8649,7 @@ async function loadInstructorCourses() {
         const actionBtn = isProcessing
           ? '<button onclick="checkLessonStatus('+lesson.id+')" class="px-3 py-1 bg-yellow-500 hover:bg-yellow-600 text-white text-xs font-medium rounded-lg"><i class="fas fa-sync-alt mr-1"></i>상태 확인</button>'
           : '<button onclick="openWatchWindow('+lesson.id+')" class="px-3 py-1 bg-purple-500 hover:bg-purple-600 text-white text-xs font-medium rounded-lg"><i class="fas fa-play mr-1"></i>강의 보기</button>';
-        const deleteBtn = '<button onclick="deleteInstructorLesson('+lesson.id+', \\\''+safeLessonTitle+'\\\')" class="ml-2 text-red-400 hover:text-red-600" title="강의 삭제"><i class="fas fa-trash-alt text-xs"></i></button>';
+        const deleteBtn = '<button onclick="deleteInstructorLesson('+lesson.id+', \\\''+safeLessonTitle+'\\\', true)" class="ml-2 text-red-400 hover:text-red-600" title="강의 삭제"><i class="fas fa-trash-alt text-xs"></i></button>';
         const durationStr = lesson.duration_minutes ? lesson.duration_minutes + '분' : '-';
 
         return '<div class="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0">' +
@@ -8831,8 +8833,11 @@ async function checkLessonStatus(lessonId) {
   }
 }
 
-async function deleteInstructorLesson(lessonId, lessonTitle) {
-  if (!confirm('강의 "' + lessonTitle + '"을 삭제하시겠습니까?\\n\\n주의: ClassIn에 등록된 강의도 함께 삭제됩니다.')) {
+async function deleteInstructorLesson(lessonId, lessonTitle, isRecorded) {
+  const confirmMsg = isRecorded
+    ? '녹화 강의 "' + lessonTitle + '"을 삭제하시겠습니까?'
+    : '강의 "' + lessonTitle + '"을 삭제하시겠습니까?\\n\\n주의: ClassIn에 등록된 강의도 함께 삭제됩니다.';
+  if (!confirm(confirmMsg)) {
     return;
   }
 
