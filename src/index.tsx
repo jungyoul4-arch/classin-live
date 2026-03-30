@@ -2971,8 +2971,62 @@ app.post('/api/admin/stream/upload-url', async (c) => {
   })
 })
 
-// ==================== 청크 업로드 API (대용량 파일 지원) ====================
-const CHUNK_SIZE = 100 * 1024 * 1024 // 100MB
+// 관리자: TUS resumable 업로드 URL 발급 (대용량 파일용)
+app.post('/api/admin/stream/tus-upload-url', async (c) => {
+  const { uploadLength, filename } = await c.req.json()
+
+  if (!uploadLength || !filename) {
+    return c.json({ error: 'uploadLength와 filename이 필요합니다.' }, 400)
+  }
+
+  if (!c.env.CF_ACCOUNT_ID || !c.env.CF_STREAM_TOKEN) {
+    return c.json({ error: 'Cloudflare Stream이 설정되지 않았습니다.' }, 500)
+  }
+
+  try {
+    // Cloudflare Stream TUS 엔드포인트에 업로드 생성 요청
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${c.env.CF_ACCOUNT_ID}/stream?direct_user=true`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${c.env.CF_STREAM_TOKEN}`,
+          'Tus-Resumable': '1.0.0',
+          'Upload-Length': uploadLength.toString(),
+          'Upload-Metadata': `name ${btoa(filename)}, requiresignedurls ${btoa('false')}, maxDurationSeconds ${btoa('7200')}`
+        }
+      }
+    )
+
+    console.log('TUS init response status:', response.status)
+
+    if (!response.ok) {
+      const errText = await response.text()
+      console.error('TUS init failed:', errText)
+      return c.json({ error: 'TUS 업로드 생성 실패: ' + response.status }, 500)
+    }
+
+    const location = response.headers.get('location')
+    const streamMediaId = response.headers.get('stream-media-id')
+
+    console.log('TUS upload URL:', location, 'Media ID:', streamMediaId)
+
+    if (!location) {
+      return c.json({ error: 'TUS 업로드 URL을 받지 못했습니다.' }, 500)
+    }
+
+    return c.json({
+      uploadURL: location,
+      uid: streamMediaId
+    })
+  } catch (error: any) {
+    console.error('TUS URL error:', error)
+    return c.json({ error: error.message || 'TUS URL 발급 실패' }, 500)
+  }
+})
+
+// ==================== 청크 업로드 API (레거시 - 사용하지 않음) ====================
+const CHUNK_SIZE = 25 * 1024 * 1024 // 25MB (Cloudflare Pages 제한)
 
 // 청크 업로드 초기화
 app.post('/api/admin/stream/init-chunked-upload', async (c) => {
@@ -11390,10 +11444,9 @@ app.get('/admin', async (c) => {
       }
     }
 
-    // 청크 업로드 설정
-    const CHUNK_SIZE = 100 * 1024 * 1024; // 100MB
-    const CHUNK_UPLOAD_THRESHOLD = 500 * 1024 * 1024; // 500MB 이상이면 청크 업로드
-    const PARALLEL_CHUNKS = 3; // 동시 업로드 청크 수
+    // TUS 업로드 설정
+    const TUS_CHUNK_SIZE = 50 * 1024 * 1024; // 50MB per TUS chunk
+    const TUS_UPLOAD_THRESHOLD = 200 * 1024 * 1024; // 200MB 이상이면 TUS 사용
 
     async function handleVideoSelect(input) {
       const file = input.files[0];
@@ -11412,9 +11465,9 @@ app.get('/admin', async (c) => {
       document.getElementById('uploadComplete').classList.add('hidden');
 
       try {
-        // 500MB 이상이면 청크 업로드, 아니면 기존 방식
-        if (file.size >= CHUNK_UPLOAD_THRESHOLD) {
-          await handleChunkedUpload(file);
+        // 200MB 이상이면 TUS resumable upload, 아니면 기존 방식
+        if (file.size >= TUS_UPLOAD_THRESHOLD) {
+          await handleTusUpload(file);
         } else {
           await handleDirectUpload(file);
         }
@@ -11425,154 +11478,92 @@ app.get('/admin', async (c) => {
       }
     }
 
-    // 청크 업로드 (500MB 이상 대용량 파일)
-    async function handleChunkedUpload(file) {
+    // TUS resumable upload (200MB 이상 대용량 파일)
+    async function handleTusUpload(file) {
       const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, '_') || 'video.mp4';
-      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
-      document.getElementById('uploadStatusText').textContent = '청크 업로드 준비 중... (총 ' + totalChunks + '개 청크)';
-      console.log('Chunked upload starting:', { filename: safeFilename, totalSize: file.size, totalChunks });
+      document.getElementById('uploadStatusText').textContent = 'TUS 업로드 준비 중...';
+      console.log('TUS upload starting:', { filename: safeFilename, totalSize: file.size });
 
-      // 1. 청크 업로드 초기화
-      let initData;
-      try {
-        const initRes = await fetch('/api/admin/stream/init-chunked-upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            filename: safeFilename,
-            totalSize: file.size,
-            totalChunks: totalChunks
-          })
-        });
-        console.log('Init response status:', initRes.status);
-        if (!initRes.ok) {
-          const errText = await initRes.text();
-          console.error('Init failed:', errText);
-          throw new Error('초기화 실패: ' + initRes.status);
-        }
-        initData = await initRes.json();
-        console.log('Init response:', initData);
-      } catch (initErr) {
-        console.error('Init error:', initErr);
-        throw new Error('청크 업로드 초기화 실패: ' + initErr.message);
-      }
+      // 1. tus-js-client 라이브러리 로드
+      await loadScript('https://cdn.jsdelivr.net/npm/tus-js-client@4.1.0/dist/tus.min.js');
+      console.log('TUS library loaded');
 
-      if (!initData.uploadId) {
-        throw new Error(initData.error || '청크 업로드 초기화 실패 - uploadId 없음');
-      }
-      const uploadId = initData.uploadId;
-      console.log('Got uploadId:', uploadId);
-
-      // 2. 파일을 청크로 분할
-      console.log('Splitting file into chunks...');
-      const chunks = [];
-      let offset = 0;
-      for (let i = 0; i < totalChunks; i++) {
-        chunks.push({
-          index: i,
-          blob: file.slice(offset, offset + CHUNK_SIZE)
-        });
-        offset += CHUNK_SIZE;
-      }
-      console.log('Chunks created:', chunks.length);
-      document.getElementById('uploadStatusText').textContent = '업로드 시작... (0/' + totalChunks + ' 청크)';
-
-      // 3. 병렬 청크 업로드 (동시 3개)
-      console.log('Starting parallel upload...');
-      let completedChunks = 0;
-      const failedChunks = [];
-
-      const uploadChunkWithRetry = async (chunk, maxRetries = 3) => {
-        console.log('Uploading chunk', chunk.index, 'size:', chunk.blob.size);
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-          try {
-            const formData = new FormData();
-            formData.append('uploadId', uploadId);
-            formData.append('chunkIndex', chunk.index.toString());
-            formData.append('chunk', chunk.blob);
-
-            const res = await fetch('/api/admin/stream/upload-chunk', {
-              method: 'POST',
-              body: formData
-            });
-
-            if (!res.ok) {
-              const errData = await res.json().catch(() => ({}));
-              throw new Error(errData.error || '청크 업로드 실패');
-            }
-
-            completedChunks++;
-            const percentage = Math.round((completedChunks / totalChunks) * 100);
-            document.getElementById('uploadProgressBar').style.width = percentage + '%';
-            document.getElementById('uploadPercentText').textContent = percentage + '%';
-            document.getElementById('uploadStatusText').textContent = '업로드 중... (' + completedChunks + '/' + totalChunks + ' 청크)';
-            return true;
-          } catch (err) {
-            console.warn('Chunk ' + chunk.index + ' attempt ' + attempt + ' failed:', err.message);
-            if (attempt < maxRetries) {
-              const waitTime = Math.pow(2, attempt) * 1000;
-              await new Promise(r => setTimeout(r, waitTime));
-            }
-          }
-        }
-        return false;
-      };
-
-      // 동시성 제한 병렬 실행
-      const parallelLimit = async (items, limit, fn) => {
-        const results = [];
-        const executing = [];
-        for (const item of items) {
-          const p = Promise.resolve().then(() => fn(item));
-          results.push(p);
-          if (limit <= items.length) {
-            const e = p.then(() => executing.splice(executing.indexOf(e), 1));
-            executing.push(e);
-            if (executing.length >= limit) {
-              await Promise.race(executing);
-            }
-          }
-        }
-        return Promise.all(results);
-      };
-
-      console.log('Calling parallelLimit with', chunks.length, 'chunks, concurrency:', PARALLEL_CHUNKS);
-      const uploadResults = await parallelLimit(chunks, PARALLEL_CHUNKS, async (chunk) => {
-        const success = await uploadChunkWithRetry(chunk);
-        if (!success) failedChunks.push(chunk.index);
-        return success;
-      });
-      console.log('All chunks uploaded, results:', uploadResults);
-
-      if (failedChunks.length > 0) {
-        throw new Error('일부 청크 업로드 실패: ' + failedChunks.join(', '));
-      }
-
-      // 4. 청크 병합 및 Stream 업로드
-      document.getElementById('uploadStatusText').textContent = '파일 병합 중... (잠시 기다려주세요)';
-      document.getElementById('uploadProgressBar').style.width = '100%';
-
-      const completeRes = await fetch('/api/admin/stream/complete-chunked-upload', {
+      // 2. TUS 업로드 URL 발급
+      const tusUrlRes = await fetch('/api/admin/stream/tus-upload-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uploadId })
+        body: JSON.stringify({
+          uploadLength: file.size,
+          filename: safeFilename
+        })
       });
-      const completeData = await completeRes.json();
 
-      if (!completeData.success || !completeData.streamUid) {
-        throw new Error(completeData.error || '청크 병합 실패');
+      if (!tusUrlRes.ok) {
+        const errText = await tusUrlRes.text();
+        console.error('TUS URL failed:', errText);
+        throw new Error('TUS 업로드 URL 발급 실패');
       }
 
-      // 업로드 성공
-      recordedStreamUid = completeData.streamUid;
-      document.getElementById('recordedStreamUid').value = completeData.streamUid;
-      document.getElementById('uploadProgress').classList.add('hidden');
-      document.getElementById('uploadComplete').classList.remove('hidden');
-      document.getElementById('createRecordedLessonBtn').disabled = false;
+      const tusData = await tusUrlRes.json();
+      console.log('TUS upload URL:', tusData);
 
-      // 비디오 정보 폴링
-      pollVideoStatus(recordedStreamUid);
+      if (!tusData.uploadURL) {
+        throw new Error(tusData.error || 'TUS 업로드 URL 없음');
+      }
+
+      recordedStreamUid = tusData.uid;
+      document.getElementById('recordedStreamUid').value = tusData.uid;
+
+      // 3. TUS 업로드 시작
+      document.getElementById('uploadStatusText').textContent = '업로드 중...';
+
+      return new Promise((resolve, reject) => {
+        const upload = new tus.Upload(file, {
+          endpoint: tusData.uploadURL,
+          uploadUrl: tusData.uploadURL,
+          chunkSize: TUS_CHUNK_SIZE,
+          retryDelays: [0, 1000, 3000, 5000, 10000],
+          metadata: {
+            filename: safeFilename,
+            filetype: file.type || 'video/mp4'
+          },
+          onError: function(error) {
+            console.error('TUS upload error:', error);
+            reject(new Error('TUS 업로드 실패: ' + error.message));
+          },
+          onProgress: function(bytesUploaded, bytesTotal) {
+            const percentage = Math.round((bytesUploaded / bytesTotal) * 100);
+            document.getElementById('uploadProgressBar').style.width = percentage + '%';
+            document.getElementById('uploadPercentText').textContent = percentage + '%';
+            const uploadedMB = (bytesUploaded / 1024 / 1024).toFixed(1);
+            const totalMB = (bytesTotal / 1024 / 1024).toFixed(1);
+            document.getElementById('uploadStatusText').textContent = '업로드 중... ' + uploadedMB + 'MB / ' + totalMB + 'MB';
+          },
+          onSuccess: function() {
+            console.log('TUS upload success, uid:', recordedStreamUid);
+            document.getElementById('uploadProgress').classList.add('hidden');
+            document.getElementById('uploadComplete').classList.remove('hidden');
+            document.getElementById('createRecordedLessonBtn').disabled = false;
+
+            // 비디오 정보 폴링
+            pollVideoStatus(recordedStreamUid);
+            resolve();
+          }
+        });
+
+        // 저장해서 취소 시 사용
+        tusUpload = upload;
+
+        // 이전 업로드 이어받기 시도
+        upload.findPreviousUploads().then(function(previousUploads) {
+          if (previousUploads.length > 0) {
+            console.log('Found previous upload, resuming...');
+            upload.resumeFromPreviousUpload(previousUploads[0]);
+          }
+          upload.start();
+        });
+      });
     }
 
     // 기존 직접 업로드 (500MB 미만)
