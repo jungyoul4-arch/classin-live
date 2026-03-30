@@ -3572,6 +3572,47 @@ app.get('/api/lessons/:lessonId/stream-url', async (c) => {
     signingKeyJwk: c.env.CF_STREAM_SIGNING_KEY_JWK
   }
 
+  // 비디오 상태 먼저 확인
+  try {
+    const statusRes = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${streamConfig.accountId}/stream/${lesson.stream_uid}`,
+      {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${streamConfig.apiToken}` }
+      }
+    )
+    const statusData = await statusRes.json() as any
+
+    if (!statusData.success) {
+      return c.json({ error: '비디오 정보를 가져올 수 없습니다.' }, 500)
+    }
+
+    const videoStatus = statusData.result?.status?.state
+    if (videoStatus === 'pendingupload' || videoStatus === 'downloading' || videoStatus === 'queued' || videoStatus === 'inprogress') {
+      return c.json({
+        error: '비디오가 아직 처리 중입니다. 잠시 후 다시 시도해주세요.',
+        processing: true,
+        status: videoStatus,
+        pctComplete: statusData.result?.status?.pctComplete
+      }, 202)
+    }
+
+    if (videoStatus === 'error') {
+      return c.json({ error: '비디오 처리 중 오류가 발생했습니다.' }, 500)
+    }
+
+    // readyToStream 확인
+    if (!statusData.result?.readyToStream) {
+      return c.json({
+        error: '비디오가 아직 준비 중입니다. 잠시 후 다시 시도해주세요.',
+        processing: true
+      }, 202)
+    }
+  } catch (e: any) {
+    console.error('Video status check error:', e)
+    // 상태 확인 실패해도 URL 생성 시도
+  }
+
   // 서명 키가 없으면 비디오 설정을 업데이트하여 서명 요구 끄기
   if (!streamConfig.signingKeyId || !streamConfig.signingKeyJwk) {
     await updateStreamVideoSettings(streamConfig, lesson.stream_uid, { requireSignedURLs: false })
@@ -8965,6 +9006,16 @@ function closePlayer() {
       loadingState.classList.add('hidden');
       paymentRequired.classList.remove('hidden');
       paymentRequired.classList.add('flex');
+      return;
+    }
+
+    // 비디오 처리 중인 경우
+    if (data.processing) {
+      loadingState.classList.add('hidden');
+      errorState.classList.remove('hidden');
+      errorState.classList.add('flex');
+      const pct = data.pctComplete ? ' (' + Math.round(data.pctComplete) + '%)' : '';
+      document.getElementById('errorMessage').innerHTML = '<i class="fas fa-cog fa-spin text-4xl text-blue-400 mb-4"></i><br>비디오 처리 중입니다' + pct + '<br><span class="text-sm text-gray-400 mt-2">잠시 후 새로고침해주세요.</span>';
       return;
     }
 
