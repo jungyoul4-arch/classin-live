@@ -293,6 +293,8 @@ function translateClassInError(error: string): string {
     '时间戳过期': '타임스탬프가 만료되었습니다.',
     '用户不存在': '사용자가 존재하지 않습니다.',
     '课程名称不能为空': '코스명을 입력해주세요.',
+    '班级下的学生不能添加为老师': '해당 계정은 이미 학생으로 등록되어 있어 교사로 추가할 수 없습니다. 강사용 별도 계정이 필요합니다.',
+    '班级下的旁听不能添加为老师': '해당 계정은 청강생으로 등록되어 있어 교사로 추가할 수 없습니다.',
   }
 
   let result = error
@@ -1224,11 +1226,8 @@ async function registerInstructorWithClassIn(
       return { error: translateClassInError(errorMsg) }
     }
 
-    // Step 2: addSchoolStudent API로 학교 멤버 등록 (authTicket 발급을 위해 - 학생과 동일한 방식)
-    const schoolResult = await addSchoolStudent(config, accountValue, teacherName)
-    console.log('addSchoolStudent (instructor) result:', JSON.stringify(schoolResult))
-
-    // Step 3: addTeacher API로 기관 교사로 등록
+    // Step 2: addTeacher API로 기관 교사로 등록 (학생이 아닌 교사로 바로 등록)
+    // 주의: addSchoolStudent를 먼저 호출하면 학생으로 등록되어 교사 추가 불가
     const timestamp2 = Math.floor(Date.now() / 1000)
     const safeKey2 = await generateSafeKey(config.SECRET, timestamp2)
 
@@ -3786,11 +3785,13 @@ app.post('/api/admin/classes/:classId/create-sessions', async (c) => {
     return c.json({ error: 'ClassIn API가 설정되지 않았습니다.' }, 500)
   }
 
-  // 코스 및 강사 정보 조회
+  // 코스 및 강사 정보 조회 (전화번호/이메일 포함)
   const cls = await c.env.DB.prepare(`
-    SELECT c.*, i.classin_uid as instructor_classin_uid, i.display_name as instructor_name
+    SELECT c.*, i.classin_uid as instructor_classin_uid, i.display_name as instructor_name,
+           i.id as instructor_id, u.email as instructor_email, i.classin_virtual_account as instructor_virtual_account
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
+    JOIN users u ON i.user_id = u.id
     WHERE c.id = ?
   `).bind(classId).first() as any
 
@@ -3804,6 +3805,10 @@ app.post('/api/admin/classes/:classId/create-sessions', async (c) => {
 
   const teacherUid = cls.instructor_classin_uid
 
+  // 기존 classin_uid가 있으면 그대로 사용 (이미 등록된 상태)
+  // addTeacher는 새로 등록할 때만 필요하며, 가상계정이 학생으로 등록된 경우 교사로 추가 불가
+  console.log('Using existing instructor ClassIn UID:', teacherUid)
+
   // 1. 코스 - 기존 코스가 있으면 재사용, 없으면 새로 생성
   let courseId = cls.classin_course_id
   if (!courseId) {
@@ -3813,6 +3818,9 @@ app.post('/api/admin/classes/:classId/create-sessions', async (c) => {
     }
     courseId = courseResult.courseId
   }
+
+  // 강사는 createClassInLesson에서 teacherUid로 직접 설정됨
+  // addTeacherToCourse는 조교(identity=3)로 추가하므로 사용하지 않음
 
   // 2. 현재 강의 수 조회
   const lessonCountResult = await c.env.DB.prepare(
@@ -4643,12 +4651,23 @@ app.delete('/api/admin/instructors/:id', async (c) => {
     return c.json({ error: `이 강사에게 ${hasClasses.count}개의 코스가 있습니다. 먼저 코스를 삭제해주세요.` }, 400)
   }
 
+  // 가상계정이 있으면 회수
+  if (instructor.classin_virtual_account) {
+    await c.env.DB.prepare(`
+      UPDATE classin_virtual_accounts
+      SET status = 'available', user_id = NULL, assigned_at = NULL, assigned_name = NULL,
+          is_registered = 0, registered_at = NULL, updated_at = datetime('now')
+      WHERE account_uid = ?
+    `).bind(instructor.classin_virtual_account).run()
+    console.log('Released virtual account:', instructor.classin_virtual_account)
+  }
+
   // 강사 삭제
   await c.env.DB.prepare('DELETE FROM instructors WHERE id = ?').bind(instructorId).run()
   // 유저도 삭제 (강사 역할만 삭제하려면 이 부분 수정)
   await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(instructor.user_id).run()
 
-  return c.json({ success: true, message: '강사가 삭제되었습니다.' })
+  return c.json({ success: true, message: '강사가 삭제되었습니다.' + (instructor.classin_virtual_account ? ' (가상계정 회수됨)' : '') })
 })
 
 // ============================================
