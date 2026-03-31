@@ -678,7 +678,7 @@ async function createClassInSession(
           result.joinUrl = `${result.joinUrl}&uid=${studentUid}`
         }
       } else {
-        // 이미 생성된 ClassIn 코스/강의이 있는지 확인
+        // 이미 생성된 ClassIn 코스/강의가 있는지 확인
         let courseId = cls.classin_course_id || ''
         let existingClassId = cls.classin_class_id || ''
 
@@ -822,7 +822,7 @@ async function createClassInSession(
 
     // class_lessons에도 저장 (마이페이지 다음 강의 표시용)
     if (result.courseId && result.classId) {
-      // 이미 해당 강의이 class_lessons에 있는지 확인
+      // 이미 해당 강의가 class_lessons에 있는지 확인
       const existingLesson = await db.prepare(
         'SELECT id FROM class_lessons WHERE class_id = ? AND classin_class_id = ?'
       ).bind(classId, result.classId).first()
@@ -1983,7 +1983,7 @@ app.post('/api/instructor/classes/:classId/create-sessions', async (c) => {
 
   return c.json({
     success: true,
-    message: `${createdLessons.length}개 강의이 생성되었습니다.`,
+    message: `${createdLessons.length}개 강의가 생성되었습니다.`,
     courseId,
     createdLessons,
     errors: errors.length > 0 ? errors : undefined
@@ -2396,7 +2396,7 @@ app.post('/api/test-account/enroll', async (c) => {
         'SELECT * FROM classin_sessions WHERE class_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 1'
       ).bind(classId, userId).first() as any
 
-      // 새 강의이 생성되었고 기존 session과 다른 경우 - 새 session 필요
+      // 새 강의가 생성되었고 기존 session과 다른 경우 - 새 session 필요
       if (classLatest?.classin_class_id &&
           (!classinSession || classinSession.classin_class_id !== classLatest.classin_class_id)) {
         // 새 강의에 대한 session 생성
@@ -3674,7 +3674,7 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
     return c.json({ error: '강사가 ClassIn에 등록되지 않았습니다. 먼저 강사를 등록해주세요.' }, 400)
   }
 
-  // 진행중인 강의이 있는지 확인 (아직 끝나지 않은 강의)
+  // 진행중인 강의가 있는지 확인 (아직 끝나지 않은 강의)
   const activeLesson = await c.env.DB.prepare(`
     SELECT * FROM class_lessons
     WHERE class_id = ? AND status != 'ended'
@@ -3686,7 +3686,7 @@ app.post('/api/admin/classes/:classId/create-session', async (c) => {
     return c.json({
       success: true,
       alreadyExists: true,
-      message: `진행중인 강의이 있습니다: ${activeLesson.lesson_title}`,
+      message: `진행중인 강의가 있습니다: ${activeLesson.lesson_title}`,
       courseId: activeLesson.classin_course_id,
       classId: activeLesson.classin_class_id,
       lessonId: activeLesson.id,
@@ -3901,7 +3901,7 @@ app.post('/api/admin/classes/:classId/create-sessions', async (c) => {
 
   return c.json({
     success: true,
-    message: `${createdLessons.length}개 강의이 생성되었습니다.` + (errors.length > 0 ? ` (${errors.length}개 실패)` : ''),
+    message: `${createdLessons.length}개 강의가 생성되었습니다.` + (errors.length > 0 ? ` (${errors.length}개 실패)` : ''),
     courseId,
     createdLessons,
     errors: errors.length > 0 ? errors : undefined
@@ -4106,7 +4106,7 @@ app.delete('/api/instructor/lessons/:lessonId', async (c) => {
     ).bind(countResult?.count || 0, lesson.class_id).run()
   }
 
-  return c.json({ success: true, message: '강의이 삭제되었습니다.' })
+  return c.json({ success: true, message: '강의가 삭제되었습니다.' })
 })
 
 // 관리자: 코스 목록 (ClassIn 상태 포함)
@@ -6911,7 +6911,7 @@ async function loadMyPageTab(tab) {
               : '<span class="flex-1 h-8 bg-gray-200 text-gray-600 text-xs font-semibold rounded-lg flex items-center justify-center gap-1"><i class="fas fa-clock"></i> 강의 준비중</span>';
             lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><div class="flex items-center gap-2 mb-2"><span class="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 text-[10px] font-bold rounded">다음 강의</span><span class="text-[11px] text-gray-400">' + dateStr + '</span></div><p class="text-xs text-gray-600 mb-2 line-clamp-1">' + (c.next_lesson_title || '') + '</p><div class="flex gap-2">' + enterBtn + '</div></div>';
           } else {
-            lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><p class="text-xs text-gray-400 text-center">아직 예정된 강의이 없습니다</p></div>';
+            lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><p class="text-xs text-gray-400 text-center">아직 예정된 강의가 없습니다</p></div>';
           }
 
           return '<div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100"><a href="/class/' + c.slug + '" class="flex gap-3"><div class="relative flex-shrink-0"><img src="' + (c.thumbnail || '') + '" class="w-20 h-14 rounded-lg object-cover bg-gray-200" onerror="this.onerror=null; this.style.display=&apos;none&apos;">' + (hasNextLesson ? '<span class="absolute -top-1 -right-1 w-5 h-5 bg-indigo-500 rounded-full flex items-center justify-center"><i class="fas fa-video text-white text-[8px]"></i></span>' : '') + '</div><div class="flex-1 min-w-0"><p class="text-sm font-medium text-dark-800 line-clamp-1">' + c.title + '</p><p class="text-xs text-gray-500">' + (c.category_name || '') + ' · 수강생 ' + (c.active_students || 0) + '명</p><div class="flex items-center gap-2 mt-1"><div class="flex-1 bg-gray-200 rounded-full h-1.5"><div class="bg-indigo-500 h-1.5 rounded-full" style="width:' + progress + '%"></div></div><span class="text-[10px] text-gray-400">' + (c.completed_lesson_count || 0) + '/' + (c.total_lesson_count || 0) + '회</span></div></div></a>' + lessonSection + '</div>';
@@ -6959,11 +6959,11 @@ async function loadMyPageTab(tab) {
     const res = await fetch('/api/user/'+currentUser.id+'/enrollments');
     const items = await res.json();
 
-    // 활성 수강만 표시 (다음 예정 강의이 있거나, 강의이 아직 없는 경우)
+    // 활성 수강만 표시 (다음 예정 강의가 있거나, 강의가 아직 없는 경우)
     const activeItems = items.filter(e => {
       // 관리자가 종료/만료 처리한 수강은 제외
       if (e.status === 'ended' || e.status === 'expired') return false;
-      // 다음 예정 강의이 있거나, 아직 강의이 없는 경우 표시
+      // 다음 예정 강의가 있거나, 아직 강의가 없는 경우 표시
       return e.next_lesson_id || e.total_lesson_count === 0;
     });
 
@@ -6982,7 +6982,7 @@ async function loadMyPageTab(tab) {
               : '<span class="flex-1 h-8 bg-gray-200 text-gray-600 text-xs font-semibold rounded-lg flex items-center justify-center gap-1"><i class="fas fa-clock"></i> 강의 준비중</span>');
           lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><div class="flex items-center gap-2 mb-2"><span class="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-bold rounded">다음 강의</span><span class="text-[11px] text-gray-400">' + dateStr + '</span></div><p class="text-xs text-gray-600 mb-2 line-clamp-1">' + (e.next_lesson_title || '') + '</p><div class="flex gap-2">' + enterBtn + '</div></div>';
         } else {
-          lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><p class="text-xs text-gray-400 text-center">아직 예정된 강의이 없습니다</p></div>';
+          lessonSection = '<div class="mt-2 pt-2 border-t border-gray-50"><p class="text-xs text-gray-400 text-center">아직 예정된 강의가 없습니다</p></div>';
         }
 
         return '<div class="p-3 rounded-xl hover:bg-gray-50 transition-all mb-2 border border-gray-100"><a href="/class/' + e.slug + '" class="flex gap-3"><div class="relative flex-shrink-0"><img src="' + e.thumbnail + '" class="w-20 h-14 rounded-lg object-cover">' + (hasNextLesson ? '<span class="absolute -top-1 -right-1 w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center"><i class="fas fa-video text-white text-[8px]"></i></span>' : '') + '</div><div class="flex-1 min-w-0"><p class="text-sm font-medium text-dark-800 line-clamp-1">' + e.title + '</p><p class="text-xs text-gray-500">' + e.instructor_name + '</p><div class="flex items-center gap-2 mt-1"><div class="flex-1 bg-gray-200 rounded-full h-1.5"><div class="bg-primary-500 h-1.5 rounded-full" style="width:' + progress + '%"></div></div><span class="text-[10px] text-gray-400">' + (e.completed_lesson_count || 0) + '/' + (e.total_lesson_count || 0) + '</span></div></div></a>' + lessonSection + '</div>';
@@ -6991,10 +6991,10 @@ async function loadMyPageTab(tab) {
     const res = await fetch('/api/user/'+currentUser.id+'/enrollments');
     const items = await res.json();
 
-    // 완료된 수강 (종료/만료 처리되었거나, 모든 강의이 완료된 경우)
+    // 완료된 수강 (종료/만료 처리되었거나, 모든 강의가 완료된 경우)
     const completedItems = items.filter(e => {
       if (e.status === 'ended' || e.status === 'expired') return true;
-      // 강의이 있고, 다음 예정 강의이 없으면 완료
+      // 강의가 있고, 다음 예정 강의가 없으면 완료
       return e.total_lesson_count > 0 && !e.next_lesson_id;
     });
 
@@ -8554,7 +8554,7 @@ async function loadMyEnrollments() {
         '</div>' +
         '<div class="flex items-center gap-2">' + statusBadge + actionBtn + '</div>' +
       '</div>';
-    }).join('') : '<p class="text-sm text-gray-400 text-center py-4">예정된 강의이 없습니다</p>';
+    }).join('') : '<p class="text-sm text-gray-400 text-center py-4">예정된 강의가 없습니다</p>';
 
     const hasSubscription = e.subscription_status === 'active';
     const subscriptionBadge = hasSubscription
@@ -8704,7 +8704,7 @@ async function loadInstructorCourses() {
         '</div>' +
         '<div class="flex items-center gap-2">' + statusBadge + actionBtn + deleteBtn + '</div>' +
       '</div>';
-    }).join('') : '<p class="text-sm text-gray-400 text-center py-4">예정된 강의이 없습니다</p>';
+    }).join('') : '<p class="text-sm text-gray-400 text-center py-4">예정된 강의가 없습니다</p>';
 
     const safeTitle = (course.title || '').replace(/'/g, "\\\\'").replace(/"/g, '&quot;');
 
@@ -8806,7 +8806,7 @@ async function submitInstructorLessons() {
 
     if (data.success) {
       closeInstructorLessonModal();
-      alert('강의이 생성되었습니다!');
+      alert('강의가 생성되었습니다!');
       loadInstructorCourses();
     } else {
       alert(data.error || '강의 생성 실패');
@@ -8858,7 +8858,7 @@ async function deleteInstructorLesson(lessonId, lessonTitle, isRecorded) {
     const data = await res.json();
 
     if (data.success) {
-      alert('강의이 삭제되었습니다.');
+      alert('강의가 삭제되었습니다.');
       loadInstructorCourses();
     } else {
       alert(data.error || '강의 삭제에 실패했습니다.');
@@ -9175,14 +9175,14 @@ ${navHTML}
         <div class="bg-gray-500/10 backdrop-blur-sm rounded-2xl p-4 mb-6 border border-gray-500/20">
           <div class="flex items-center gap-2">
             <span class="w-5 h-5 bg-green-500 rounded-full flex items-center justify-center"><i class="fas fa-check text-white text-[10px]"></i></span>
-            <p class="text-sm font-semibold text-gray-300">강의이 완료되었습니다. 아래 버튼을 눌러 다시 보기하세요.</p>
+            <p class="text-sm font-semibold text-gray-300">강의가 완료되었습니다. 아래 버튼을 눌러 다시 보기하세요.</p>
           </div>
         </div>
         ` : `
         <div class="bg-green-500/10 backdrop-blur-sm rounded-2xl p-4 mb-6 border border-green-500/20">
           <div class="flex items-center gap-2">
             <span class="w-3 h-3 bg-green-500 rounded-full badge-live"></span>
-            <p class="text-sm font-semibold text-green-300">강의이 곧 시작됩니다! 아래 버튼을 눌러 입장하세요.</p>
+            <p class="text-sm font-semibold text-green-300">강의가 곧 시작됩니다! 아래 버튼을 눌러 입장하세요.</p>
           </div>
         </div>
         `}
@@ -9192,7 +9192,7 @@ ${navHTML}
           <i class="fas ${session.status === 'ended' ? 'fa-play-circle' : 'fa-door-open'}"></i>
           ${session.status === 'ended' ? 'ClassIn 강의 다시보기' : 'ClassIn 강의방 입장하기'}
         </a>
-        <p class="text-center text-xs text-gray-500">${session.status === 'ended' ? '녹화된 강의 영상을 다시 볼 수 있습니다' : 'ClassIn 앱 또는 웹 브라우저에서 강의이 열립니다'}</p>
+        <p class="text-center text-xs text-gray-500">${session.status === 'ended' ? '녹화된 강의 영상을 다시 볼 수 있습니다' : 'ClassIn 앱 또는 웹 브라우저에서 강의가 열립니다'}</p>
       </div>
       
       <!-- Right side: Session Info Card -->
@@ -12024,7 +12024,7 @@ app.get('/admin', async (c) => {
         closeSessionModal();
 
         if (data.success) {
-          showModal('성공', data.message || '강의이 생성되었습니다!');
+          showModal('성공', data.message || '강의가 생성되었습니다!');
           loadClasses();
         } else {
           showModal('오류', data.error || '강의 생성 실패');
