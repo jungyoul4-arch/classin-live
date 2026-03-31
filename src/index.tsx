@@ -3995,50 +3995,58 @@ app.patch('/api/admin/lessons/:lessonId', async (c) => {
 
 // 관리자: 강의 삭제
 app.delete('/api/admin/lessons/:lessonId', async (c) => {
-  const lessonId = parseInt(c.req.param('lessonId'))
+  try {
+    const lessonId = parseInt(c.req.param('lessonId'))
 
-  // 강의 정보 조회
-  const lesson = await c.env.DB.prepare(
-    'SELECT * FROM class_lessons WHERE id = ?'
-  ).bind(lessonId).first() as any
+    // 강의 정보 조회
+    const lesson = await c.env.DB.prepare(
+      'SELECT * FROM class_lessons WHERE id = ?'
+    ).bind(lessonId).first() as any
 
-  if (!lesson) {
-    return c.json({ error: '강의을 찾을 수 없습니다.' }, 404)
-  }
+    if (!lesson) {
+      return c.json({ error: '강의를 찾을 수 없습니다.' }, 404)
+    }
 
-  // 녹화 강의가 아닌 경우에만 ClassIn에서 삭제 시도 (진행중/종료된 강의은 삭제 불가)
-  const isRecorded = lesson.lesson_type === 'recorded' || !!lesson.stream_uid
-  if (!isRecorded && lesson.classin_course_id && lesson.classin_class_id) {
-    const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
-      ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
-      : null
+    // 녹화 강의가 아닌 경우에만 ClassIn에서 삭제 시도
+    const isRecorded = lesson.lesson_type === 'recorded' || !!lesson.stream_uid
+    if (!isRecorded && lesson.classin_course_id && lesson.classin_class_id) {
+      const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+        ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+        : null
 
-    if (config) {
-      const deleteResult = await deleteClassInLesson(config, lesson.classin_course_id, lesson.classin_class_id)
-      if (!deleteResult.success) {
-        // ClassIn 삭제 실패 시 에러 반환 (진행중/종료된 강의)
-        return c.json({ error: deleteResult.error || 'ClassIn 강의 삭제 실패' }, 400)
+      if (config) {
+        const deleteResult = await deleteClassInLesson(config, lesson.classin_course_id, lesson.classin_class_id)
+        if (!deleteResult.success) {
+          return c.json({ error: deleteResult.error || 'ClassIn 강의 삭제 실패' }, 400)
+        }
       }
     }
+
+    // DB에서 강의 삭제
+    await c.env.DB.prepare('DELETE FROM class_lessons WHERE id = ?').bind(lessonId).run()
+
+    // lesson_enrollments에서도 삭제 (테이블이 없을 수 있으므로 try-catch)
+    try {
+      await c.env.DB.prepare('DELETE FROM lesson_enrollments WHERE class_lesson_id = ?').bind(lessonId).run()
+    } catch (e) {
+      // lesson_enrollments 테이블이 없을 수 있음 - 무시
+    }
+
+    // 코스의 lesson_count 업데이트
+    if (lesson.class_id) {
+      const countResult = await c.env.DB.prepare(
+        'SELECT COUNT(*) as count FROM class_lessons WHERE class_id = ?'
+      ).bind(lesson.class_id).first() as any
+      await c.env.DB.prepare(
+        'UPDATE classes SET lesson_count = ? WHERE id = ?'
+      ).bind(countResult?.count || 0, lesson.class_id).run()
+    }
+
+    return c.json({ success: true, message: '강의가 삭제되었습니다.' })
+  } catch (e: any) {
+    console.error('Admin lesson delete error:', e)
+    return c.json({ error: e.message || '강의 삭제 중 오류가 발생했습니다.' }, 500)
   }
-
-  // DB에서 강의 삭제
-  await c.env.DB.prepare('DELETE FROM class_lessons WHERE id = ?').bind(lessonId).run()
-
-  // lesson_enrollments에서도 삭제
-  await c.env.DB.prepare('DELETE FROM lesson_enrollments WHERE class_lesson_id = ?').bind(lessonId).run()
-
-  // 코스의 lesson_count 업데이트
-  if (lesson.class_id) {
-    const countResult = await c.env.DB.prepare(
-      'SELECT COUNT(*) as count FROM class_lessons WHERE class_id = ?'
-    ).bind(lesson.class_id).first() as any
-    await c.env.DB.prepare(
-      'UPDATE classes SET lesson_count = ? WHERE id = ?'
-    ).bind(countResult?.count || 0, lesson.class_id).run()
-  }
-
-  return c.json({ success: true, message: '강의이 삭제되었습니다.' })
 })
 
 // 강사: 강의 삭제
@@ -10971,7 +10979,7 @@ app.get('/admin', async (c) => {
           // 녹화 강의
           statusBadge = '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">시청가능</span>';
           actionBtn = \`<button onclick="openWatchWindow(\${lesson.id})" class="px-3 py-1 bg-purple-500 hover:bg-purple-600 text-white text-xs font-medium rounded-lg">시청하기</button>\`;
-          deleteBtn = \`<button onclick="deleteAdminLesson(\${lesson.id}, '\${lesson.lesson_title.replace(/'/g, "\\\\'")}', \${courseId})" class="text-red-400 hover:text-red-600 text-xs" title="강의 삭제"><i class="fas fa-trash-alt"></i></button>\`;
+          deleteBtn = \`<button onclick="deleteAdminLesson(\${lesson.id}, '\${lesson.lesson_title.replace(/'/g, "\\\\'")}', \${courseId}, true)" class="text-red-400 hover:text-red-600 text-xs" title="강의 삭제"><i class="fas fa-trash-alt"></i></button>\`;
         } else if (lesson.isEnded) {
           statusBadge = '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600">완료</span>';
           actionBtn = lesson.replay_url
@@ -10989,7 +10997,7 @@ app.get('/admin', async (c) => {
           actionBtn = lesson.id
             ? \`<a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true" target="_blank" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium rounded-lg">강의실 입장</a>\`
             : '-';
-          deleteBtn = \`<button onclick="deleteAdminLesson(\${lesson.id}, '\${lesson.lesson_title.replace(/'/g, "\\\\'")}', \${courseId})" class="text-red-400 hover:text-red-600 text-xs" title="강의 삭제"><i class="fas fa-trash-alt"></i></button>\`;
+          deleteBtn = \`<button onclick="deleteAdminLesson(\${lesson.id}, '\${lesson.lesson_title.replace(/'/g, "\\\\'")}', \${courseId}, false)" class="text-red-400 hover:text-red-600 text-xs" title="강의 삭제"><i class="fas fa-trash-alt"></i></button>\`;
         }
 
         const rowBgClass = isRecorded ? 'bg-purple-50' : (lesson.isEnded ? 'bg-gray-100' : lesson.isLive ? 'bg-red-50' : 'bg-blue-50');
@@ -11116,8 +11124,11 @@ app.get('/admin', async (c) => {
       return '<div class="flex items-center justify-center gap-3">' + liveBtn + recordedBtn + '</div>';
     }
 
-    async function deleteAdminLesson(lessonId, lessonTitle, courseId) {
-      if (!confirm('강의 "' + lessonTitle + '"을 삭제하시겠습니까?\\n\\n주의: ClassIn에 등록된 강의도 함께 삭제됩니다.')) {
+    async function deleteAdminLesson(lessonId, lessonTitle, courseId, isRecorded) {
+      const confirmMsg = isRecorded
+        ? '녹화 강의 "' + lessonTitle + '"을 삭제하시겠습니까?'
+        : '강의 "' + lessonTitle + '"을 삭제하시겠습니까?\\n\\n주의: ClassIn에 등록된 강의도 함께 삭제됩니다.';
+      if (!confirm(confirmMsg)) {
         return;
       }
 
@@ -11125,13 +11136,13 @@ app.get('/admin', async (c) => {
         const res = await fetch('/api/admin/lessons/' + lessonId, {
           method: 'DELETE'
         });
-        const data = await res.json();
 
-        if (data.success) {
-          showModal('성공', '강의이 삭제되었습니다.');
+        if (res.ok) {
+          showModal('성공', '강의가 삭제되었습니다.');
           loadCourseLessons(courseId);
-          loadClasses(); // 코스 목록 새로고침 (강의 수 업데이트)
+          loadClasses();
         } else {
+          const data = await res.json().catch(function() { return {}; });
           showModal('오류', data.error || '강의 삭제에 실패했습니다.');
         }
       } catch (e) {
