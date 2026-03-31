@@ -14,6 +14,12 @@ type Bindings = {
   CF_STREAM_TOKEN?: string
   CF_STREAM_SIGNING_KEY_ID?: string
   CF_STREAM_SIGNING_KEY_JWK?: string  // JWK 형식의 서명 키
+  // 헥토파이낸셜 PG
+  HECTO_MID?: string
+  HECTO_LICENSE_KEY?: string
+  HECTO_AES_KEY?: string
+  HECTO_PAYMENT_SERVER?: string
+  HECTO_CANCEL_SERVER?: string
 }
 
 // Helper: 브랜드명을 환경변수로 치환
@@ -252,6 +258,241 @@ async function getSignedStreamUrl(
     return { hlsUrl: `${baseHlsUrl}?token=${token}` }
   } catch (e: any) {
     return { error: e.message || 'Failed to get signed URL' }
+  }
+}
+
+// ==================== 헥토파이낸셜 PG Integration Module ====================
+
+interface HectoConfig {
+  MID: string
+  LICENSE_KEY: string
+  AES_KEY: string
+  PAYMENT_SERVER: string
+  CANCEL_SERVER: string
+}
+
+// PKCS5 패딩 (AES256 암호화용)
+function pkcs5Pad(data: Uint8Array, blockSize: number = 16): Uint8Array {
+  const padding = blockSize - (data.length % blockSize)
+  const result = new Uint8Array(data.length + padding)
+  result.set(data)
+  result.fill(padding, data.length)
+  return result
+}
+
+// PKCS5 언패딩 (AES256 복호화용)
+function pkcs5Unpad(data: Uint8Array): Uint8Array {
+  const padding = data[data.length - 1]
+  if (padding > 16 || padding === 0) return data
+  return data.slice(0, data.length - padding)
+}
+
+// AES-256-ECB 암호화 (Web Crypto API 사용)
+async function aes256Encrypt(plainText: string, keyString: string): Promise<string> {
+  if (!plainText) return ''
+
+  const encoder = new TextEncoder()
+  const keyData = encoder.encode(keyString)
+  const plainData = encoder.encode(plainText)
+
+  // Import key
+  const key = await crypto.subtle.importKey(
+    'raw',
+    keyData,
+    { name: 'AES-CBC' },  // ECB는 직접 지원 안됨, CBC로 IV=0 사용
+    false,
+    ['encrypt']
+  )
+
+  // ECB 모드 시뮬레이션: IV를 0으로 설정하고 블록 단위로 처리
+  const paddedData = pkcs5Pad(plainData)
+  const iv = new Uint8Array(16) // 0으로 채워진 IV
+
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-CBC', iv },
+    key,
+    paddedData
+  )
+
+  // Base64 인코딩
+  const encryptedArray = new Uint8Array(encrypted)
+  return btoa(String.fromCharCode(...encryptedArray))
+}
+
+// AES-256-ECB 복호화 (Web Crypto API 사용)
+async function aes256Decrypt(cipherText: string, keyString: string): Promise<string> {
+  if (!cipherText) return ''
+
+  const encoder = new TextEncoder()
+  const keyData = encoder.encode(keyString)
+
+  // Base64 디코딩
+  const cipherData = Uint8Array.from(atob(cipherText), c => c.charCodeAt(0))
+
+  // Import key
+  const key = await crypto.subtle.importKey(
+    'raw',
+    keyData,
+    { name: 'AES-CBC' },
+    false,
+    ['decrypt']
+  )
+
+  const iv = new Uint8Array(16) // 0으로 채워진 IV
+
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-CBC', iv },
+    key,
+    cipherData
+  )
+
+  const decryptedArray = pkcs5Unpad(new Uint8Array(decrypted))
+  return new TextDecoder().decode(decryptedArray)
+}
+
+// SHA256 해시 생성
+async function sha256Hash(data: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const dataBuffer = encoder.encode(data)
+  const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer)
+  const hashArray = Array.from(new Uint8Array(hashBuffer))
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// 헥토 결제 요청 파라미터 암호화
+async function encryptHectoPaymentParams(
+  config: HectoConfig,
+  params: {
+    mchtId: string
+    method: string
+    mchtTrdNo: string
+    trdDt: string
+    trdTm: string
+    trdAmt: string
+    mchtCustNm?: string
+    cphoneNo?: string
+    email?: string
+    mchtCustId?: string
+  }
+): Promise<{ encParams: Record<string, string>; pktHash: string }> {
+  // SHA256 해시: mchtId + method + mchtTrdNo + trdDt + trdTm + trdAmt + licenseKey
+  const hashPlain = params.mchtId + params.method + params.mchtTrdNo + params.trdDt + params.trdTm + params.trdAmt + config.LICENSE_KEY
+  const pktHash = await sha256Hash(hashPlain)
+
+  // AES256 암호화 대상 파라미터
+  const encParams: Record<string, string> = {}
+
+  // 필수 암호화 파라미터
+  encParams.trdAmt = await aes256Encrypt(params.trdAmt, config.AES_KEY)
+
+  // 옵션 암호화 파라미터
+  if (params.mchtCustNm) encParams.mchtCustNm = await aes256Encrypt(params.mchtCustNm, config.AES_KEY)
+  if (params.cphoneNo) encParams.cphoneNo = await aes256Encrypt(params.cphoneNo, config.AES_KEY)
+  if (params.email) encParams.email = await aes256Encrypt(params.email, config.AES_KEY)
+  if (params.mchtCustId) encParams.mchtCustId = await aes256Encrypt(params.mchtCustId, config.AES_KEY)
+
+  return { encParams, pktHash }
+}
+
+// 헥토 결제 결과 복호화
+async function decryptHectoResultParams(
+  config: HectoConfig,
+  params: Record<string, string>
+): Promise<Record<string, string>> {
+  const decryptFields = ['mchtCustId', 'trdAmt', 'pointTrdAmt', 'cardTrdAmt', 'vtlAcntNo', 'cphoneNo', 'csrcAmt']
+  const result: Record<string, string> = { ...params }
+
+  for (const field of decryptFields) {
+    if (params[field]) {
+      try {
+        result[field] = await aes256Decrypt(params[field], config.AES_KEY)
+      } catch (e) {
+        console.log(`Failed to decrypt ${field}:`, e)
+      }
+    }
+  }
+
+  return result
+}
+
+// 헥토 노티 해시 검증
+async function verifyHectoNotiHash(
+  config: HectoConfig,
+  params: {
+    outStatCd: string
+    trdDtm: string
+    mchtId: string
+    mchtTrdNo: string
+    trdAmt: string
+    pktHash: string
+  }
+): Promise<boolean> {
+  // 해시 조합: outStatCd + trdDtm + mchtId + mchtTrdNo + trdAmt + licenseKey
+  const hashPlain = params.outStatCd + params.trdDtm + params.mchtId + params.mchtTrdNo + params.trdAmt + config.LICENSE_KEY
+  const calculatedHash = await sha256Hash(hashPlain)
+  return calculatedHash === params.pktHash
+}
+
+// 헥토 결제 취소 API 호출
+async function cancelHectoPayment(
+  config: HectoConfig,
+  params: {
+    mchtTrdNo: string
+    orgTrdNo: string
+    cnclAmt: string
+    cnclRsn?: string
+  }
+): Promise<{ success: boolean; outStatCd?: string; outRsltCd?: string; outRsltMsg?: string; error?: string }> {
+  const now = new Date()
+  const trdDt = now.toISOString().slice(0, 10).replace(/-/g, '')
+  const trdTm = now.toTimeString().slice(0, 8).replace(/:/g, '')
+
+  // SHA256 해시: trdDt + trdTm + mchtId + mchtTrdNo + cnclAmt + licenseKey
+  const hashPlain = trdDt + trdTm + config.MID + params.mchtTrdNo + params.cnclAmt + config.LICENSE_KEY
+  const pktHash = await sha256Hash(hashPlain)
+
+  // AES256 암호화
+  const encCnclAmt = await aes256Encrypt(params.cnclAmt, config.AES_KEY)
+
+  const reqBody = {
+    params: {
+      mchtId: config.MID,
+      ver: '0A19',
+      method: 'CA',
+      bizType: 'C0',
+      encCd: '23',
+      mchtTrdNo: params.mchtTrdNo,
+      trdDt,
+      trdTm,
+      mobileYn: 'N',
+      osType: 'W'
+    },
+    data: {
+      pktHash,
+      orgTrdNo: params.orgTrdNo,
+      cnclAmt: encCnclAmt,
+      crcCd: 'KRW',
+      cnclOrd: '001',
+      cnclRsn: params.cnclRsn || '고객요청'
+    }
+  }
+
+  try {
+    const response = await fetch(`${config.CANCEL_SERVER}/spay/APICancel.do`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reqBody)
+    })
+
+    const result = await response.json() as any
+    const resParams = result.params || {}
+
+    if (resParams.outStatCd === '0021') {
+      return { success: true, ...resParams }
+    }
+    return { success: false, ...resParams, error: resParams.outRsltMsg || 'Cancel failed' }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
   }
 }
 
@@ -5794,6 +6035,317 @@ app.post('/api/reviews', async (c) => {
   return c.json({ success: true })
 })
 
+// ==================== 헥토파이낸셜 PG Payment API ====================
+
+// 헥토 PG 설정 상태 확인
+app.get('/api/payment/hecto/status', async (c) => {
+  const isConfigured = !!(c.env.HECTO_MID && c.env.HECTO_LICENSE_KEY && c.env.HECTO_AES_KEY)
+  return c.json({
+    configured: isConfigured,
+    mode: c.env.HECTO_PAYMENT_SERVER?.includes('tbnpg') ? 'test' : 'production',
+    mid: c.env.HECTO_MID || ''
+  })
+})
+
+// 결제 요청 준비 (파라미터 암호화 및 해시 생성)
+app.post('/api/payment/hecto/prepare', async (c) => {
+  const {
+    classId,
+    lessonId,
+    userId,
+    amount,
+    productName,
+    customerName,
+    customerPhone,
+    customerEmail,
+    orderType  // 'class' | 'lesson' | 'subscription'
+  } = await c.req.json()
+
+  if (!c.env.HECTO_MID || !c.env.HECTO_LICENSE_KEY || !c.env.HECTO_AES_KEY) {
+    return c.json({ error: '헥토파이낸셜 PG 설정이 완료되지 않았습니다.' }, 500)
+  }
+
+  const config: HectoConfig = {
+    MID: c.env.HECTO_MID,
+    LICENSE_KEY: c.env.HECTO_LICENSE_KEY,
+    AES_KEY: c.env.HECTO_AES_KEY,
+    PAYMENT_SERVER: c.env.HECTO_PAYMENT_SERVER || 'https://tbnpg.settlebank.co.kr',
+    CANCEL_SERVER: c.env.HECTO_CANCEL_SERVER || 'https://tbgw.settlebank.co.kr'
+  }
+
+  const now = new Date()
+  const trdDt = now.toISOString().slice(0, 10).replace(/-/g, '')
+  const trdTm = now.toTimeString().slice(0, 8).replace(/:/g, '')
+  const random4 = String(Math.floor(Math.random() * 10000)).padStart(4, '0')
+  const mchtTrdNo = `PAY${trdDt}${trdTm}${random4}`
+
+  // DB에 주문 생성 (pending 상태)
+  const orderResult = await c.env.DB.prepare(`
+    INSERT INTO orders (user_id, order_type, class_id, amount, payment_method, payment_status, transaction_id)
+    VALUES (?, ?, ?, ?, 'card', 'pending', ?)
+  `).bind(userId, orderType || 'class', classId || null, amount, mchtTrdNo).run()
+  const orderId = orderResult.meta.last_row_id
+
+  // mchtParam에 주문 정보 저장 (결제 완료 후 처리용)
+  const mchtParam = JSON.stringify({ orderId, userId, classId, lessonId, orderType })
+
+  const params = {
+    mchtId: config.MID,
+    method: 'card',
+    mchtTrdNo,
+    trdDt,
+    trdTm,
+    trdAmt: String(amount),
+    mchtCustNm: customerName || '',
+    cphoneNo: customerPhone || '',
+    email: customerEmail || '',
+    mchtCustId: String(userId)
+  }
+
+  const { encParams, pktHash } = await encryptHectoPaymentParams(config, params)
+
+  // 결과 URL 생성
+  const baseUrl = c.req.url.replace(/\/api\/.*$/, '')
+
+  return c.json({
+    success: true,
+    orderId,
+    paymentParams: {
+      env: config.PAYMENT_SERVER,
+      mchtId: config.MID,
+      method: 'card',
+      mchtTrdNo,
+      trdDt,
+      trdTm,
+      mchtName: c.env.APP_NAME_KO || '클래신',
+      mchtEName: c.env.APP_NAME || 'ClassIn',
+      pmtPrdtNm: productName || '강의 결제',
+      trdAmt: encParams.trdAmt,
+      mchtCustNm: encParams.mchtCustNm || '',
+      cphoneNo: encParams.cphoneNo || '',
+      email: encParams.email || '',
+      mchtCustId: encParams.mchtCustId || '',
+      mchtParam,
+      notiUrl: `${baseUrl}/api/payment/hecto/noti`,
+      nextUrl: `${baseUrl}/api/payment/hecto/result`,
+      cancUrl: `${baseUrl}/api/payment/hecto/result`,
+      pktHash,
+      ui: {
+        type: 'popup',
+        width: '430',
+        height: '660'
+      }
+    }
+  })
+})
+
+// 결제 결과 수신 (nextUrl/cancUrl로 호출됨)
+app.post('/api/payment/hecto/result', async (c) => {
+  const formData = await c.req.parseBody()
+
+  const config: HectoConfig = {
+    MID: c.env.HECTO_MID || '',
+    LICENSE_KEY: c.env.HECTO_LICENSE_KEY || '',
+    AES_KEY: c.env.HECTO_AES_KEY || '',
+    PAYMENT_SERVER: c.env.HECTO_PAYMENT_SERVER || '',
+    CANCEL_SERVER: c.env.HECTO_CANCEL_SERVER || ''
+  }
+
+  // 결과 파라미터 복호화
+  const params: Record<string, string> = {}
+  for (const [key, value] of Object.entries(formData)) {
+    params[key] = String(value)
+  }
+
+  const decryptedParams = await decryptHectoResultParams(config, params)
+
+  // 결과 페이지 HTML 반환 (부모창으로 결과 전달)
+  const resultHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>결제 결과</title>
+  <style>
+    body { font-family: 'Noto Sans KR', sans-serif; padding: 20px; text-align: center; }
+    .result { max-width: 400px; margin: 50px auto; padding: 30px; border: 1px solid #e5e7eb; border-radius: 12px; }
+    .success { background-color: #f0fdf4; border-color: #22c55e; }
+    .fail { background-color: #fef2f2; border-color: #ef4444; }
+    h2 { margin-bottom: 20px; }
+    .btn { display: inline-block; padding: 12px 24px; background: #e11d48; color: white; border-radius: 8px; text-decoration: none; cursor: pointer; border: none; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <div class="result ${decryptedParams.outStatCd === '0021' ? 'success' : 'fail'}">
+    <h2>${decryptedParams.outStatCd === '0021' ? '결제 완료' : '결제 실패'}</h2>
+    <p>${decryptedParams.outRsltMsg || ''}</p>
+    <p>주문번호: ${decryptedParams.mchtTrdNo || ''}</p>
+    ${decryptedParams.outStatCd === '0021' ? `<p>거래금액: ${Number(decryptedParams.trdAmt || 0).toLocaleString()}원</p>` : ''}
+    <button class="btn" onclick="sendResult()">확인</button>
+  </div>
+  <script>
+    var _PAY_RESULT = ${JSON.stringify(decryptedParams)};
+    function sendResult() {
+      if (window.opener) {
+        window.opener.postMessage({ type: 'HECTO_PAYMENT_RESULT', data: _PAY_RESULT }, '*');
+        window.close();
+      } else if (window.parent) {
+        window.parent.postMessage({ type: 'HECTO_PAYMENT_RESULT', data: _PAY_RESULT }, '*');
+      } else {
+        window.location.href = '/my/orders';
+      }
+    }
+  </script>
+</body>
+</html>`
+
+  return c.html(resultHtml)
+})
+
+// 결제 노티 수신 (서버간 통신, notiUrl로 호출됨)
+app.post('/api/payment/hecto/noti', async (c) => {
+  const formData = await c.req.parseBody()
+
+  const config: HectoConfig = {
+    MID: c.env.HECTO_MID || '',
+    LICENSE_KEY: c.env.HECTO_LICENSE_KEY || '',
+    AES_KEY: c.env.HECTO_AES_KEY || '',
+    PAYMENT_SERVER: c.env.HECTO_PAYMENT_SERVER || '',
+    CANCEL_SERVER: c.env.HECTO_CANCEL_SERVER || ''
+  }
+
+  const params: Record<string, string> = {}
+  for (const [key, value] of Object.entries(formData)) {
+    params[key] = String(value)
+  }
+
+  console.log('[Hecto Noti] Received:', JSON.stringify(params))
+
+  // 해시 검증
+  const isValidHash = await verifyHectoNotiHash(config, {
+    outStatCd: params.outStatCd || '',
+    trdDtm: params.trdDtm || '',
+    mchtId: params.mchtId || '',
+    mchtTrdNo: params.mchtTrdNo || '',
+    trdAmt: params.trdAmt || '',
+    pktHash: params.pktHash || ''
+  })
+
+  if (!isValidHash) {
+    console.log('[Hecto Noti] Hash verification failed')
+    return c.text('FAIL')
+  }
+
+  // 결제 성공 처리 (outStatCd: 0021 = 성공, 0051 = 입금대기)
+  if (params.outStatCd === '0021') {
+    try {
+      // mchtParam에서 주문 정보 추출
+      const mchtParam = JSON.parse(params.mchtParam || '{}')
+      const { orderId, userId, classId, lessonId, orderType } = mchtParam
+
+      // 주문 상태 업데이트
+      await c.env.DB.prepare(`
+        UPDATE orders SET payment_status = 'completed', transaction_id = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).bind(params.trdNo || params.mchtTrdNo, orderId).run()
+
+      // 수강 등록 처리
+      if (orderType === 'lesson' && lessonId) {
+        // 강의별 등록
+        await c.env.DB.prepare(`
+          INSERT INTO lesson_enrollments (user_id, class_lesson_id, payment_id, status)
+          VALUES (?, ?, ?, 'active')
+          ON CONFLICT(user_id, class_lesson_id) DO UPDATE SET status = 'active'
+        `).bind(userId, lessonId, orderId).run()
+      } else if (classId) {
+        // 코스 등록
+        await c.env.DB.prepare(`
+          INSERT INTO enrollments (user_id, class_id, status)
+          VALUES (?, ?, 'active')
+          ON CONFLICT(user_id, class_id) DO UPDATE SET status = 'active', updated_at = datetime('now')
+        `).bind(userId, classId).run()
+
+        // 수강생 수 업데이트
+        await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(classId).run()
+
+        // 장바구니에서 제거
+        await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, classId).run()
+      }
+
+      console.log('[Hecto Noti] Payment success processed:', params.mchtTrdNo)
+      return c.text('OK')
+    } catch (e: any) {
+      console.log('[Hecto Noti] Error processing payment:', e.message)
+      return c.text('FAIL')
+    }
+  } else if (params.outStatCd === '0051') {
+    // 입금대기 (가상계좌)
+    console.log('[Hecto Noti] Waiting for deposit:', params.mchtTrdNo)
+    return c.text('OK')
+  }
+
+  return c.text('FAIL')
+})
+
+// 결제 취소 API
+app.post('/api/payment/hecto/cancel', async (c) => {
+  const { orderId, reason } = await c.req.json()
+
+  if (!c.env.HECTO_MID || !c.env.HECTO_LICENSE_KEY || !c.env.HECTO_AES_KEY) {
+    return c.json({ error: '헥토파이낸셜 PG 설정이 완료되지 않았습니다.' }, 500)
+  }
+
+  // 주문 정보 조회
+  const order = await c.env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(orderId).first() as any
+  if (!order) {
+    return c.json({ error: '주문을 찾을 수 없습니다.' }, 404)
+  }
+
+  if (order.payment_status !== 'completed') {
+    return c.json({ error: '취소할 수 없는 주문 상태입니다.' }, 400)
+  }
+
+  const config: HectoConfig = {
+    MID: c.env.HECTO_MID,
+    LICENSE_KEY: c.env.HECTO_LICENSE_KEY,
+    AES_KEY: c.env.HECTO_AES_KEY,
+    PAYMENT_SERVER: c.env.HECTO_PAYMENT_SERVER || 'https://tbnpg.settlebank.co.kr',
+    CANCEL_SERVER: c.env.HECTO_CANCEL_SERVER || 'https://tbgw.settlebank.co.kr'
+  }
+
+  const now = new Date()
+  const mchtTrdNo = `CNCL${now.toISOString().slice(0, 10).replace(/-/g, '')}${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`
+
+  const cancelResult = await cancelHectoPayment(config, {
+    mchtTrdNo,
+    orgTrdNo: order.transaction_id,
+    cnclAmt: String(order.amount),
+    cnclRsn: reason || '고객요청'
+  })
+
+  if (cancelResult.success) {
+    // 주문 상태 업데이트
+    await c.env.DB.prepare(`
+      UPDATE orders SET payment_status = 'cancelled', updated_at = datetime('now')
+      WHERE id = ?
+    `).bind(orderId).run()
+
+    // 수강 취소 처리
+    if (order.class_id) {
+      await c.env.DB.prepare(`
+        UPDATE enrollments SET status = 'cancelled', updated_at = datetime('now')
+        WHERE user_id = ? AND class_id = ?
+      `).bind(order.user_id, order.class_id).run()
+
+      await c.env.DB.prepare('UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?').bind(order.class_id).run()
+    }
+
+    return c.json({ success: true, message: '결제가 취소되었습니다.' })
+  }
+
+  return c.json({ success: false, error: cancelResult.error || '결제 취소에 실패했습니다.' }, 500)
+})
+
 // ==================== HTML Pages ====================
 
 const headHTML = `<!DOCTYPE html>
@@ -6497,57 +7049,140 @@ function formatExpiry(input) {
   input.value = v;
 }
 
+// 헥토파이낸셜 PG SDK 로드
+let hectoSdkLoaded = false;
+async function loadHectoSdk(serverUrl) {
+  if (hectoSdkLoaded) return;
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = serverUrl + '/resources/js/v1/SettlePG_v1.2.js';
+    script.onload = () => { hectoSdkLoaded = true; resolve(); };
+    script.onerror = () => reject(new Error('Failed to load Hecto PG SDK'));
+    document.head.appendChild(script);
+  });
+}
+
+// 헥토 결제 결과 수신 리스너
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'HECTO_PAYMENT_RESULT') {
+    const result = e.data.data;
+    const btn = document.getElementById('payButton');
+    if (btn) { btn.disabled = false; btn.innerHTML = '결제하기'; }
+
+    if (result.outStatCd === '0021') {
+      // 결제 성공
+      closePaymentModal();
+      document.getElementById('successModal').classList.remove('hidden');
+      document.getElementById('successMessage').textContent = '결제가 완료되었습니다! (주문번호: ' + result.mchtTrdNo + ')';
+      document.getElementById('classinSessionInfo').classList.add('hidden');
+    } else {
+      // 결제 실패
+      showError('paymentError', result.outRsltMsg || '결제에 실패했습니다.');
+    }
+  }
+});
+
 async function processPayment() {
   const agree = document.getElementById('paymentAgree').checked;
   if (!agree) { showError('paymentError', '결제 동의에 체크해주세요.'); return; }
-  
+
   const btn = document.getElementById('payButton');
-  btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>결제 처리 중...';
-  
+  btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>결제 준비 중...';
+
   try {
-    const body = {
-      userId: currentUser.id,
-      classId: paymentData.id || null,
-      lessonId: paymentData.lessonId || null,
-      paymentMethod: paymentData.paymentMethod || 'card',
-      cardNumber: document.getElementById('cardNumber')?.value?.replace(/\\s/g,'') || '',
-      cardExpiry: document.getElementById('cardExpiry')?.value || '',
-      cardCvc: document.getElementById('cardCvc')?.value || '',
-      amount: paymentData.price,
-      orderType: paymentData.orderType || 'class',
-      subscriptionPlan: paymentData.subscriptionPlan || null
-    };
-    
-    // Simulate processing delay
-    await new Promise(r => setTimeout(r, 1500));
-    
-    const res = await fetch('/api/payment/process', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    const data = await res.json();
-    
-    if (data.success) {
-      closePaymentModal();
-      document.getElementById('successModal').classList.remove('hidden');
-      document.getElementById('successMessage').textContent = data.message + ' (거래번호: ' + data.transactionId + ')';
-      
-      // Show ClassIn session info if available
-      if (data.classinSession && data.classinSession.joinUrl) {
-        const infoDiv = document.getElementById('classinSessionInfo');
-        infoDiv.classList.remove('hidden');
-        document.getElementById('classinJoinUrlText').textContent = data.classinSession.joinUrl;
-        document.getElementById('classinClassIdText').textContent = '강의 ID: ' + (data.classinSession.classId || '');
-        document.getElementById('classinJoinBtn').href = data.classinSession.joinUrl;
-        document.getElementById('classinModeTag').textContent = data.classinSession.isDemo ? 'DEMO MODE - 실제 API 키 설정 시 ClassIn 연동' : 'ClassIn API 연동됨';
+    // 헥토 PG 설정 확인
+    const statusRes = await fetch('/api/payment/hecto/status');
+    const statusData = await statusRes.json();
+
+    if (!statusData.configured) {
+      // PG 미설정시 기존 데모 결제로 fallback
+      const body = {
+        userId: currentUser.id,
+        classId: paymentData.id || null,
+        lessonId: paymentData.lessonId || null,
+        paymentMethod: paymentData.paymentMethod || 'card',
+        cardNumber: document.getElementById('cardNumber')?.value?.replace(/\\s/g,'') || '',
+        cardExpiry: document.getElementById('cardExpiry')?.value || '',
+        cardCvc: document.getElementById('cardCvc')?.value || '',
+        amount: paymentData.price,
+        orderType: paymentData.orderType || 'class',
+        subscriptionPlan: paymentData.subscriptionPlan || null
+      };
+
+      await new Promise(r => setTimeout(r, 1500));
+      const res = await fetch('/api/payment/process', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      const data = await res.json();
+
+      if (data.success) {
+        closePaymentModal();
+        document.getElementById('successModal').classList.remove('hidden');
+        document.getElementById('successMessage').textContent = data.message + ' (거래번호: ' + data.transactionId + ')';
+        if (data.classinSession && data.classinSession.joinUrl) {
+          const infoDiv = document.getElementById('classinSessionInfo');
+          infoDiv.classList.remove('hidden');
+          document.getElementById('classinJoinUrlText').textContent = data.classinSession.joinUrl;
+          document.getElementById('classinClassIdText').textContent = '강의 ID: ' + (data.classinSession.classId || '');
+          document.getElementById('classinJoinBtn').href = data.classinSession.joinUrl;
+          document.getElementById('classinModeTag').textContent = data.classinSession.isDemo ? 'DEMO MODE - 실제 API 키 설정 시 ClassIn 연동' : 'ClassIn API 연동됨';
+        } else {
+          document.getElementById('classinSessionInfo').classList.add('hidden');
+        }
       } else {
-        document.getElementById('classinSessionInfo').classList.add('hidden');
+        showError('paymentError', data.error || '결제에 실패했습니다.');
       }
-    } else {
-      showError('paymentError', data.error || '결제에 실패했습니다.');
+      btn.disabled = false; btn.innerHTML = '결제하기';
+      return;
     }
+
+    // 헥토 PG 결제 진행
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>결제창 로딩 중...';
+
+    // 결제 파라미터 준비
+    const prepareRes = await fetch('/api/payment/hecto/prepare', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        classId: paymentData.id || null,
+        lessonId: paymentData.lessonId || null,
+        userId: currentUser.id,
+        amount: paymentData.price,
+        productName: paymentData.title || '강의 결제',
+        customerName: currentUser.name || '',
+        customerPhone: currentUser.phone || '',
+        customerEmail: currentUser.email || '',
+        orderType: paymentData.orderType || 'class'
+      })
+    });
+    const prepareData = await prepareRes.json();
+
+    if (!prepareData.success) {
+      showError('paymentError', prepareData.error || '결제 준비에 실패했습니다.');
+      btn.disabled = false; btn.innerHTML = '결제하기';
+      return;
+    }
+
+    // 헥토 PG SDK 로드
+    await loadHectoSdk(prepareData.paymentParams.env);
+
+    // 결제창 호출
+    SETTLE_PG.pay(prepareData.paymentParams, function(rsp) {
+      // iframe 방식일 때 콜백
+      if (rsp.outStatCd === '0021') {
+        closePaymentModal();
+        document.getElementById('successModal').classList.remove('hidden');
+        document.getElementById('successMessage').textContent = '결제가 완료되었습니다! (주문번호: ' + rsp.mchtTrdNo + ')';
+        document.getElementById('classinSessionInfo').classList.add('hidden');
+      } else {
+        showError('paymentError', rsp.outRsltMsg || '결제에 실패했습니다.');
+      }
+      btn.disabled = false; btn.innerHTML = '결제하기';
+    });
+
   } catch(e) {
+    console.error('Payment error:', e);
     showError('paymentError', '결제 처리 중 오류가 발생했습니다.');
+    btn.disabled = false; btn.innerHTML = '결제하기';
   }
-  
-  btn.disabled = false; btn.innerHTML = '결제하기';
 }
 
 function closeSuccessModal() {

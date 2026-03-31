@@ -9,7 +9,13 @@
     "APP_NAME_KO": "클래신 티쳐스",
     "APP_BADGE": "TEACHERS",
     "CLASSIN_SID": "86799720",
-    "CLASSIN_SECRET": "ReldwKsx"
+    "CLASSIN_SECRET": "ReldwKsx",
+    // 헥토파이낸셜 PG 설정 (테스트값, 운영시 Cloudflare 대시보드에서 설정)
+    "HECTO_MID": "nxca_jt_il",
+    "HECTO_LICENSE_KEY": "ST1009281328226982205",
+    "HECTO_AES_KEY": "pgSettle30y739r82jtd709yOfZ2yK5K",
+    "HECTO_PAYMENT_SERVER": "https://tbnpg.settlebank.co.kr",
+    "HECTO_CANCEL_SERVER": "https://tbgw.settlebank.co.kr"
     // Cloudflare Stream (녹화 강의 스트리밍용) - 대시보드에서 설정
     // "CF_ACCOUNT_ID": "your-account-id",
     // "CF_STREAM_TOKEN": "your-stream-api-token"
