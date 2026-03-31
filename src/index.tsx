@@ -454,7 +454,7 @@ async function createClassInLesson(
         joinUrl: data.data.live_url || `https://www.eeo.cn/client/invoke/index.html?classId=${data.data.classId}&courseId=${courseId}&schoolId=${config.SID}`
       }
     }
-    return { success: false, error: data.msg || 'Failed to create lesson via LMS API' }
+    return { success: false, error: translateClassInError(data.msg || 'Failed to create lesson via LMS API') }
   } catch (e: any) {
     return { success: false, error: e.message || 'Network error' }
   }
