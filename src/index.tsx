@@ -5405,6 +5405,7 @@ app.get('/api/classin/lesson-enter/:lessonId', async (c) => {
 app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
   const lessonId = c.req.param('lessonId')
   const shouldRedirect = c.req.query('redirect') === 'true'
+  const mode = c.req.query('mode') || 'instructor'  // 'instructor' (강사) or 'observer' (청강생)
 
   // Get lesson info with instructor details (including virtual account)
   const lesson = await c.env.DB.prepare(`
@@ -5509,20 +5510,21 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
     return c.json({ error: errorMsg }, 400)
   }
 
-  // 코스에 학생(identity=1)으로 추가 (authTicket URL과 identity 일치 필요)
+  // 코스에 추가 (mode에 따라 강사 또는 청강생으로)
   // 강의 생성 시 이미 teacherUid로 설정되어 있어서 교실 내 강사 권한은 유지됨
   const addToCourseResult = await addStudentToCourse(classInConfig, lesson.classin_course_id, instructorUid)
   console.log('addStudentToCourse (instructor) result:', JSON.stringify(addToCourseResult))
 
-  // Generate fresh login URL with token (identity=1: authTicket 발급을 위해 학생으로 설정)
-  // 실제 교실 권한은 addTeacherToCourse에서 identity=3으로 설정됨
+  // Generate fresh login URL with token
+  // mode=instructor: identity=3 (강사), mode=observer: identity=2 (청강생)
+  const identity = mode === 'observer' ? 2 : 3
   const loginUrlResult = await getClassInLoginUrl(
     classInConfig,
     instructorUid,  // ClassIn UID 사용
     lesson.classin_course_id,
     lesson.classin_class_id,
     1,  // PC
-    1   // 학생 identity로 URL 생성 (authTicket 발급)
+    identity  // 강사(3) 또는 청강생(2)
   )
   console.log('getClassInLoginUrl result:', JSON.stringify(loginUrlResult))
 
@@ -11008,13 +11010,25 @@ app.get('/admin', async (c) => {
         } else if (lesson.isLive) {
           statusBadge = '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-500 text-white animate-pulse">진행중</span>';
           actionBtn = lesson.id
-            ? \`<a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true" target="_blank" class="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs font-medium rounded-lg">강의실 입장</a>\`
+            ? \`<div class="relative inline-block">
+                <button onclick="toggleEnterMenu(\${lesson.id})" class="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs font-medium rounded-lg">강의실 입장 <i class="fas fa-caret-down ml-1"></i></button>
+                <div id="enterMenu_\${lesson.id}" class="hidden absolute right-0 mt-1 w-32 bg-white rounded-lg shadow-lg border z-50">
+                  <a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true&mode=instructor" target="_blank" class="block px-3 py-2 text-xs text-gray-700 hover:bg-gray-100 rounded-t-lg">강사로 입장</a>
+                  <a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true&mode=observer" target="_blank" class="block px-3 py-2 text-xs text-gray-700 hover:bg-gray-100 rounded-b-lg">청강생으로 입장</a>
+                </div>
+              </div>\`
             : '-';
           deleteBtn = '<span class="text-gray-300 text-xs" title="진행중인 강의는 삭제 불가"><i class="fas fa-trash-alt"></i></span>';
         } else {
           statusBadge = '<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">예정</span>';
           actionBtn = lesson.id
-            ? \`<a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true" target="_blank" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium rounded-lg">강의실 입장</a>\`
+            ? \`<div class="relative inline-block">
+                <button onclick="toggleEnterMenu(\${lesson.id})" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium rounded-lg">강의실 입장 <i class="fas fa-caret-down ml-1"></i></button>
+                <div id="enterMenu_\${lesson.id}" class="hidden absolute right-0 mt-1 w-32 bg-white rounded-lg shadow-lg border z-50">
+                  <a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true&mode=instructor" target="_blank" class="block px-3 py-2 text-xs text-gray-700 hover:bg-gray-100 rounded-t-lg">강사로 입장</a>
+                  <a href="/api/classin/instructor-enter/\${lesson.id}?redirect=true&mode=observer" target="_blank" class="block px-3 py-2 text-xs text-gray-700 hover:bg-gray-100 rounded-b-lg">청강생으로 입장</a>
+                </div>
+              </div>\`
             : '-';
           deleteBtn = \`<button onclick="deleteAdminLesson(\${lesson.id}, '\${lesson.lesson_title.replace(/'/g, "\\\\'")}', \${courseId}, false)" class="text-red-400 hover:text-red-600 text-xs" title="강의 삭제"><i class="fas fa-trash-alt"></i></button>\`;
         }
@@ -11142,6 +11156,20 @@ app.get('/admin', async (c) => {
 
       return '<div class="flex items-center justify-center gap-3">' + liveBtn + recordedBtn + '</div>';
     }
+
+    function toggleEnterMenu(lessonId) {
+      const menu = document.getElementById('enterMenu_' + lessonId);
+      const isHidden = menu.classList.contains('hidden');
+      // 다른 메뉴 닫기
+      document.querySelectorAll('[id^="enterMenu_"]').forEach(m => m.classList.add('hidden'));
+      if (isHidden) menu.classList.remove('hidden');
+    }
+    // 외부 클릭 시 메뉴 닫기
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('[id^="enterMenu_"]') && !e.target.closest('button[onclick^="toggleEnterMenu"]')) {
+        document.querySelectorAll('[id^="enterMenu_"]').forEach(m => m.classList.add('hidden'));
+      }
+    });
 
     async function deleteAdminLesson(lessonId, lessonTitle, courseId, isRecorded) {
       const confirmMsg = isRecorded
