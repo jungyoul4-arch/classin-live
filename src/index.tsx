@@ -8843,8 +8843,8 @@ async function checkLessonStatus(lessonId) {
 
 async function deleteInstructorLesson(lessonId, lessonTitle, isRecorded) {
   const confirmMsg = isRecorded
-    ? '녹화 강의 "' + lessonTitle + '"을 삭제하시겠습니까?'
-    : '강의 "' + lessonTitle + '"을 삭제하시겠습니까?\\n\\n주의: ClassIn에 등록된 강의도 함께 삭제됩니다.';
+    ? '녹화 강의(' + lessonTitle + ')를 삭제하시겠습니까?'
+    : '강의(' + lessonTitle + ')를 삭제하시겠습니까?\\n\\n주의: ClassIn에 등록된 강의도 함께 삭제됩니다.';
   if (!confirm(confirmMsg)) {
     return;
   }
@@ -11126,8 +11126,8 @@ app.get('/admin', async (c) => {
 
     async function deleteAdminLesson(lessonId, lessonTitle, courseId, isRecorded) {
       const confirmMsg = isRecorded
-        ? '녹화 강의 "' + lessonTitle + '"을 삭제하시겠습니까?'
-        : '강의 "' + lessonTitle + '"을 삭제하시겠습니까?\\n\\n주의: ClassIn에 등록된 강의도 함께 삭제됩니다.';
+        ? '녹화 강의(' + lessonTitle + ')를 삭제하시겠습니까?'
+        : '강의(' + lessonTitle + ')를 삭제하시겠습니까?\\n\\n주의: ClassIn에 등록된 강의도 함께 삭제됩니다.';
       if (!confirm(confirmMsg)) {
         return;
       }
