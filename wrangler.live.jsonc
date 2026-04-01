@@ -10,9 +10,9 @@
     "APP_BADGE": "LIVE",
     "USE_INSTRUCTOR_VIRTUAL_ACCOUNT": "false",
     // 헥토파이낸셜 PG 설정 (테스트값, 운영시 Cloudflare 대시보드에서 설정)
-    "HECTO_MID": "nxca_jt_il",
-    "HECTO_LICENSE_KEY": "ST1009281328226982205",
-    "HECTO_AES_KEY": "pgSettle30y739r82jtd709yOfZ2yK5K",
+    "HECTO_MID": "jungyoul3",
+    "HECTO_LICENSE_KEY": "ST2603311528473489564",
+    "HECTO_AES_KEY": "WI8YPMkKS5CNVF1595g9U46BRHG80k1a",
     "HECTO_PAYMENT_SERVER": "https://tbnpg.settlebank.co.kr",
     "HECTO_CANCEL_SERVER": "https://tbgw.settlebank.co.kr"
     // Cloudflare Stream (녹화 강의 스트리밍용) - 대시보드에서 설정

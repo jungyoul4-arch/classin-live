@@ -1833,9 +1833,19 @@ app.post('/api/auth/login', async (c) => {
 
 // Simple auth - register
 app.post('/api/auth/register', async (c) => {
-  const { email, password, name } = await c.req.json()
+  const { email, password, name, testCode } = await c.req.json()
+
+  // 테스트 코드 검증 (CLASSIN-TEST-2024)
+  const VALID_TEST_CODE = 'CLASSIN-TEST-2024'
+  const isTestAccount = testCode?.toUpperCase() === VALID_TEST_CODE
+  const testExpiresAt = isTestAccount
+    ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ')
+    : null
+
   try {
-    const result = await c.env.DB.prepare('INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)').bind(email, `hash_${password}`, name).run()
+    const result = await c.env.DB.prepare(
+      'INSERT INTO users (email, password_hash, name, is_test_account, test_expires_at) VALUES (?, ?, ?, ?, ?)'
+    ).bind(email, `hash_${password}`, name, isTestAccount ? 1 : 0, testExpiresAt).run()
     const userId = result.meta.last_row_id
     const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, is_test_account, test_expires_at FROM users WHERE id = ?').bind(userId).first() as any
 
@@ -1844,7 +1854,12 @@ app.post('/api/auth/register', async (c) => {
     const payload = btoa(JSON.stringify({ sub: user.id, email: user.email, role: user.role || 'user', exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }))
     const token = `${header}.${payload}.`
 
-    return c.json({ user, token })
+    return c.json({
+      user,
+      token,
+      testCodeApplied: isTestAccount,
+      message: isTestAccount ? '테스트 코드가 적용되었습니다. 30일간 무료 수강 가능합니다!' : undefined
+    })
   } catch (e: any) {
     if (e.message?.includes('UNIQUE')) return c.json({ error: '이미 등록된 이메일입니다.' }, 400)
     return c.json({ error: '회원가입에 실패했습니다.' }, 500)
@@ -6239,7 +6254,7 @@ app.post('/api/payment/hecto/prepare', async (c) => {
   const orderId = orderResult.meta.last_row_id
 
   // mchtParam에 주문 정보 저장 (결제 완료 후 처리용)
-  const mchtParam = JSON.stringify({ orderId, userId, classId, lessonId, orderType })
+  const mchtParam = `${orderId}|${userId}|${classId || ''}|${lessonId || ''}|${orderType || 'class'}`
 
   const params = {
     mchtId: config.MID,
@@ -6265,8 +6280,13 @@ app.post('/api/payment/hecto/prepare', async (c) => {
     paymentParams: {
       env: config.PAYMENT_SERVER,
       mchtId: config.MID,
+      ver: '0A19',
       method: 'card',
+      bizType: 'B0',
+      encCd: '23',
       mchtTrdNo,
+      mobileYn: 'N',
+      osType: 'W',
       trdDt,
       trdTm,
       mchtName: c.env.APP_NAME_KO || '클래신',
@@ -6391,9 +6411,13 @@ app.post('/api/payment/hecto/noti', async (c) => {
   // 결제 성공 처리 (outStatCd: 0021 = 성공, 0051 = 입금대기)
   if (params.outStatCd === '0021') {
     try {
-      // mchtParam에서 주문 정보 추출
-      const mchtParam = JSON.parse(params.mchtParam || '{}')
-      const { orderId, userId, classId, lessonId, orderType } = mchtParam
+      // mchtParam에서 주문 정보 추출 (파이프 구분)
+      const mchtParamParts = (params.mchtParam || '').split('|')
+      const orderId = parseInt(mchtParamParts[0]) || 0
+      const userId = parseInt(mchtParamParts[1]) || 0
+      const classId = parseInt(mchtParamParts[2]) || null
+      const lessonId = parseInt(mchtParamParts[3]) || null
+      const orderType = mchtParamParts[4] || 'class'
 
       // 주문 상태 업데이트
       await c.env.DB.prepare(`
@@ -6702,6 +6726,11 @@ const modalsHTML = `
           <label class="block text-sm font-medium text-dark-700 mb-1">비밀번호</label>
           <input type="password" id="regPassword" placeholder="8자 이상 입력" class="w-full h-11 px-4 border border-gray-200 rounded-xl text-sm">
         </div>
+        <div>
+          <label class="block text-sm font-medium text-dark-700 mb-1"><i class="fas fa-flask text-purple-500 mr-1"></i>테스트 코드 <span class="text-gray-400 font-normal">(선택)</span></label>
+          <input type="text" id="regTestCode" placeholder="테스트 코드가 있으면 입력하세요" class="w-full h-11 px-4 border border-gray-200 rounded-xl text-sm uppercase" style="text-transform: uppercase;">
+          <p class="text-xs text-purple-600 mt-1"><i class="fas fa-info-circle mr-1"></i>테스트 코드 입력 시 30일간 무료 수강 가능</p>
+        </div>
         <label class="flex items-start gap-2 text-xs text-gray-500"><input type="checkbox" id="agreeTerms" class="mt-0.5 accent-primary-500"> <span>이용약관 및 개인정보처리방침에 동의합니다</span></label>
         <button onclick="handleRegister()" class="w-full h-11 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-xl transition-all">가입하기</button>
         <p class="text-center text-sm text-gray-500">이미 계정이 있으신가요? <button onclick="switchAuth('login')" class="text-primary-500 font-semibold hover:underline">로그인</button></p>
@@ -6929,11 +6958,12 @@ async function handleRegister() {
   const name = document.getElementById('regName').value;
   const email = document.getElementById('regEmail').value;
   const password = document.getElementById('regPassword').value;
+  const testCode = document.getElementById('regTestCode')?.value?.trim().toUpperCase() || '';
   const agree = document.getElementById('agreeTerms').checked;
   if (!name || !email || !password) { showError('regError', '모든 항목을 입력해주세요.'); return; }
   if (!agree) { showError('regError', '이용약관에 동의해주세요.'); return; }
   try {
-    const res = await fetch('/api/auth/register', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email, password, name}) });
+    const res = await fetch('/api/auth/register', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email, password, name, testCode}) });
     const data = await res.json();
     if (!res.ok) { showError('regError', data.error); return; }
     currentUser = data.user; currentToken = data.token;
@@ -7193,6 +7223,7 @@ window.addEventListener('message', function(e) {
 });
 
 async function processPayment() {
+  alert('processPayment called!');
   const agree = document.getElementById('paymentAgree').checked;
   if (!agree) { showError('paymentError', '결제 동의에 체크해주세요.'); return; }
 
@@ -7272,9 +7303,13 @@ async function processPayment() {
     }
 
     // 헥토 PG SDK 로드
+    console.log('Loading Hecto SDK from:', prepareData.paymentParams.env);
+    console.log('Payment params:', JSON.stringify(prepareData.paymentParams, null, 2));
+    alert('Payment params loaded. Check console for details. mchtParam: ' + prepareData.paymentParams.mchtParam);
     await loadHectoSdk(prepareData.paymentParams.env);
 
     // 결제창 호출
+    console.log('Calling SETTLE_PG.pay...');
     SETTLE_PG.pay(prepareData.paymentParams, function(rsp) {
       // iframe 방식일 때 콜백
       if (rsp.outStatCd === '0021') {
