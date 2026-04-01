@@ -8,6 +8,7 @@
     "APP_NAME": "ClassIn Teachers",
     "APP_NAME_KO": "클래신 티쳐스",
     "APP_BADGE": "TEACHERS",
+    "USE_INSTRUCTOR_VIRTUAL_ACCOUNT": "true",
     "CLASSIN_SID": "86799720",
     "CLASSIN_SECRET": "ReldwKsx",
     // 헥토파이낸셜 PG 설정 (테스트값, 운영시 Cloudflare 대시보드에서 설정)
