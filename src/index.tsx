@@ -2088,9 +2088,9 @@ app.post('/api/instructor/classes/:classId/create-sessions', async (c) => {
   const classId = parseInt(c.req.param('classId'))
   const { lessons, userId } = await c.req.json()
 
-  // 강사 확인
+  // 강사 확인 (가상계정 포함)
   const instructor = await c.env.DB.prepare(`
-    SELECT i.id, i.classin_uid FROM instructors i
+    SELECT i.id, i.classin_uid, i.classin_virtual_account, i.display_name FROM instructors i
     JOIN users u ON i.user_id = u.id
     WHERE u.id = ? AND u.role = 'instructor'
   `).bind(userId).first() as any
@@ -2120,11 +2120,83 @@ app.post('/api/instructor/classes/:classId/create-sessions', async (c) => {
     return c.json({ error: 'ClassIn API가 설정되지 않았습니다.' }, 500)
   }
 
-  if (!instructor.classin_uid) {
-    return c.json({ error: '강사가 ClassIn에 등록되지 않았습니다.' }, 400)
-  }
+  // 환경에 따라 가상계정 또는 실제 강사 계정 사용
+  const useVirtualAccount = c.env.USE_INSTRUCTOR_VIRTUAL_ACCOUNT === 'true'
 
-  const teacherUid = instructor.classin_uid
+  let virtualAccount = ''
+  let teacherUid = ''
+
+  if (useVirtualAccount) {
+    // T(teachers): 가상계정 사용
+    virtualAccount = instructor.classin_virtual_account || ''
+
+    if (!virtualAccount) {
+      const available = await c.env.DB.prepare(`
+        SELECT * FROM classin_virtual_accounts
+        WHERE status = 'available' AND (is_registered = 0 OR is_registered IS NULL) AND (expires_at IS NULL OR expires_at > datetime('now'))
+        ORDER BY id LIMIT 1
+      `).first() as any
+
+      if (!available) {
+        return c.json({ error: '사용 가능한 가상계정이 없습니다.' }, 400)
+      }
+
+      virtualAccount = available.account_uid
+
+      // 강사에게 가상계정 할당
+      await c.env.DB.prepare(`UPDATE instructors SET classin_virtual_account = ? WHERE id = ?`)
+        .bind(virtualAccount, instructor.id).run()
+
+      // 가상계정 상태 업데이트
+      await c.env.DB.prepare(`
+        UPDATE classin_virtual_accounts
+        SET status = 'assigned', assigned_name = ?, assigned_at = datetime('now')
+        WHERE id = ?
+      `).bind('INSTRUCTOR:' + instructor.display_name, available.id).run()
+
+      console.log('Assigned virtual account to instructor:', virtualAccount)
+    }
+
+    // 가상계정을 ClassIn에 등록하고 UID 획득
+    const regResult = await registerVirtualAccount(config, virtualAccount, instructor.display_name || 'Instructor', INSTRUCTOR_DEFAULT_PASSWORD)
+    console.log('Virtual account register result:', JSON.stringify(regResult))
+
+    if (regResult.uid) {
+      teacherUid = regResult.uid
+      // 가상계정 UID 저장
+      await c.env.DB.prepare(`
+        UPDATE classin_virtual_accounts
+        SET is_registered = 1, classin_uid = ?, updated_at = datetime('now')
+        WHERE account_uid = ?
+      `).bind(teacherUid, virtualAccount).run()
+    } else {
+      // 이미 등록된 경우 UID 조회
+      const existingAccount = await c.env.DB.prepare(
+        'SELECT classin_uid FROM classin_virtual_accounts WHERE account_uid = ?'
+      ).bind(virtualAccount).first() as any
+      teacherUid = existingAccount?.classin_uid || ''
+    }
+
+    if (!teacherUid) {
+      return c.json({ error: '가상계정 등록 실패' }, 400)
+    }
+
+    console.log('Using virtual account as teacher:', virtualAccount, 'UID:', teacherUid)
+
+    // 가상계정을 기관에 교사로 등록
+    const addTeacherResult = await addTeacher(config, virtualAccount, instructor.display_name || 'Instructor')
+    console.log('addTeacher result:', JSON.stringify(addTeacherResult))
+    if (!addTeacherResult.success && !addTeacherResult.alreadyExists) {
+      return c.json({ error: '가상계정 교사 등록 실패: ' + addTeacherResult.error }, 400)
+    }
+  } else {
+    // L(live): 실제 강사 계정 사용
+    if (!instructor.classin_uid) {
+      return c.json({ error: '강사가 ClassIn에 등록되지 않았습니다.' }, 400)
+    }
+    teacherUid = instructor.classin_uid
+    console.log('Using real instructor account, UID:', teacherUid)
+  }
 
   // 1. 코스 - 기존 코스가 있으면 재사용, 없으면 새로 생성
   let courseId = cls.classin_course_id
