@@ -6711,77 +6711,35 @@ const modalsHTML = `
   </div>
 </div>
 
-<!-- Payment Modal -->
+<!-- Payment Modal (Simple) -->
 <div id="paymentModal" class="fixed inset-0 z-[100] hidden">
   <div class="absolute inset-0 bg-black/50 modal-overlay" onclick="closePaymentModal()"></div>
-  <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg bg-white rounded-2xl shadow-2xl fade-in max-h-[90vh] overflow-y-auto">
-    <div class="p-6 border-b border-gray-100">
+  <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-white rounded-2xl shadow-2xl fade-in">
+    <div class="p-5 border-b border-gray-100">
       <div class="flex items-center justify-between">
-        <h2 class="text-xl font-bold text-dark-900">결제하기</h2>
+        <h2 class="text-lg font-bold text-dark-900">결제 확인</h2>
         <button onclick="closePaymentModal()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times text-xl"></i></button>
       </div>
     </div>
-    <div class="p-6">
+    <div class="p-5">
       <!-- Order Summary -->
-      <div id="paymentOrderSummary" class="bg-gray-50 rounded-xl p-4 mb-6"></div>
-      
-      <!-- Payment Method -->
-      <div class="mb-6">
-        <h3 class="text-sm font-bold text-dark-800 mb-3">결제 수단</h3>
-        <div class="grid grid-cols-3 gap-2 mb-4">
-          <button onclick="selectPaymentMethod('card')" class="payment-method-btn active-payment h-11 border-2 border-primary-500 bg-primary-50 text-primary-600 rounded-xl text-sm font-medium transition-all" data-method="card">
-            <i class="far fa-credit-card mr-1"></i>카드
-          </button>
-          <button onclick="selectPaymentMethod('kakao')" class="payment-method-btn h-11 border-2 border-gray-200 text-gray-600 rounded-xl text-sm font-medium hover:border-gray-300 transition-all" data-method="kakao">
-            <span class="font-bold">K</span> 카카오페이
-          </button>
-          <button onclick="selectPaymentMethod('naver')" class="payment-method-btn h-11 border-2 border-gray-200 text-gray-600 rounded-xl text-sm font-medium hover:border-gray-300 transition-all" data-method="naver">
-            <span class="font-bold text-green-500">N</span> 네이버
-          </button>
-        </div>
-        
-        <!-- Card Input -->
-        <div id="cardInputArea" class="space-y-3">
-          <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">카드번호</label>
-            <input type="text" id="cardNumber" placeholder="0000 0000 0000 0000" maxlength="19" class="w-full h-11 px-4 border border-gray-200 rounded-xl text-sm" oninput="formatCardNumber(this)">
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">유효기간</label>
-              <input type="text" id="cardExpiry" placeholder="MM / YY" maxlength="7" class="w-full h-11 px-4 border border-gray-200 rounded-xl text-sm" oninput="formatExpiry(this)">
-            </div>
-            <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">CVC</label>
-              <input type="password" id="cardCvc" placeholder="000" maxlength="3" class="w-full h-11 px-4 border border-gray-200 rounded-xl text-sm">
-            </div>
-          </div>
-        </div>
-      </div>
+      <div id="paymentOrderSummary" class="bg-gray-50 rounded-xl p-4 mb-4"></div>
 
-      <!-- Coupon -->
-      <div class="mb-6">
-        <h3 class="text-sm font-bold text-dark-800 mb-3">쿠폰 / 할인코드</h3>
-        <div class="flex gap-2">
-          <input type="text" id="couponCode" placeholder="쿠폰 코드 입력" class="flex-1 h-10 px-4 border border-gray-200 rounded-xl text-sm">
-          <button class="px-4 h-10 bg-gray-100 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-200 transition-all">적용</button>
-        </div>
-      </div>
-      
       <!-- Price Summary -->
-      <div id="priceSummary" class="border-t border-gray-100 pt-4 mb-6 space-y-2"></div>
-      
+      <div id="priceSummary" class="border-t border-gray-100 pt-4 mb-4 space-y-2"></div>
+
       <!-- Agreement -->
       <label class="flex items-start gap-2 text-xs text-gray-500 mb-4">
         <input type="checkbox" id="paymentAgree" class="mt-0.5 accent-primary-500">
         <span>결제 진행에 동의합니다. 구매 조건 및 환불 규정을 확인했습니다.</span>
       </label>
-      
+
       <!-- Pay Button -->
       <button id="payButton" onclick="processPayment()" class="w-full h-12 bg-primary-500 hover:bg-primary-600 disabled:bg-gray-300 text-white font-bold rounded-xl transition-all text-base">
         결제하기
       </button>
-      <p id="paymentError" class="text-red-500 text-sm text-center mt-3 hidden"></p>
+      <p class="text-center text-xs text-gray-400 mt-3"><i class="fas fa-lock mr-1"></i>안전한 결제 (헥토파이낸셜)</p>
+      <p id="paymentError" class="text-red-500 text-sm text-center mt-2 hidden"></p>
     </div>
   </div>
 </div>
