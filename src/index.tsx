@@ -1,4 +1,4 @@
-import { Hono } from 'hono'
+﻿import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 
 type Bindings = {
@@ -6280,13 +6280,8 @@ app.post('/api/payment/hecto/prepare', async (c) => {
     paymentParams: {
       env: config.PAYMENT_SERVER,
       mchtId: config.MID,
-      ver: '0A19',
       method: 'card',
-      bizType: 'B0',
-      encCd: '23',
       mchtTrdNo,
-      mobileYn: 'N',
-      osType: 'W',
       trdDt,
       trdTm,
       mchtName: c.env.APP_NAME_KO || '클래신',
@@ -6783,34 +6778,6 @@ const modalsHTML = `
     <h3 class="text-xl font-bold text-dark-900 mb-2">결제 완료!</h3>
     <p id="successMessage" class="text-sm text-gray-600 mb-4">결제가 성공적으로 완료되었습니다.</p>
     
-    <!-- ClassIn Session Info -->
-    <div id="classinSessionInfo" class="hidden mb-4">
-      <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 text-left">
-        <div class="flex items-center gap-2 mb-3">
-          <div class="w-8 h-8 bg-blue-500 rounded-lg flex items-center justify-center">
-            <i class="fas fa-video text-white text-sm"></i>
-          </div>
-          <div>
-            <p class="text-sm font-bold text-blue-900">ClassIn 강의방이 생성되었습니다</p>
-            <p id="classinModeTag" class="text-[10px] text-blue-600 font-medium"></p>
-          </div>
-        </div>
-        <div class="space-y-2">
-          <div class="flex items-center gap-2 text-sm">
-            <i class="fas fa-link text-blue-400 w-4"></i>
-            <span class="text-blue-800 truncate flex-1" id="classinJoinUrlText"></span>
-          </div>
-          <div class="flex items-center gap-2 text-sm">
-            <i class="fas fa-hashtag text-blue-400 w-4"></i>
-            <span class="text-blue-800" id="classinClassIdText">강의 ID: </span>
-          </div>
-        </div>
-        <a id="classinJoinBtn" href="#" target="_blank" rel="noopener" class="mt-3 w-full h-10 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-xl transition-all flex items-center justify-center gap-2">
-          <i class="fas fa-door-open"></i>
-          ClassIn 강의방 입장하기
-        </a>
-      </div>
-    </div>
     
     <div class="flex gap-2">
       <a href="/mypage" class="flex-1 h-11 bg-gray-100 hover:bg-gray-200 text-dark-700 font-semibold rounded-xl transition-all flex items-center justify-center">
@@ -7303,13 +7270,13 @@ async function processPayment() {
     }
 
     // 헥토 PG SDK 로드
-    console.log('Loading Hecto SDK from:', prepareData.paymentParams.env);
-    console.log('Payment params:', JSON.stringify(prepareData.paymentParams, null, 2));
-    alert('Payment params loaded. Check console for details. mchtParam: ' + prepareData.paymentParams.mchtParam);
+    
+    
+    
     await loadHectoSdk(prepareData.paymentParams.env);
 
     // 결제창 호출
-    console.log('Calling SETTLE_PG.pay...');
+    
     SETTLE_PG.pay(prepareData.paymentParams, function(rsp) {
       // iframe 방식일 때 콜백
       if (rsp.outStatCd === '0021') {
@@ -7633,17 +7600,10 @@ function showEnrollSuccessModal(message, joinUrl, isDemo) {
       </div>
       <h3 class="text-xl font-bold text-dark-900 mb-2">수강신청 완료!</h3>
       <p class="text-gray-600 mb-6">\${message}</p>
-      <a href="\${joinUrl}" target="_blank" rel="noopener"
-         onclick="setTimeout(() => { document.getElementById('enrollSuccessModal').remove(); window.location.reload(); }, 300);"
-         class="block w-full h-12 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl transition-all shadow-lg flex items-center justify-center gap-2 mb-3">
-        <i class="fas fa-door-open"></i>
-        ClassIn 강의방 입장하기
-      </a>
       <button onclick="document.getElementById('enrollSuccessModal').remove(); window.location.reload();"
-              class="w-full h-10 text-gray-500 hover:text-gray-700 font-medium transition-all">
-        나중에 입장하기
+              class="w-full h-12 bg-rose-500 hover:bg-rose-600 text-white font-bold rounded-xl transition-all shadow-lg">
+        확인
       </button>
-      \${isDemo ? '<p class="text-xs text-gray-400 mt-3"><i class="fas fa-info-circle mr-1"></i>DEMO MODE</p>' : ''}
     </div>
   \`;
   document.body.appendChild(modal);
