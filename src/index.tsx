@@ -299,23 +299,23 @@ async function aes256Encrypt(plainText: string, keyString: string): Promise<stri
   const key = await crypto.subtle.importKey(
     'raw',
     keyData,
-    { name: 'AES-CBC' },  // ECB는 직접 지원 안됨, CBC로 IV=0 사용
+    { name: 'AES-CBC' },
     false,
     ['encrypt']
   )
 
-  // ECB 모드 시뮬레이션: IV를 0으로 설정하고 블록 단위로 처리
-  const paddedData = pkcs5Pad(plainData)
+  // Web Crypto API는 PKCS7 패딩을 자동 추가하므로 수동 패딩 불필요
+  // ECB 모드 시뮬레이션: IV를 0으로 설정 (단일 블록에서 CBC와 ECB 동일)
   const iv = new Uint8Array(16) // 0으로 채워진 IV
 
   const encrypted = await crypto.subtle.encrypt(
     { name: 'AES-CBC', iv },
     key,
-    paddedData
+    plainData  // 패딩 없이 원본 데이터 전달
   )
 
-  // Base64 인코딩
-  const encryptedArray = new Uint8Array(encrypted)
+  // 결과에서 첫 16바이트만 사용 (첫 번째 블록 = ECB 결과)
+  const encryptedArray = new Uint8Array(encrypted).slice(0, 16)
   return btoa(String.fromCharCode(...encryptedArray))
 }
 
@@ -374,10 +374,11 @@ async function encryptHectoPaymentParams(
     email?: string
     mchtCustId?: string
   }
-): Promise<{ encParams: Record<string, string>; pktHash: string }> {
+): Promise<{ encParams: Record<string, string>; pktHash: string; hashDebug: string }> {
   // SHA256 해시: mchtId + method + mchtTrdNo + trdDt + trdTm + trdAmt + licenseKey
   const hashPlain = params.mchtId + params.method + params.mchtTrdNo + params.trdDt + params.trdTm + params.trdAmt + config.LICENSE_KEY
   const pktHash = await sha256Hash(hashPlain)
+  const hashDebug = 'Plain: ' + hashPlain + ' | Hash: ' + pktHash
 
   // AES256 암호화 대상 파라미터
   const encParams: Record<string, string> = {}
@@ -391,7 +392,7 @@ async function encryptHectoPaymentParams(
   if (params.email) encParams.email = await aes256Encrypt(params.email, config.AES_KEY)
   if (params.mchtCustId) encParams.mchtCustId = await aes256Encrypt(params.mchtCustId, config.AES_KEY)
 
-  return { encParams, pktHash }
+  return { encParams, pktHash, hashDebug }
 }
 
 // 헥토 결제 결과 복호화
@@ -6214,6 +6215,58 @@ app.get('/api/payment/hecto/status', async (c) => {
   })
 })
 
+// 해시 테스트 엔드포인트
+app.get('/api/payment/hecto/test-hash', async (c) => {
+  const config = {
+    MID: c.env.HECTO_MID || 'nxca_jt_il',
+    LICENSE_KEY: c.env.HECTO_LICENSE_KEY || 'ST1009281328226982205',
+    AES_KEY: c.env.HECTO_AES_KEY || 'pgSettle30y739r82jtd709yOfZ2yK5K'
+  }
+  
+  // AES 암호화 테스트
+  const testEncrypted = await aes256Encrypt('1000', config.AES_KEY)
+  
+  // 헥토 제공 테스트값
+  const testPlain = 'nxca_jt_ilcardPG_card_20260402081633202604020816331000ST1009281328226982205'
+  const expectedHash = '7c24546a160f4ecb9b68dc9c43302ed3ec47d0b8a0babff314f3e04ede97078c'
+  const calculatedHash = await sha256Hash(testPlain)
+  
+  // 현재 시간으로 생성
+  const now = new Date()
+  const trdDt = now.toISOString().slice(0, 10).replace(/-/g, '')
+  const trdTm = now.toTimeString().slice(0, 8).replace(/:/g, '')
+  const mchtTrdNo = 'PG_card_' + trdDt + trdTm + '0001'
+  const trdAmt = '1000'
+  
+  const currentPlain = config.MID + 'card' + mchtTrdNo + trdDt + trdTm + trdAmt + config.LICENSE_KEY
+  const currentHash = await sha256Hash(currentPlain)
+  
+  return c.json({
+    aesTest: {
+      input: '1000',
+      encrypted: testEncrypted,
+      key: config.AES_KEY.slice(0, 8) + '...'
+    },
+    test: {
+      plain: testPlain,
+      expectedHash,
+      calculatedHash,
+      match: calculatedHash === expectedHash
+    },
+    current: {
+      mchtId: config.MID,
+      method: 'card',
+      mchtTrdNo,
+      trdDt,
+      trdTm,
+      trdAmt,
+      licenseKey: config.LICENSE_KEY.slice(0, 8) + '...',
+      plain: currentPlain,
+      hash: currentHash
+    }
+  })
+})
+
 // 결제 요청 준비 (파라미터 암호화 및 해시 생성)
 app.post('/api/payment/hecto/prepare', async (c) => {
   const {
@@ -6240,11 +6293,14 @@ app.post('/api/payment/hecto/prepare', async (c) => {
     CANCEL_SERVER: c.env.HECTO_CANCEL_SERVER || 'https://tbgw.settlebank.co.kr'
   }
 
+  // 한국 시간 (KST = UTC+9)
   const now = new Date()
-  const trdDt = now.toISOString().slice(0, 10).replace(/-/g, '')
-  const trdTm = now.toTimeString().slice(0, 8).replace(/:/g, '')
-  const random4 = String(Math.floor(Math.random() * 10000)).padStart(4, '0')
-  const mchtTrdNo = `PAY${trdDt}${trdTm}${random4}`
+  const kstOffset = 9 * 60 * 60 * 1000
+  const kstDate = new Date(now.getTime() + kstOffset)
+  const trdDt = kstDate.toISOString().slice(0, 10).replace(/-/g, '')
+  const trdTm = kstDate.toISOString().slice(11, 19).replace(/:/g, '')
+  // PHP 샘플 형식: PAYMENT + 날짜 + 시간 (랜덤 제외)
+  const mchtTrdNo = 'PAYMENT' + trdDt + trdTm
 
   // DB에 주문 생성 (pending 상태)
   const orderResult = await c.env.DB.prepare(`
@@ -6269,7 +6325,7 @@ app.post('/api/payment/hecto/prepare', async (c) => {
     mchtCustId: String(userId)
   }
 
-  const { encParams, pktHash } = await encryptHectoPaymentParams(config, params)
+  const { encParams, pktHash, hashDebug } = await encryptHectoPaymentParams(config, params)
 
   // 결과 URL 생성
   const baseUrl = c.req.url.replace(/\/api\/.*$/, '')
@@ -6277,25 +6333,52 @@ app.post('/api/payment/hecto/prepare', async (c) => {
   return c.json({
     success: true,
     orderId,
+    hashDebug,
     paymentParams: {
+      // PHP 샘플 순서와 동일하게
       env: config.PAYMENT_SERVER,
       mchtId: config.MID,
       method: 'card',
-      mchtTrdNo,
       trdDt,
       trdTm,
+      mchtTrdNo,
       mchtName: c.env.APP_NAME_KO || '클래신',
       mchtEName: c.env.APP_NAME || 'ClassIn',
       pmtPrdtNm: productName || '강의 결제',
       trdAmt: encParams.trdAmt,
       mchtCustNm: encParams.mchtCustNm || '',
-      cphoneNo: encParams.cphoneNo || '',
-      email: encParams.email || '',
-      mchtCustId: encParams.mchtCustId || '',
-      mchtParam,
+      custAcntSumry: '',
+      expireDt: '',
       notiUrl: `${baseUrl}/api/payment/hecto/noti`,
       nextUrl: `${baseUrl}/api/payment/hecto/result`,
       cancUrl: `${baseUrl}/api/payment/hecto/result`,
+      mchtParam,
+      cphoneNo: params.cphoneNo || '',  // 평문으로 전송
+      email: params.email || '',  // 평문으로 전송
+      telecomCd: '',
+      prdtTerm: '',
+      mchtCustId: encParams.mchtCustId || '',
+      taxTypeCd: '',
+      taxAmt: '',
+      vatAmt: '',
+      taxFreeAmt: '',
+      svcAmt: '',
+      cardType: '',
+      chainUserId: '',
+      cardGb: '',
+      clipCustNm: '',
+      clipCustCi: '',
+      clipCustPhoneNo: '',
+      certNotiUrl: '',
+      skipCd: '',
+      multiPay: '',
+      autoPayType: '',
+      linkMethod: '',
+      appScheme: '',
+      custIp: '',
+      corpPayCode: '',
+      corpPayType: '',
+      cashRcptUIYn: '',
       pktHash,
       ui: {
         type: 'popup',
@@ -6458,6 +6541,85 @@ app.post('/api/payment/hecto/noti', async (c) => {
   return c.text('FAIL')
 })
 
+// 관리자: 주문 목록 조회
+app.get('/api/admin/orders', async (c) => {
+  const user = c.get('user') as any
+  if (!user || user.role !== 'ADMIN') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
+
+  const { results: orders } = await c.env.DB.prepare(`
+    SELECT o.*, u.name as user_name, u.email as user_email, cl.title as class_title
+    FROM orders o
+    LEFT JOIN users u ON o.user_id = u.id
+    LEFT JOIN classes cl ON o.class_id = cl.id
+    ORDER BY o.id DESC
+    LIMIT 100
+  `).all()
+
+  return c.json({ orders })
+})
+
+// 관리자: 주문 상태 업데이트
+app.post('/api/admin/orders/:orderId/update', async (c) => {
+  const user = c.get('user') as any
+  if (!user || user.role !== 'ADMIN') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
+
+  const orderId = parseInt(c.req.param('orderId'))
+  const { status, trdNo } = await c.req.json()
+
+  await c.env.DB.prepare(`
+    UPDATE orders SET payment_status = ?, transaction_id = COALESCE(?, transaction_id), updated_at = datetime('now')
+    WHERE id = ?
+  `).bind(status, trdNo, orderId).run()
+
+  return c.json({ success: true })
+})
+
+// 결제 완료 후 수강 등록 처리 API
+app.post('/api/payment/hecto/complete', async (c) => {
+  const { orderId, userId, classId, lessonId, orderType, trdNo, mchtTrdNo } = await c.req.json()
+
+  try {
+    // 주문 상태 업데이트
+    await c.env.DB.prepare(`
+      UPDATE orders SET payment_status = 'completed', transaction_id = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `).bind(trdNo || mchtTrdNo, orderId).run()
+
+    // 수강 등록 처리
+    if (orderType === 'lesson' && lessonId) {
+      // 강의별 등록
+      await c.env.DB.prepare(`
+        INSERT INTO lesson_enrollments (user_id, class_lesson_id, payment_id, status)
+        VALUES (?, ?, ?, 'active')
+        ON CONFLICT(user_id, class_lesson_id) DO UPDATE SET status = 'active'
+      `).bind(userId, lessonId, orderId).run()
+    } else if (classId) {
+      // 코스 등록
+      await c.env.DB.prepare(`
+        INSERT INTO enrollments (user_id, class_id, status)
+        VALUES (?, ?, 'active')
+        ON CONFLICT(user_id, class_id) DO UPDATE SET status = 'active', updated_at = datetime('now')
+      `).bind(userId, classId).run()
+
+      // 수강생 수 업데이트
+      await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(classId).run()
+
+      // 장바구니에서 제거
+      await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, classId).run()
+    }
+
+    console.log('[Hecto Complete] Enrollment processed:', orderId, classId)
+    return c.json({ success: true })
+  } catch (e: any) {
+    console.log('[Hecto Complete] Error:', e.message)
+    return c.json({ success: false, error: e.message }, 500)
+  }
+})
+
 // 결제 취소 API
 app.post('/api/payment/hecto/cancel', async (c) => {
   const { orderId, reason } = await c.req.json()
@@ -6515,6 +6677,48 @@ app.post('/api/payment/hecto/cancel', async (c) => {
   }
 
   return c.json({ success: false, error: cancelResult.error || '결제 취소에 실패했습니다.' }, 500)
+})
+
+// 관리자: 수동 결제/수강 취소 (헥토 API 호출 없이)
+app.post('/api/admin/orders/:orderId/cancel', async (c) => {
+  const user = c.get('user') as any
+  if (!user || user.role !== 'ADMIN') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
+
+  const orderId = parseInt(c.req.param('orderId'))
+  const { reason } = await c.req.json()
+
+  const order = await c.env.DB.prepare('SELECT * FROM orders WHERE id = ?').bind(orderId).first() as any
+  if (!order) {
+    return c.json({ error: '주문을 찾을 수 없습니다.' }, 404)
+  }
+
+  // 주문 상태 업데이트
+  await c.env.DB.prepare(`
+    UPDATE orders SET payment_status = 'cancelled', updated_at = datetime('now')
+    WHERE id = ?
+  `).bind(orderId).run()
+
+  // 수강 취소 처리
+  if (order.class_id) {
+    await c.env.DB.prepare(`
+      UPDATE enrollments SET status = 'cancelled', updated_at = datetime('now')
+      WHERE user_id = ? AND class_id = ?
+    `).bind(order.user_id, order.class_id).run()
+
+    await c.env.DB.prepare('UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?').bind(order.class_id).run()
+  }
+
+  // lesson 취소
+  if (order.order_type === 'lesson') {
+    await c.env.DB.prepare(`
+      DELETE FROM lesson_enrollments WHERE user_id = ? AND payment_id = ?
+    `).bind(order.user_id, orderId).run()
+  }
+
+  console.log('[Admin] Manual cancel:', orderId, reason)
+  return c.json({ success: true, message: '결제 및 수강이 취소되었습니다.' })
 })
 
 // ==================== HTML Pages ====================
@@ -6862,8 +7066,9 @@ const globalScripts = `
 <script src="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js"></script>
 <script>
 // ==================== State ====================
-let currentUser = JSON.parse(localStorage.getItem('classin_user') || 'null');
-let currentToken = localStorage.getItem('classin_token') || null;
+// 페이지별 스크립트에서 이미 선언했을 수 있으므로 조건부 선언
+if (typeof currentUser === 'undefined') { var currentUser = JSON.parse(localStorage.getItem('classin_user') || 'null'); }
+if (typeof currentToken === 'undefined') { var currentToken = localStorage.getItem('classin_token') || null; }
 
 // 토큰이 없거나 구 형식이면 새로 생성
 if (currentUser && (!currentToken || currentToken.startsWith('demo_token_'))) {
@@ -7177,11 +7382,8 @@ window.addEventListener('message', function(e) {
     if (btn) { btn.disabled = false; btn.innerHTML = '결제하기'; }
 
     if (result.outStatCd === '0021') {
-      // 결제 성공
-      closePaymentModal();
-      document.getElementById('successModal').classList.remove('hidden');
-      document.getElementById('successMessage').textContent = '결제가 완료되었습니다! (주문번호: ' + result.mchtTrdNo + ')';
-      document.getElementById('classinSessionInfo').classList.add('hidden');
+      // 결제 성공 - 수강 등록 처리 호출
+      processEnrollmentAfterPayment(result);
     } else {
       // 결제 실패
       showError('paymentError', result.outRsltMsg || '결제에 실패했습니다.');
@@ -7189,8 +7391,55 @@ window.addEventListener('message', function(e) {
   }
 });
 
+// 결제 성공 후 수강 등록 처리
+async function processEnrollmentAfterPayment(result) {
+  try {
+    // mchtParam에서 주문 정보 추출
+    const parts = (result.mchtParam || '').split('|');
+    const orderId = parts[0];
+    const userId = parts[1];
+    const classId = parts[2];
+    const lessonId = parts[3];
+    const orderType = parts[4] || 'class';
+    
+    // 결제 완료 처리 API 호출
+    const res = await fetch('/api/payment/hecto/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orderId: parseInt(orderId),
+        userId: parseInt(userId),
+        classId: classId ? parseInt(classId) : null,
+        lessonId: lessonId ? parseInt(lessonId) : null,
+        orderType,
+        trdNo: result.trdNo || result.mchtTrdNo,
+        mchtTrdNo: result.mchtTrdNo
+      })
+    });
+    
+    const data = await res.json();
+    if (data.success) {
+      closePaymentModal();
+      document.getElementById('successModal').classList.remove('hidden');
+      document.getElementById('successMessage').textContent = '결제 및 수강등록이 완료되었습니다!';
+      document.getElementById('classinSessionInfo').classList.add('hidden');
+    } else {
+      closePaymentModal();
+      document.getElementById('successModal').classList.remove('hidden');
+      document.getElementById('successMessage').textContent = '결제는 완료되었으나 수강등록에 문제가 있습니다. 고객센터에 문의해주세요.';
+      document.getElementById('classinSessionInfo').classList.add('hidden');
+    }
+  } catch (e) {
+    console.error('Enrollment error:', e);
+    closePaymentModal();
+    document.getElementById('successModal').classList.remove('hidden');
+    document.getElementById('successMessage').textContent = '결제 완료! (수강등록 처리 중 오류 - 고객센터 문의)';
+    document.getElementById('classinSessionInfo').classList.add('hidden');
+  }
+}
+
 async function processPayment() {
-  alert('processPayment called!');
+  
   const agree = document.getElementById('paymentAgree').checked;
   if (!agree) { showError('paymentError', '결제 동의에 체크해주세요.'); return; }
 
@@ -7275,7 +7524,7 @@ async function processPayment() {
     
     await loadHectoSdk(prepareData.paymentParams.env);
 
-    // 결제창 호출
+    //// 결제창 호출
     
     SETTLE_PG.pay(prepareData.paymentParams, function(rsp) {
       // iframe 방식일 때 콜백
@@ -8946,6 +9195,7 @@ function activateLessonButtons() {
 
   const courseId = ${cls.id};
   const courseSlug = '${cls.slug}';
+  console.log('[Enrollment Check] courseId:', courseId, 'userId:', user.id);
 
   // 강사/관리자는 모든 강의 접근 가능
   if (user.role === 'instructor' || user.role === 'admin') {
@@ -8956,6 +9206,7 @@ function activateLessonButtons() {
   try {
     const res = await fetch('/api/enrollments/check?userId=' + user.id + '&classId=' + courseId);
     const data = await res.json();
+    console.log('[Enrollment Check] Result:', data);
 
     if (data.enrolled) {
       // 수강 중인 경우 - 결제 버튼 변경
@@ -9260,12 +9511,30 @@ ${navHTML}
 </section>
 
 <script>
-const currentUser = JSON.parse(localStorage.getItem('classin_user') || 'null');
-
+var currentUser = JSON.parse(localStorage.getItem('classin_user') || 'null');
+var currentToken = localStorage.getItem('classin_token') || null;
 if (!currentUser) {
   window.location.href = '/?login=required';
 } else {
+  // 헤더에 사용자 정보 표시
+  var authArea = document.getElementById('authArea');
+  if (authArea) {
+    var mypageUrl = currentUser.role === 'instructor' ? '/instructor/mypage' : '/mypage';
+    authArea.innerHTML = '<a href="' + mypageUrl + '" class="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-gray-50 transition-all">' +
+      '<div class="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center">' +
+        '<span class="text-sm font-bold text-primary-600">' + (currentUser.name ? currentUser.name.charAt(0) : 'U') + '</span>' +
+      '</div>' +
+      '<span class="text-sm font-medium text-dark-700 hidden sm:block">' + currentUser.name + '</span>' +
+    '</a>' +
+    '<button onclick="handleLogout()" class="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-50 transition-all">로그아웃</button>';
+  }
   loadMyEnrollments();
+}
+
+function handleLogout() {
+  localStorage.removeItem('classin_user');
+  localStorage.removeItem('classin_token');
+  location.href = '/';
 }
 
 async function loadMyEnrollments() {
@@ -10615,6 +10884,22 @@ app.get('/admin', async (c) => {
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Orders Management Link -->
+    <div class="bg-white rounded-xl p-6 shadow-sm mb-8">
+      <a href="/admin/orders" class="flex items-center justify-between hover:bg-gray-50 -m-6 p-6 rounded-xl transition-all">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-credit-card text-green-500 text-xl"></i>
+          </div>
+          <div>
+            <h2 class="text-lg font-bold text-gray-800">결제 관리</h2>
+            <p class="text-sm text-gray-500">결제 내역 조회 및 취소</p>
+          </div>
+        </div>
+        <i class="fas fa-chevron-right text-gray-400"></i>
+      </a>
     </div>
 
     <!-- Initialize Accounts Section -->
@@ -12879,6 +13164,159 @@ app.get('/admin', async (c) => {
   `)
 })
 
+// ==================== Admin Page - Orders Management ====================
+app.get('/admin/orders', async (c) => {
+  const authRedirect = await requireAdminAuth(c)
+  if (authRedirect) return authRedirect
+
+  return c.html(`
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>결제 관리 - ClassIn Live 관리자</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.0/css/all.min.css" rel="stylesheet">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap');
+    * { font-family: 'Noto Sans KR', sans-serif; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <nav class="bg-gray-900 text-white shadow-lg">
+    <div class="max-w-7xl mx-auto px-4 py-4">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <a href="/" class="text-xl font-bold text-rose-400">ClassIn Live</a>
+          <span class="text-gray-400">|</span>
+          <span class="text-gray-300">결제 관리</span>
+        </div>
+        <a href="/admin" class="text-sm text-gray-400 hover:text-white"><i class="fas fa-arrow-left mr-1"></i>관리자 대시보드</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="max-w-7xl mx-auto px-4 py-8">
+    <div class="bg-white rounded-xl p-6 shadow-sm">
+      <div class="flex items-center justify-between mb-6">
+        <h2 class="text-lg font-bold text-gray-800"><i class="fas fa-credit-card text-green-500 mr-2"></i>결제 내역</h2>
+        <button onclick="loadOrders()" class="text-sm text-blue-500 hover:text-blue-700"><i class="fas fa-sync-alt mr-1"></i>새로고침</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-gray-200 bg-gray-50">
+              <th class="text-left py-3 px-3 text-gray-600 font-medium">주문ID</th>
+              <th class="text-left py-3 px-3 text-gray-600 font-medium">사용자</th>
+              <th class="text-left py-3 px-3 text-gray-600 font-medium">강의</th>
+              <th class="text-right py-3 px-3 text-gray-600 font-medium">금액</th>
+              <th class="text-center py-3 px-3 text-gray-600 font-medium">상태</th>
+              <th class="text-left py-3 px-3 text-gray-600 font-medium">거래번호</th>
+              <th class="text-left py-3 px-3 text-gray-600 font-medium">결제일시</th>
+              <th class="text-center py-3 px-3 text-gray-600 font-medium">작업</th>
+            </tr>
+          </thead>
+          <tbody id="ordersTableBody">
+            <tr><td colspan="8" class="py-8 text-center text-gray-400">로딩 중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal" class="fixed inset-0 bg-black/50 hidden items-center justify-center z-50" onclick="closeModal()">
+    <div class="bg-white rounded-xl p-6 max-w-md mx-4" onclick="event.stopPropagation()">
+      <h3 id="modalTitle" class="text-lg font-bold mb-2"></h3>
+      <p id="modalMessage" class="text-gray-600 mb-4"></p>
+      <button onclick="closeModal()" class="w-full bg-gray-800 text-white py-2 rounded-lg">확인</button>
+    </div>
+  </div>
+
+  <script>
+    function showModal(title, message) {
+      document.getElementById('modalTitle').textContent = title;
+      document.getElementById('modalMessage').textContent = message;
+      document.getElementById('modal').classList.remove('hidden');
+      document.getElementById('modal').classList.add('flex');
+    }
+    function closeModal() {
+      document.getElementById('modal').classList.add('hidden');
+      document.getElementById('modal').classList.remove('flex');
+    }
+
+    async function loadOrders() {
+      try {
+        var res = await fetch('/api/admin/orders');
+        var data = await res.json();
+
+        if (data.error) {
+          document.getElementById('ordersTableBody').innerHTML = '<tr><td colspan="8" class="py-8 text-center text-red-400">' + data.error + '</td></tr>';
+          return;
+        }
+
+        if (!data.orders || data.orders.length === 0) {
+          document.getElementById('ordersTableBody').innerHTML = '<tr><td colspan="8" class="py-8 text-center text-gray-400">결제 내역이 없습니다.</td></tr>';
+          return;
+        }
+
+        document.getElementById('ordersTableBody').innerHTML = data.orders.map(function(order) {
+          var statusClass = order.payment_status === 'completed' ? 'bg-green-100 text-green-700' :
+                order.payment_status === 'cancelled' ? 'bg-red-100 text-red-700' :
+                'bg-yellow-100 text-yellow-700';
+          var statusText = order.payment_status === 'completed' ? '완료' :
+                order.payment_status === 'cancelled' ? '취소됨' : '대기';
+          var cancelBtn = order.payment_status === 'completed' ?
+                '<button onclick="cancelOrder(' + order.id + ')" class="bg-red-50 text-red-500 hover:bg-red-100 px-3 py-1 rounded-lg text-xs font-medium"><i class="fas fa-times-circle mr-1"></i>취소</button>' :
+                '<span class="text-gray-300">-</span>';
+          return '<tr class="border-b border-gray-100 hover:bg-gray-50">' +
+            '<td class="py-3 px-3 font-medium">#' + order.id + '</td>' +
+            '<td class="py-3 px-3">' + (order.user_name || '-') + '<br><span class="text-xs text-gray-400">' + (order.user_email || '') + '</span></td>' +
+            '<td class="py-3 px-3">' + (order.class_title || '-') + '</td>' +
+            '<td class="py-3 px-3 text-right font-medium">' + Number(order.amount).toLocaleString() + '원</td>' +
+            '<td class="py-3 px-3 text-center"><span class="px-2 py-1 rounded-full text-xs font-medium ' + statusClass + '">' + statusText + '</span></td>' +
+            '<td class="py-3 px-3 text-xs text-gray-500">' + (order.transaction_id || '-') + '</td>' +
+            '<td class="py-3 px-3 text-xs text-gray-500">' + (order.created_at || '-') + '</td>' +
+            '<td class="py-3 px-3 text-center">' + cancelBtn + '</td>' +
+          '</tr>';
+        }).join('');
+      } catch (e) {
+        document.getElementById('ordersTableBody').innerHTML = '<tr><td colspan="8" class="py-8 text-center text-red-400">오류: ' + e.message + '</td></tr>';
+      }
+    }
+
+    async function cancelOrder(orderId) {
+      if (!confirm('이 결제를 취소하시겠습니까?\n(수강 등록도 함께 취소됩니다)')) return;
+
+      var reason = prompt('취소 사유를 입력하세요:', '고객 요청');
+      if (!reason) return;
+
+      try {
+        var res = await fetch('/api/admin/orders/' + orderId + '/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: reason })
+        });
+        var data = await res.json();
+
+        if (data.success) {
+          showModal('완료', '결제 및 수강이 취소되었습니다.');
+          loadOrders();
+        } else {
+          showModal('오류', data.error || '취소에 실패했습니다.');
+        }
+      } catch (e) {
+        showModal('오류', '서버 오류: ' + e.message);
+      }
+    }
+
+    loadOrders();
+  </script>
+</body>
+</html>
+`)
+})
+
 // ==================== Admin Page - User Management ====================
 app.get('/admin/users', async (c) => {
   const authRedirect = await requireAdminAuth(c)
@@ -13475,3 +13913,4 @@ async function processExpiredEnrollments(db: D1Database) {
 }
 
 export default app
+
