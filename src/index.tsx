@@ -1,4 +1,4 @@
-﻿import { Hono } from 'hono'
+import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 
 type Bindings = {
@@ -6543,8 +6543,9 @@ app.post('/api/payment/hecto/noti', async (c) => {
 
 // 관리자: 주문 목록 조회
 app.get('/api/admin/orders', async (c) => {
-  const user = c.get('user') as any
-  if (!user || user.role !== 'ADMIN') {
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+  if (!isLoggedIn) {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
 
@@ -6562,8 +6563,9 @@ app.get('/api/admin/orders', async (c) => {
 
 // 관리자: 주문 상태 업데이트
 app.post('/api/admin/orders/:orderId/update', async (c) => {
-  const user = c.get('user') as any
-  if (!user || user.role !== 'ADMIN') {
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+  if (!isLoggedIn) {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
 
@@ -6681,8 +6683,9 @@ app.post('/api/payment/hecto/cancel', async (c) => {
 
 // 관리자: 수동 결제/수강 취소 (헥토 API 호출 없이)
 app.post('/api/admin/orders/:orderId/cancel', async (c) => {
-  const user = c.get('user') as any
-  if (!user || user.role !== 'ADMIN') {
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+  if (!isLoggedIn) {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
 
@@ -13286,7 +13289,7 @@ app.get('/admin/orders', async (c) => {
     }
 
     async function cancelOrder(orderId) {
-      if (!confirm('이 결제를 취소하시겠습니까?\n(수강 등록도 함께 취소됩니다)')) return;
+      if (!confirm('이 결제를 취소하시겠습니까?\\n(수강 등록도 함께 취소됩니다)')) return;
 
       var reason = prompt('취소 사유를 입력하세요:', '고객 요청');
       if (!reason) return;
