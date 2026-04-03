@@ -2567,13 +2567,13 @@ app.get('/api/user/:userId/orders', async (c) => {
 // Get instructor details
 app.get('/api/instructors/:id', async (c) => {
   const id = c.req.param('id')
-  const instructor = await c.env.DB.prepare(`
+  const instructorRow = await c.env.DB.prepare(`
     SELECT i.*, u.email FROM instructors i JOIN users u ON i.user_id = u.id WHERE i.id = ?
-  `).bind(id).all()
+  `).bind(id).first()
   const { results: classes } = await c.env.DB.prepare(`
     SELECT c.*, cat.name as category_name FROM classes c JOIN categories cat ON c.category_id = cat.id WHERE c.instructor_id = ? AND c.status = 'active'
   `).bind(id).all()
-  return c.json({ instructor, classes })
+  return c.json({ instructor: instructorRow, classes })
 })
 
 // ==================== Test Account API Routes ====================
