@@ -9211,21 +9211,40 @@ ${globalScripts}
 
 // ==================== Student Mypage ====================
 app.get('/mypage', async (c) => {
-  // 사용자 인증 체크는 클라이언트에서 처리 (JWT 기반)
 
   const html = `${headHTML}
 <body class="bg-gray-50 min-h-screen">
 ${navHTML}
 
-<section class="max-w-4xl mx-auto px-4 sm:px-6 py-8">
-  <div class="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
-    <h1 class="text-xl font-bold text-dark-900 mb-6"><i class="fas fa-user-graduate text-primary-500 mr-2"></i>내 수강 코스</h1>
-
-    <div id="mypageContent">
-      <div class="text-center py-8 text-gray-400">
-        <i class="fas fa-spinner fa-spin text-2xl mb-2"></i>
-        <p>로딩 중...</p>
+<!-- 프로필 헤더 -->
+<section class="bg-white border-b border-gray-100">
+  <div class="max-w-3xl mx-auto px-4 sm:px-6 py-6">
+    <div class="flex items-center gap-4">
+      <div id="profileAvatar" class="w-14 h-14 bg-gradient-to-br from-primary-400 to-primary-600 rounded-full flex items-center justify-center shadow-lg shadow-primary-200">
+        <span class="text-xl font-bold text-white">?</span>
       </div>
+      <div class="flex-1 min-w-0">
+        <h1 id="profileName" class="text-lg font-bold text-gray-900">로딩 중...</h1>
+        <p id="profileSub" class="text-sm text-gray-400 mt-0.5"></p>
+      </div>
+      <button onclick="handleLogout()" class="px-4 py-2 text-sm text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg transition-all">로그아웃</button>
+    </div>
+  </div>
+</section>
+
+<!-- 다음 수업 알림 (라이브 진행 중이면 강조) -->
+<div id="nextLessonBanner" class="hidden">
+  <div class="max-w-3xl mx-auto px-4 sm:px-6 py-3">
+    <div id="nextLessonContent" class="rounded-xl p-4"></div>
+  </div>
+</div>
+
+<!-- 코스 목록 -->
+<section class="max-w-3xl mx-auto px-4 sm:px-6 py-6">
+  <div id="mypageContent">
+    <div class="text-center py-16">
+      <div class="w-10 h-10 border-3 border-primary-200 border-t-primary-500 rounded-full animate-spin mx-auto mb-4"></div>
+      <p class="text-sm text-gray-400">불러오는 중...</p>
     </div>
   </div>
 </section>
@@ -9236,13 +9255,19 @@ var currentToken = localStorage.getItem('classin_token') || null;
 if (!currentUser) {
   window.location.href = '/?login=required';
 } else {
+  // 프로필 세팅
+  var initial = currentUser.name ? currentUser.name.charAt(0) : 'U';
+  document.getElementById('profileAvatar').innerHTML = '<span class="text-xl font-bold text-white">' + initial + '</span>';
+  document.getElementById('profileName').textContent = currentUser.name + '님';
+  document.getElementById('profileSub').textContent = currentUser.email || '';
+
   // 헤더에 사용자 정보 표시
   var authArea = document.getElementById('authArea');
   if (authArea) {
     var mypageUrl = currentUser.role === 'instructor' ? '/instructor/mypage' : '/mypage';
     authArea.innerHTML = '<a href="' + mypageUrl + '" class="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-gray-50 transition-all">' +
       '<div class="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center">' +
-        '<span class="text-sm font-bold text-primary-600">' + (currentUser.name ? currentUser.name.charAt(0) : 'U') + '</span>' +
+        '<span class="text-sm font-bold text-primary-600">' + initial + '</span>' +
       '</div>' +
       '<span class="text-sm font-medium text-dark-700 hidden sm:block">' + currentUser.name + '</span>' +
     '</a>' +
@@ -9260,71 +9285,180 @@ function handleLogout() {
 async function loadMyEnrollments() {
   const res = await fetch('/api/user/'+currentUser.id+'/enrollments-with-lessons');
   const enrollments = await res.json();
-
   const container = document.getElementById('mypageContent');
 
   if (!Array.isArray(enrollments) || enrollments.length === 0) {
-    container.innerHTML = '<div class="text-center py-12 text-gray-400"><i class="fas fa-book-open text-4xl mb-3"></i><p class="text-lg">수강 중인 코스가 없습니다</p><a href="/" class="mt-4 inline-block px-6 py-2 bg-primary-500 text-white font-semibold rounded-xl hover:bg-primary-600 transition-all">코스 둘러보기</a></div>';
+    container.innerHTML = '<div class="text-center py-20">' +
+      '<div class="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-5">' +
+        '<i class="fas fa-book-open text-3xl text-gray-300"></i>' +
+      '</div>' +
+      '<p class="text-lg font-semibold text-gray-500 mb-2">수강 중인 코스가 없어요</p>' +
+      '<p class="text-sm text-gray-400 mb-6">관심 있는 코스를 둘러보세요</p>' +
+      '<a href="/categories" class="inline-flex items-center gap-2 px-6 py-3 bg-primary-500 text-white font-semibold rounded-xl hover:bg-primary-600 transition-all shadow-lg shadow-primary-200">' +
+        '<i class="fas fa-search"></i>코스 둘러보기</a>' +
+    '</div>';
     return;
   }
 
-  container.innerHTML = enrollments.map(e => {
-    // 강의 목록 렌더링
-    const lessonsHtml = e.lessons && e.lessons.length > 0 ? e.lessons.map((lesson, idx) => {
-      const now = Date.now();
-      const startTime = new Date(lesson.scheduled_at).getTime();
-      const endTime = startTime + (lesson.duration_minutes || 60) * 60 * 1000;
-      const isEnded = endTime < now;
-      const isLive = !isEnded && startTime <= now && now < endTime;
-      const isEnrolled = lesson.is_enrolled;
-
-      const dateStr = new Date(lesson.scheduled_at).toLocaleDateString('ko-KR', { timeZone:'Asia/Seoul', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
-
-      let statusBadge, actionBtn;
-      if (isEnded) {
-        statusBadge = '<span class="px-2 py-0.5 bg-gray-200 text-gray-600 text-[10px] font-medium rounded-full">완료</span>';
-        actionBtn = lesson.replay_url
-          ? '<a href="'+lesson.replay_url+'" target="_blank" class="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-xs font-medium rounded-lg">다시보기</a>'
-          : '<span class="text-gray-400 text-xs">-</span>';
-      } else {
-        // 코스 수강 중이면 모든 강의 입장 가능
-        statusBadge = isLive
-          ? '<span class="px-2 py-0.5 bg-red-500 text-white text-[10px] font-medium rounded-full animate-pulse">진행중</span>'
-          : '<span class="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-medium rounded-full">예정</span>';
-        actionBtn = lesson.session_id
-          ? '<a href="/api/classin/enter/'+lesson.session_id+'?redirect=true" target="_blank" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium rounded-lg"><i class="fas fa-door-open mr-1"></i>입장하기</a>'
-          : '<span class="text-gray-400 text-xs"><i class="far fa-clock mr-1"></i>준비중</span>';
+  // 가장 가까운 라이브/예정 수업 찾기 (배너용)
+  var nextLesson = null;
+  var nextCourse = null;
+  var now = Date.now();
+  enrollments.forEach(function(e) {
+    if (!e.lessons) return;
+    e.lessons.forEach(function(lesson) {
+      var start = new Date(lesson.scheduled_at).getTime();
+      var end = start + (lesson.duration_minutes || 60) * 60 * 1000;
+      if (end > now && lesson.session_id) {
+        if (!nextLesson || start < new Date(nextLesson.scheduled_at).getTime()) {
+          nextLesson = lesson;
+          nextCourse = e;
+        }
       }
+    });
+  });
 
-      return '<div class="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0 '+(isEnded ? 'opacity-60' : '')+'">' +
-        '<span class="w-6 h-6 '+(isEnded ? 'bg-gray-300' : isEnrolled ? 'bg-blue-500' : 'bg-orange-400')+' text-white text-xs font-bold rounded-full flex items-center justify-center">'+(idx+1)+'</span>' +
+  // 다음 수업 배너 표시
+  if (nextLesson) {
+    var banner = document.getElementById('nextLessonBanner');
+    var content = document.getElementById('nextLessonContent');
+    var start = new Date(nextLesson.scheduled_at).getTime();
+    var end = start + (nextLesson.duration_minutes || 60) * 60 * 1000;
+    var isLive = start <= now && now < end;
+    var dateStr = new Date(nextLesson.scheduled_at).toLocaleDateString('ko-KR', { timeZone:'Asia/Seoul', month:'long', day:'numeric', weekday:'short', hour:'2-digit', minute:'2-digit' });
+
+    if (isLive) {
+      content.className = 'rounded-xl p-4 bg-gradient-to-r from-red-500 to-rose-500 text-white shadow-lg shadow-red-200';
+      content.innerHTML = '<div class="flex items-center justify-between gap-3">' +
         '<div class="flex-1 min-w-0">' +
-          '<p class="text-sm font-medium text-dark-700 truncate">'+(lesson.lesson_title || '제목 없음')+'</p>' +
-          '<p class="text-xs text-gray-400">'+dateStr+' · '+lesson.duration_minutes+'분</p>' +
+          '<div class="flex items-center gap-2 mb-1"><span class="w-2 h-2 bg-white rounded-full animate-pulse"></span><span class="text-xs font-bold opacity-90">LIVE 진행중</span></div>' +
+          '<p class="font-bold truncate">' + (nextLesson.lesson_title || nextCourse.title) + '</p>' +
+          '<p class="text-sm opacity-80">' + nextCourse.instructor_name + '</p>' +
         '</div>' +
-        '<div class="flex items-center gap-2">' + statusBadge + actionBtn + '</div>' +
+        '<a href="/api/classin/enter/' + nextLesson.session_id + '?redirect=true" target="_blank" class="flex-shrink-0 px-5 py-3 bg-white text-red-600 font-bold rounded-xl hover:bg-red-50 transition-all text-sm shadow-lg">' +
+          '<i class="fas fa-door-open mr-1.5"></i>입장하기</a>' +
       '</div>';
-    }).join('') : '<p class="text-sm text-gray-400 text-center py-4">예정된 강의가 없습니다</p>';
+    } else {
+      content.className = 'rounded-xl p-4 bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-lg shadow-blue-200';
+      content.innerHTML = '<div class="flex items-center justify-between gap-3">' +
+        '<div class="flex-1 min-w-0">' +
+          '<div class="flex items-center gap-2 mb-1"><i class="far fa-calendar-alt text-xs opacity-80"></i><span class="text-xs font-medium opacity-90">다음 수업</span></div>' +
+          '<p class="font-bold truncate">' + (nextLesson.lesson_title || nextCourse.title) + '</p>' +
+          '<p class="text-sm opacity-80">' + dateStr + '</p>' +
+        '</div>' +
+        '<a href="/api/classin/enter/' + nextLesson.session_id + '?redirect=true" target="_blank" class="flex-shrink-0 px-5 py-3 bg-white/20 backdrop-blur text-white font-bold rounded-xl hover:bg-white/30 transition-all text-sm border border-white/30">' +
+          '<i class="fas fa-door-open mr-1.5"></i>입장하기</a>' +
+      '</div>';
+    }
+    banner.className = '';
+  }
 
-    const hasSubscription = e.subscription_status === 'active';
-    const subscriptionBadge = hasSubscription
-      ? '<span class="px-2 py-0.5 bg-blue-500 text-white text-[10px] font-bold rounded-full"><i class="fas fa-sync-alt mr-1"></i>월간 구독중</span>'
+  // 코스 카드 렌더링
+  container.innerHTML = '<div class="grid gap-4">' + enrollments.map(function(e) {
+    var lessons = e.lessons || [];
+    var totalLessons = lessons.length;
+    var completedLessons = lessons.filter(function(l) {
+      var end = new Date(l.scheduled_at).getTime() + (l.duration_minutes || 60) * 60 * 1000;
+      return end < now;
+    }).length;
+    var progress = totalLessons > 0 ? Math.round(completedLessons / totalLessons * 100) : 0;
+
+    var hasSubscription = e.subscription_status === 'active';
+    var subBadge = hasSubscription
+      ? '<span class="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-600 text-[11px] font-semibold rounded-full"><i class="fas fa-sync-alt text-[9px]"></i>구독</span>'
       : '';
 
-    return '<div class="mb-6 last:mb-0 p-4 bg-gray-50 rounded-xl border border-gray-100">' +
-      '<a href="/class/'+e.slug+'" class="flex gap-4 mb-4">' +
-        '<img src="'+(e.thumbnail || '')+'" class="w-24 h-16 rounded-lg object-cover flex-shrink-0 bg-gray-200" onerror="this.onerror=null; this.style.display=&apos;none&apos;">' +
-        '<div class="flex-1 min-w-0">' +
-          '<div class="flex items-center gap-2 mb-1"><p class="text-base font-bold text-dark-800 truncate">'+e.title+'</p>'+subscriptionBadge+'</div>' +
-          '<p class="text-sm text-gray-500">'+e.instructor_name+'</p>' +
+    // 강의 목록 (최대 5개, 나머지는 접기)
+    var lessonsHtml = '';
+    if (totalLessons > 0) {
+      lessonsHtml = lessons.map(function(lesson, idx) {
+        var start = new Date(lesson.scheduled_at).getTime();
+        var end = start + (lesson.duration_minutes || 60) * 60 * 1000;
+        var isEnded = end < now;
+        var isLive = !isEnded && start <= now && now < end;
+        var dateStr = new Date(lesson.scheduled_at).toLocaleDateString('ko-KR', { timeZone:'Asia/Seoul', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+
+        var icon, statusText, actionHtml;
+        if (isEnded) {
+          icon = '<div class="w-7 h-7 bg-gray-100 rounded-full flex items-center justify-center flex-shrink-0"><i class="fas fa-check text-gray-400 text-xs"></i></div>';
+          statusText = '<span class="text-[11px] text-gray-400">완료</span>';
+          actionHtml = lesson.replay_url
+            ? '<a href="'+lesson.replay_url+'" target="_blank" class="inline-flex items-center gap-1 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-medium rounded-lg transition-all"><i class="fas fa-play text-[10px]"></i>다시보기</a>'
+            : '';
+        } else if (isLive) {
+          icon = '<div class="w-7 h-7 bg-red-500 rounded-full flex items-center justify-center flex-shrink-0 shadow-lg shadow-red-200"><span class="w-2 h-2 bg-white rounded-full animate-pulse"></span></div>';
+          statusText = '<span class="text-[11px] text-red-500 font-bold">LIVE</span>';
+          actionHtml = lesson.session_id
+            ? '<a href="/api/classin/enter/'+lesson.session_id+'?redirect=true" target="_blank" class="inline-flex items-center gap-1 px-4 py-1.5 bg-red-500 hover:bg-red-600 text-white text-xs font-bold rounded-lg transition-all shadow-md shadow-red-200"><i class="fas fa-door-open text-[10px]"></i>입장</a>'
+            : '';
+        } else {
+          icon = '<div class="w-7 h-7 bg-blue-50 rounded-full flex items-center justify-center flex-shrink-0"><span class="text-[11px] font-bold text-blue-500">'+(idx+1)+'</span></div>';
+          statusText = '<span class="text-[11px] text-blue-500">' + dateStr + '</span>';
+          actionHtml = lesson.session_id
+            ? '<a href="/api/classin/enter/'+lesson.session_id+'?redirect=true" target="_blank" class="inline-flex items-center gap-1 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-600 text-xs font-medium rounded-lg transition-all"><i class="fas fa-door-open text-[10px]"></i>입장</a>'
+            : '<span class="text-[11px] text-gray-300">준비중</span>';
+        }
+
+        var hiddenClass = idx >= 3 ? ' lesson-hidden-'+e.id+' hidden' : '';
+
+        return '<div class="flex items-center gap-3 py-2.5' + hiddenClass + '">' +
+          icon +
+          '<div class="flex-1 min-w-0">' +
+            '<p class="text-sm font-medium text-gray-700 truncate">' + (lesson.lesson_title || '제목 없음') + '</p>' +
+            statusText +
+          '</div>' +
+          '<div class="flex-shrink-0">' + actionHtml + '</div>' +
+        '</div>';
+      }).join('<div class="border-b border-gray-50"></div>');
+
+      // 더보기 버튼
+      if (totalLessons > 3) {
+        lessonsHtml += '<button onclick="toggleLessons('+e.id+')" id="toggleBtn-'+e.id+'" class="w-full mt-2 py-2 text-xs text-gray-400 hover:text-gray-600 transition-all">' +
+          '<i class="fas fa-chevron-down mr-1"></i>나머지 ' + (totalLessons - 3) + '개 강의 보기</button>';
+      }
+    } else {
+      lessonsHtml = '<p class="text-sm text-gray-400 text-center py-6">예정된 강의가 없습니다</p>';
+    }
+
+    return '<div class="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm hover:shadow-md transition-shadow">' +
+      // 코스 헤더
+      '<a href="/class/'+e.slug+'" class="flex gap-4 p-4 pb-3 hover:bg-gray-50 transition-colors">' +
+        '<img src="'+(e.thumbnail || '')+'" class="w-20 h-20 rounded-xl object-cover flex-shrink-0 bg-gray-100" onerror="this.onerror=null; this.src=&apos;data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2280%22 height=%2280%22><rect fill=%22%23f3f4f6%22 width=%2280%22 height=%2280%22/><text x=%2240%22 y=%2245%22 font-size=%2220%22 text-anchor=%22middle%22 fill=%22%23d1d5db%22>?</text></svg>&apos;">' +
+        '<div class="flex-1 min-w-0 py-1">' +
+          '<div class="flex items-center gap-2 mb-1.5">' +
+            '<p class="text-base font-bold text-gray-800 truncate">' + e.title + '</p>' +
+            subBadge +
+          '</div>' +
+          '<p class="text-sm text-gray-400 mb-2">' + e.instructor_name + '</p>' +
+          // 프로그레스 바
+          '<div class="flex items-center gap-2">' +
+            '<div class="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">' +
+              '<div class="h-full bg-gradient-to-r from-primary-400 to-primary-500 rounded-full transition-all" style="width:' + progress + '%"></div>' +
+            '</div>' +
+            '<span class="text-[11px] text-gray-400 flex-shrink-0">' + completedLessons + '/' + totalLessons + '강</span>' +
+          '</div>' +
         '</div>' +
+        '<i class="fas fa-chevron-right text-gray-300 self-center text-sm"></i>' +
       '</a>' +
-      '<div class="bg-white rounded-lg p-3 border border-gray-100">' +
-        '<h4 class="text-sm font-semibold text-dark-700 mb-2"><i class="fas fa-list-ol text-primary-400 mr-1"></i>강의 목록</h4>' +
+      // 강의 목록
+      '<div class="px-4 pb-4 pt-1 border-t border-gray-50">' +
         lessonsHtml +
       '</div>' +
     '</div>';
-  }).join('');
+  }).join('') + '</div>';
+}
+
+function toggleLessons(courseId) {
+  var items = document.querySelectorAll('.lesson-hidden-' + courseId);
+  var btn = document.getElementById('toggleBtn-' + courseId);
+  var isHidden = items[0] && items[0].classList.contains('hidden');
+  items.forEach(function(el) { el.classList.toggle('hidden'); });
+  // 구분선도 토글
+  if (isHidden) {
+    btn.innerHTML = '<i class="fas fa-chevron-up mr-1"></i>접기';
+  } else {
+    btn.innerHTML = '<i class="fas fa-chevron-down mr-1"></i>나머지 ' + items.length + '개 강의 보기';
+  }
 }
 </script>
 
