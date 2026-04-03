@@ -14,8 +14,8 @@
     "HECTO_LICENSE_KEY": "ST2603311528473489564",
     "HECTO_AES_KEY": "WI8YPMkKS5CNVF1595g9U46BRHG80k1a",
     "HECTO_PAYMENT_SERVER": "https://npg.settlebank.co.kr",
-    "HECTO_CANCEL_SERVER": "https://gw.settlebank.co.kr",
-    "JWT_SECRET": "CHANGE_ME_USE_WRANGLER_SECRET"
+    "HECTO_CANCEL_SERVER": "https://gw.settlebank.co.kr"
+    // JWT_SECRET는 wrangler pages secret으로 설정됨
     // Cloudflare Stream (녹화 강의 스트리밍용) - 대시보드에서 설정
     // "CF_ACCOUNT_ID": "your-account-id",
     // "CF_STREAM_TOKEN": "your-stream-api-token"
