@@ -19,7 +19,11 @@
 - `wrangler.teachers.jsonc` - 강사용 환경 설정
 
 ## 실수 노트 (Mistake Log)
-(아직 없음 - 작업 중 실수 발생 시 여기에 기록)
+### 2026-04-03: 레거시 비밀번호 형식 누락
+- **실수**: 보안 패치 시 seed.sql의 비밀번호 형식이 `pbkdf2_test1234`인 것을 놓쳐 레거시 로그인 실패
+- **원인**: `hash_` 형식만 가정하고 seed 데이터 미확인
+- **해결**: verifyPassword에 `pbkdf2_` 형식 추가 (3가지 형식 지원: `pbkdf2:`, `hash_`, `pbkdf2_`)
+- **교훈**: DB 스키마 변경 시 반드시 seed.sql과 실제 프로덕션 DB 데이터 형식 모두 확인
 
 ## 작업 컨벤션
 - 커밋 메시지: 한글 또는 영어, feat/fix/refactor 프리픽스

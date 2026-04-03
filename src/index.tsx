@@ -20,6 +20,7 @@ type Bindings = {
   HECTO_AES_KEY?: string
   HECTO_PAYMENT_SERVER?: string
   HECTO_CANCEL_SERVER?: string
+  JWT_SECRET: string
 }
 
 // Helper: 브랜드명을 환경변수로 치환
@@ -1822,13 +1823,14 @@ app.get('/api/classes/:id/reviews', async (c) => {
 // Simple auth - login
 app.post('/api/auth/login', async (c) => {
   const { email, password } = await c.req.json()
-  const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, subscription_plan, subscription_expires_at, is_test_account, test_expires_at FROM users WHERE email = ?').bind(email).first() as any
+  const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, subscription_plan, subscription_expires_at, is_test_account, test_expires_at, password_hash FROM users WHERE email = ?').bind(email).first() as any
   if (!user) return c.json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' }, 401)
 
-  // JWT 형식 토큰 생성 (간단 구현: base64 인코딩)
-  const header = btoa(JSON.stringify({ alg: 'none', typ: 'JWT' }))
-  const payload = btoa(JSON.stringify({ sub: user.id, email: user.email, role: user.role || 'user', exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }))
-  const token = `${header}.${payload}.`
+  const isValid = await verifyPassword(password, user.password_hash)
+  if (!isValid) return c.json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' }, 401)
+
+  const token = await createJWT({ sub: user.id, email: user.email, role: user.role || 'user', exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }, c.env.JWT_SECRET)
+  delete user.password_hash
 
   return c.json({ user, token })
 })
@@ -1845,16 +1847,14 @@ app.post('/api/auth/register', async (c) => {
     : null
 
   try {
+    const passwordHash = await hashPassword(password)
     const result = await c.env.DB.prepare(
       'INSERT INTO users (email, password_hash, name, is_test_account, test_expires_at) VALUES (?, ?, ?, ?, ?)'
-    ).bind(email, `hash_${password}`, name, isTestAccount ? 1 : 0, testExpiresAt).run()
+    ).bind(email, passwordHash, name, isTestAccount ? 1 : 0, testExpiresAt).run()
     const userId = result.meta.last_row_id
     const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, is_test_account, test_expires_at FROM users WHERE id = ?').bind(userId).first() as any
 
-    // JWT 형식 토큰 생성
-    const header = btoa(JSON.stringify({ alg: 'none', typ: 'JWT' }))
-    const payload = btoa(JSON.stringify({ sub: user.id, email: user.email, role: user.role || 'user', exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }))
-    const token = `${header}.${payload}.`
+    const token = await createJWT({ sub: user.id, email: user.email, role: user.role || 'user', exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }, c.env.JWT_SECRET)
 
     return c.json({
       user,
@@ -2857,13 +2857,22 @@ app.post('/api/test-account/enroll', async (c) => {
   }
 })
 
-// Admin: Create test access code
-app.post('/api/admin/test-codes/create', async (c) => {
-  const { code, description, maxUses, expiresAt, adminKey } = await c.req.json()
-
-  if (adminKey !== 'classin-admin-2024') {
+// Admin API authentication middleware
+app.use('/api/admin/*', async (c, next) => {
+  if (c.req.path === '/api/admin/login' && c.req.method === 'POST') {
+    return next()
+  }
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+  if (!isLoggedIn) {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
+  return next()
+})
+
+// Admin: Create test access code
+app.post('/api/admin/test-codes/create', async (c) => {
+  const { code, description, maxUses, expiresAt } = await c.req.json()
 
   const finalCode = code || `TEST-${Date.now().toString(36).toUpperCase()}`
 
@@ -2890,11 +2899,6 @@ app.get('/api/admin/test-codes', async (c) => {
 // End enrollment and return virtual account (관리자: 수강 종료 및 가상 계정 반납)
 app.post('/api/admin/enrollments/:enrollmentId/end', async (c) => {
   const enrollmentId = parseInt(c.req.param('enrollmentId'))
-  const { adminKey } = await c.req.json()
-
-  if (adminKey !== 'classin-admin-2024') {
-    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
-  }
 
   const enrollment = await c.env.DB.prepare('SELECT * FROM enrollments WHERE id = ?').bind(enrollmentId).first() as any
   if (!enrollment) {
@@ -2918,12 +2922,6 @@ app.post('/api/admin/enrollments/:enrollmentId/end', async (c) => {
 
 // Process expired enrollments and return virtual accounts (만료된 수강권 자동 반납)
 app.post('/api/admin/enrollments/process-expired', async (c) => {
-  const { adminKey } = await c.req.json()
-
-  if (adminKey !== 'classin-admin-2024') {
-    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
-  }
-
   // Find expired enrollments with assigned virtual accounts
   const { results: expiredEnrollments } = await c.env.DB.prepare(`
     SELECT id, classin_account_uid FROM enrollments
@@ -2952,12 +2950,7 @@ app.post('/api/admin/enrollments/process-expired', async (c) => {
 
 // Initialize virtual accounts (관리자: 가상 계정 일괄 생성)
 app.post('/api/admin/virtual-accounts/init', async (c) => {
-  const { startUid, endUid, sid, expiresAt, adminKey } = await c.req.json()
-
-  // Simple admin key check (in production, use proper auth)
-  if (adminKey !== 'classin-admin-2024') {
-    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
-  }
+  const { startUid, endUid, sid, expiresAt } = await c.req.json()
 
   if (!startUid || !endUid || !sid) {
     return c.json({ error: 'startUid, endUid, sid가 필요합니다.' }, 400)
@@ -3834,17 +3827,13 @@ app.get('/api/lessons/:lessonId/stream-url', async (c) => {
     return c.json({ error: '인증이 필요합니다.' }, 401)
   }
 
-  // JWT에서 userId, role 추출 (간단한 구현)
   const token = authHeader.replace('Bearer ', '')
-  let userId: number
-  let userRole: string = 'user'
-  try {
-    const payload = JSON.parse(atob(token.split('.')[1]))
-    userId = payload.sub
-    userRole = payload.role || 'user'
-  } catch {
+  const jwtPayload = await verifyJWT(token, c.env.JWT_SECRET)
+  if (!jwtPayload) {
     return c.json({ error: '유효하지 않은 토큰입니다.' }, 401)
   }
+  const userId: number = jwtPayload.sub
+  const userRole: string = jwtPayload.role || 'user'
 
   // 강의 정보 조회 (강사 ID 포함)
   const lesson = await c.env.DB.prepare(`
@@ -7226,12 +7215,12 @@ const globalScripts = `
 if (typeof currentUser === 'undefined') { var currentUser = JSON.parse(localStorage.getItem('classin_user') || 'null'); }
 if (typeof currentToken === 'undefined') { var currentToken = localStorage.getItem('classin_token') || null; }
 
-// 토큰이 없거나 구 형식이면 새로 생성
+// 토큰이 없거나 구 형식이면 재로그인 필요
 if (currentUser && (!currentToken || currentToken.startsWith('demo_token_'))) {
-  const header = btoa(JSON.stringify({ alg: 'none', typ: 'JWT' }));
-  const payload = btoa(JSON.stringify({ sub: currentUser.id, email: currentUser.email, role: currentUser.role || 'user', exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }));
-  currentToken = header + '.' + payload + '.';
-  localStorage.setItem('classin_token', currentToken);
+  localStorage.removeItem('classin_token');
+  localStorage.removeItem('classin_user');
+  currentUser = null;
+  currentToken = null;
 }
 
 // ==================== Auth ====================
@@ -10180,12 +10169,11 @@ function closePlayer() {
     const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
     const isAdminOrInstructor = user && (user.role === 'admin' || user.role === 'instructor');
 
-    // 토큰이 없거나 구 형식이면 새로 생성
+    // 토큰이 없거나 구 형식이면 재로그인 필요
     if (user && (!token || token.startsWith('demo_token_'))) {
-      const header = btoa(JSON.stringify({ alg: 'none', typ: 'JWT' }));
-      const payload = btoa(JSON.stringify({ sub: user.id, email: user.email, role: user.role || 'user', exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }));
-      token = header + '.' + payload + '.';
-      localStorage.setItem('classin_token', token);
+      localStorage.removeItem('classin_token');
+      localStorage.removeItem('classin_user');
+      token = null;
     }
 
     // 관리자/강사/무료가 아니고 토큰이 없으면 결제 필요
@@ -10605,6 +10593,74 @@ function simpleHash(str: string): string {
     hash = hash & hash
   }
   return hash.toString(16)
+}
+
+// Password hashing with PBKDF2 (Web Crypto API)
+async function hashPassword(password: string): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits'])
+  const hash = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' }, keyMaterial, 256)
+  const saltB64 = btoa(String.fromCharCode(...salt))
+  const hashB64 = btoa(String.fromCharCode(...new Uint8Array(hash)))
+  return `pbkdf2:${saltB64}:${hashB64}`
+}
+
+async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
+  if (storedHash.startsWith('pbkdf2:')) {
+    const [, saltB64, hashB64] = storedHash.split(':')
+    const salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0))
+    const expectedHash = Uint8Array.from(atob(hashB64), c => c.charCodeAt(0))
+    const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits'])
+    const actualHash = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' }, keyMaterial, 256))
+    if (actualHash.length !== expectedHash.length) return false
+    let diff = 0
+    for (let i = 0; i < actualHash.length; i++) diff |= actualHash[i] ^ expectedHash[i]
+    return diff === 0
+  }
+  if (storedHash.startsWith('hash_')) {
+    return password === storedHash.slice(5)
+  }
+  if (storedHash.startsWith('pbkdf2_')) {
+    return password === storedHash.slice(7)
+  }
+  return false
+}
+
+// JWT helpers with HMAC-SHA256 (Web Crypto API)
+function base64urlEncode(data: string): string {
+  return btoa(data).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+function base64urlDecode(s: string): string {
+  s = s.replace(/-/g, '+').replace(/_/g, '/')
+  while (s.length % 4) s += '='
+  return atob(s)
+}
+
+async function createJWT(payload: Record<string, any>, secret: string): Promise<string> {
+  const header = base64urlEncode(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
+  const body = base64urlEncode(JSON.stringify(payload))
+  const signingInput = `${header}.${body}`
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signingInput)))
+  const signature = base64urlEncode(String.fromCharCode(...sig))
+  return `${signingInput}.${signature}`
+}
+
+async function verifyJWT(token: string, secret: string): Promise<Record<string, any> | null> {
+  const parts = token.split('.')
+  if (parts.length !== 3) return null
+  try {
+    const signingInput = `${parts[0]}.${parts[1]}`
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
+    const signature = Uint8Array.from(base64urlDecode(parts[2]), c => c.charCodeAt(0))
+    const valid = await crypto.subtle.verify('HMAC', key, signature, new TextEncoder().encode(signingInput))
+    if (!valid) return null
+    const payload = JSON.parse(base64urlDecode(parts[1]))
+    if (payload.exp && payload.exp < Date.now()) return null
+    return payload
+  } catch {
+    return null
+  }
 }
 
 // Generate session token

@@ -1,74 +1,72 @@
-# 세션 로그 — 2026-03-27
+# 세션 로그 — 2026-04-03
 
 ## 완료된 작업
 
-### 1. 프로젝트 클론 및 환경 설정
-- GitHub `jungyoul4-arch/classin-live` (SSH) 클론 → `~/Desktop/classin live`
-- Hono + Vite + Cloudflare Workers + D1 프로젝트
-- npm install + DB 마이그레이션 (0001~0015) + seed 데이터 적용
-- Vite dev 서버 http://localhost:5173 구동
+### 1. GitHub Pull
+- `origin/main`에서 최신 코드 pull (e50ea2d → 410c476)
+- 헥토 PG 결제 연동, 관리자 결제 관리, 강사 가상계정, 청크 업로드 등 다수 커밋 포함
+- `wrangler.jsonc`가 원격에서 삭제됨 → stash 후 pull
 
-### 2. 마이페이지(나의 강의실) UI 리디자인 (Class101 참고)
-- **작업 완료 후 GitHub pull로 초기화됨** (로컬 변경 discard)
-- Firecrawl로 Class101 크롤링 → 디자인 패턴 분석 (컬러 #FF5D00, Pretendard 폰트, 카드형 레이아웃)
-- 변경 내용 (현재 코드에는 반영 안 됨, 재적용 필요):
-  - 사이드바 헤더: 졸업모자 아이콘 + "나의 강의실" + 그라디언트 배경
-  - 프로필: 그라디언트 사각형 아바타 + 수강 통계 카드 (수강중 N / 수강완료 N)
-  - 탭: pill → 언더라인 스타일
-  - 수강중 카드: 큰 썸네일(h-36) + LIVE 배지 + D-day 카운트다운 + 전체 너비 CTA
-  - 수강완료 탭: 리뷰 작성하기 CTA 추가
+### 2. 관리자 홈페이지 관리 기능 구현
+- **커밋**: `4e6c2da` - `feat: 관리자 홈페이지 관리 기능 추가`
+- **DB 마이그레이션**: `migrations/0020_homepage_sort_order.sql` - `homepage_sort_order` 컬럼 추가
+- **API 3개 추가**:
+  - `GET /api/admin/homepage/sections` - 3개 섹션별 코스 목록 조회
+  - `PUT /api/admin/classes/:id/homepage-flags` - 베스트/신규 토글
+  - `PUT /api/admin/homepage/reorder` - 순서 일괄 업데이트 (D1 batch)
+- **홈페이지 쿼리 수정**: 3개 섹션 ORDER BY에 `homepage_sort_order ASC` 추가
+- **관리자 대시보드**: "홈페이지 관리" 바로가기 카드 추가
+- **새 페이지 `/admin/homepage`**: 3개 섹션 관리 UI
+  - 베스트 코스: 추가/제거/순서변경
+  - 라이브 코스: 순서만 변경 (class_type='live' 자동 포함)
+  - 신규 코스: 추가/제거/순서변경
+  - 드래그앤드롭 + 위/아래 버튼 순서 변경
+  - 코스 검색 모달로 추가
 
-### 3. 어드민 - 코스별 강의 추가 버튼
-- 코스 펼침 시 "라이브 강의 추가" + "녹화 강의 추가" 버튼 표시
-- `loadCourseLessons()` 수정 + `buildLessonAddButtons()` 함수 추가
-- API `/api/admin/classes/:classId/lessons`에 `courseInfo` 반환 추가
-- 라이브 강의 버튼: ClassIn UID 없어도 활성화 상태로 변경
+### 3. Playwright MCP 테스트 검증
+- 코스 추가: 6/8 → 7/8 (통과)
+- 코스 제거: 7/8 → 6/8 (통과)
+- 순서 변경: DB 저장 확인 (통과)
+- 홈페이지 반영: 변경된 순서대로 표시 (통과)
+- 콘솔 에러: 0개
 
-### 4. 회차별 커리큘럼 + 강의자료 첨부 기능
-- **DB 마이그레이션**: `migrations/0016_lesson_curriculum.sql`
-  - `class_lessons`에 `description`, `curriculum_items` (JSON), `materials` (JSON) 컬럼 추가
-- **파일 업로드 API**: `POST /api/admin/upload-material`
-  - 허용: PDF, DOCX, PPTX, HWP, ZIP, XLS, XLSX, TXT (최대 50MB)
-  - R2 저장: `materials/{timestamp}-{random}.{ext}`
-  - 서빙: `GET /api/materials/*`
-- **어드민 UI - 강의 생성 모달 개선**:
-  - `addLessonRow()`: 강의 설명 textarea + 커리큘럼 항목 동적 추가 (제목+설명) + 강의 자료 업로드 (최대 5개)
-  - `addCurriculumItem()`, `uploadMaterial()`, `collectLessonData()` 함수 추가
-  - `confirmCreateSession()`에서 `collectLessonData()` 사용하도록 수정
-- **API 수정**:
-  - `POST /api/admin/classes/:classId/create-sessions`: description, curriculumItems, materials 저장
-  - `POST /api/admin/classes/:classId/create-recorded-lesson`: 동일하게 새 필드 저장
+### 4. 배포 완료
+- 프로덕션 D1 마이그레이션 적용 (account: 8df9097bbfeeeb95dc7c44e4103bc656)
+- Cloudflare Pages 배포: https://classin-live.jung-youl.com
+- GitHub push 완료
+
+### 5. CRITICAL 보안 패치 (4건 → 8개 패치)
+- **감사 보고서 3개 생성** (병렬 에이전트):
+  - `docs/audit-a1-api-contracts.md` — 119개 API 엔드포인트 계약 문서화
+  - `docs/audit-a2-security-stability.md` — CRITICAL 4건, HIGH 6건+ 발견
+  - `docs/audit-a3-performance.md` — HIGH 7건, MEDIUM 9건 성능 병목
+- **PATCH 0**: Bindings 타입에 `JWT_SECRET` 추가, wrangler 설정 업데이트
+- **PATCH 1**: PBKDF2 비밀번호 해싱 헬퍼 (`hashPassword`, `verifyPassword`)
+- **PATCH 2**: HMAC-SHA256 JWT 헬퍼 (`createJWT`, `verifyJWT`)
+- **PATCH 3**: 로그인 — 비밀번호 검증 추가 + JWT 서명
+- **PATCH 4**: 회원가입 — `hash_${password}` → PBKDF2 해싱
+- **PATCH 5**: 스트리밍 토큰 검증 — base64 디코딩 → `verifyJWT()` 
+- **PATCH 6**: 클라이언트측 `alg: "none"` 토큰 생성 제거 (2곳)
+- **PATCH 7**: 관리자 API 미들웨어 추가 (42개 엔드포인트 보호) + 하드코딩 키 제거
+- **검증 결과**: 6/6 테스트 통과 (회원가입, 로그인, 잘못된 비밀번호 거부, 레거시 비밀번호, 관리자 API 거부, 위조 토큰 거부)
+- **주의**: 배포 시 `wrangler secret put JWT_SECRET` 필요, 기존 사용자 재로그인 필요
 
 ## 진행 중인 작업 (미완료)
-
-### 마이페이지 리디자인 재적용
-- GitHub pull로 초기화됨 → 새 코드 기반으로 재적용 필요
-- 계획 파일: `~/.claude/plans/jazzy-humming-penguin.md` 참고
-
-### 커리큘럼 기능 - 남은 단계
-1. **어드민 강의 목록 표시 개선** (`renderLessonRow()` 수정)
-   - 강의명 옆에 커리큘럼 항목 수 배지 표시
-   - 자료 있으면 📎 아이콘 표시
-   - 행 클릭/확장 시 커리큘럼 상세 표시
-2. **학생 페이지 - 강의 목록에 커리큘럼 표시** (`/class/:slug` 7200줄 부근)
-   - 각 강의 아래에 커리큘럼 항목 표시 (아코디언 펼침)
-   - 자료 다운로드 링크 (수강생만)
-3. **녹화 강의 모달에도 커리큘럼 UI 추가** (`openRecordedLessonModal()`)
+- 이전 세션의 마이페이지 리디자인 재적용 (GitHub pull로 초기화됨)
+- 커리큘럼 기능 남은 단계 (어드민 강의 목록 표시 개선, 학생 페이지 커리큘럼 표시)
 
 ## 중요 결정사항
-- `class_lessons` 테이블에 커리큘럼 통합 (별도 `lessons` 테이블 대신)
-- 커리큘럼 항목: 제목 + 설명 구조
-- 강의 자료: 회차당 최대 5개, 문서류 전체 허용 (PDF, DOCX, PPTX, HWP, ZIP, XLS, TXT)
-- 어드민 비밀번호: admin / jungyoul1234
-- 테스트 학생: student1@test.com / test1234 (user_id=8)
-- Playwright로 localhost:5173 브라우저 테스트 가능 (Chrome 별도 프로필)
+- 홈페이지 관리는 별도 `/admin/homepage` 페이지로 분리 (기존 코스 CRUD와 독립)
+- 기존 `is_bestseller`, `is_new` DB 필드 활용 (새 테이블 불필요)
+- `homepage_sort_order` 1개 컬럼만 추가하여 3개 섹션 모두 정렬 제어
+- 라이브 코스 섹션은 class_type 기반 자동 포함, 순서만 관리자 제어
 
 ## 프로젝트 구조 요약
-- **단일 파일**: `src/index.tsx` (~10700줄) - 모든 라우트, HTML, JS
+- **단일 파일**: `src/index.tsx` (~14500줄) - 모든 라우트, HTML, JS
 - **DB**: Cloudflare D1 SQLite (바인딩명: DB)
-- **스토리지**: Cloudflare R2 (바인딩명: IMAGES) - 이미지 + 자료 파일
-- **외부 API**: ClassIn (EEO.cn) 라이브 수업, Cloudflare Stream 녹화 강의
+- **스토리지**: Cloudflare R2 (바인딩명: IMAGES)
+- **외부 API**: ClassIn (EEO.cn), 헥토파이낸셜 PG, Cloudflare Stream
 - **GitHub**: `jungyoul4-arch/classin-live` (main 브랜치)
-
-## 보리스 워크플로우 스킬
-- `boris-workflow` 설치됨 - 개발 작업 시 5원칙 자동 적용
+- **Cloudflare Account ID**: `8df9097bbfeeeb95dc7c44e4103bc656`
+- **관리자**: admin / jungyoul1234
+- **테스트 학생**: student1@test.com / test1234
