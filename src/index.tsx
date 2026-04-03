@@ -4645,6 +4645,92 @@ app.delete('/api/admin/classes/:id', async (c) => {
   return c.json({ success: true, message: '코스가 삭제되었습니다.' })
 })
 
+// ==================== 홈페이지 관리 API ====================
+
+// 관리자: 홈페이지 3개 섹션 코스 목록 조회
+app.get('/api/admin/homepage/sections', async (c) => {
+  const bestseller = await c.env.DB.prepare(`
+    SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
+           i.display_name as instructor_name
+    FROM classes c JOIN instructors i ON c.instructor_id = i.id
+    WHERE c.status = 'active' AND c.is_bestseller = 1
+    ORDER BY c.homepage_sort_order ASC, c.rating DESC
+  `).all()
+
+  const newCourses = await c.env.DB.prepare(`
+    SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
+           i.display_name as instructor_name
+    FROM classes c JOIN instructors i ON c.instructor_id = i.id
+    WHERE c.status = 'active' AND c.is_new = 1
+    ORDER BY c.homepage_sort_order ASC, c.created_at DESC
+  `).all()
+
+  const liveCourses = await c.env.DB.prepare(`
+    SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
+           i.display_name as instructor_name
+    FROM classes c JOIN instructors i ON c.instructor_id = i.id
+    WHERE c.status = 'active' AND c.class_type = 'live'
+    ORDER BY c.homepage_sort_order ASC, c.schedule_start ASC
+  `).all()
+
+  const allActive = await c.env.DB.prepare(`
+    SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.status,
+           i.display_name as instructor_name
+    FROM classes c JOIN instructors i ON c.instructor_id = i.id
+    WHERE c.status = 'active'
+    ORDER BY c.title ASC
+  `).all()
+
+  return c.json({
+    bestseller: bestseller.results,
+    newCourses: newCourses.results,
+    liveCourses: liveCourses.results,
+    allActive: allActive.results
+  })
+})
+
+// 관리자: 코스 홈페이지 플래그 업데이트 (베스트/신규 토글)
+app.put('/api/admin/classes/:id/homepage-flags', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const { isBestseller, isNew, homepageSortOrder } = await c.req.json()
+
+  const cls = await c.env.DB.prepare('SELECT id FROM classes WHERE id = ?').bind(classId).first()
+  if (!cls) return c.json({ error: '코스를 찾을 수 없습니다.' }, 404)
+
+  await c.env.DB.prepare(`
+    UPDATE classes SET
+      is_bestseller = COALESCE(?, is_bestseller),
+      is_new = COALESCE(?, is_new),
+      homepage_sort_order = COALESCE(?, homepage_sort_order),
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(
+    isBestseller !== undefined ? isBestseller : null,
+    isNew !== undefined ? isNew : null,
+    homepageSortOrder !== undefined ? homepageSortOrder : null,
+    classId
+  ).run()
+
+  return c.json({ success: true })
+})
+
+// 관리자: 홈페이지 섹션 내 코스 순서 일괄 업데이트
+app.put('/api/admin/homepage/reorder', async (c) => {
+  const { items } = await c.req.json() as { items: { id: number, sortOrder: number }[] }
+
+  if (!items || !Array.isArray(items)) {
+    return c.json({ error: 'items 배열이 필요합니다.' }, 400)
+  }
+
+  const stmts = items.map(item =>
+    c.env.DB.prepare('UPDATE classes SET homepage_sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(item.sortOrder, item.id)
+  )
+  await c.env.DB.batch(stmts)
+
+  return c.json({ success: true })
+})
+
 // 관리자: 카테고리 목록
 app.get('/api/admin/categories', async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM categories ORDER BY sort_order, name').all()
@@ -8346,17 +8432,17 @@ app.get('/', async (c) => {
   const featured = await c.env.DB.prepare(`
     SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
     FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
-    WHERE c.status = 'active' AND c.is_bestseller = 1 ORDER BY c.rating DESC LIMIT 8
+    WHERE c.status = 'active' AND c.is_bestseller = 1 ORDER BY c.homepage_sort_order ASC, c.rating DESC LIMIT 8
   `).all()
   const newClasses = await c.env.DB.prepare(`
     SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
     FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
-    WHERE c.status = 'active' AND c.is_new = 1 ORDER BY c.created_at DESC LIMIT 8
+    WHERE c.status = 'active' AND c.is_new = 1 ORDER BY c.homepage_sort_order ASC, c.created_at DESC LIMIT 8
   `).all()
   const liveClasses = await c.env.DB.prepare(`
     SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
     FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
-    WHERE c.status = 'active' AND c.class_type = 'live' ORDER BY c.schedule_start ASC LIMIT 8
+    WHERE c.status = 'active' AND c.class_type = 'live' ORDER BY c.homepage_sort_order ASC, c.schedule_start ASC LIMIT 8
   `).all()
 
   const html = `${headHTML}
@@ -10954,6 +11040,22 @@ app.get('/admin', async (c) => {
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Homepage Management Link -->
+    <div class="bg-white rounded-xl p-6 shadow-sm mb-8">
+      <a href="/admin/homepage" class="flex items-center justify-between hover:bg-gray-50 -m-6 p-6 rounded-xl transition-all">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-rose-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-home text-rose-500 text-xl"></i>
+          </div>
+          <div>
+            <h2 class="text-lg font-bold text-gray-800">홈페이지 관리</h2>
+            <p class="text-sm text-gray-500">메인 페이지 코스 배치 및 순서 관리</p>
+          </div>
+        </div>
+        <i class="fas fa-chevron-right text-gray-400"></i>
+      </a>
     </div>
 
     <!-- Orders Management Link -->
@@ -13994,6 +14096,413 @@ async function processExpiredEnrollments(db: D1Database) {
 
   return { processed: expiredEnrollments.length, returned: returnedCount }
 }
+
+// ==================== 홈페이지 관리 페이지 ====================
+app.get('/admin/homepage', async (c) => {
+  const authRedirect = await requireAdminAuth(c)
+  if (authRedirect) return authRedirect
+
+  return c.html(`
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>홈페이지 관리 - ClassIn Live 관리자</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.0/css/all.min.css" rel="stylesheet">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap');
+    * { font-family: 'Noto Sans KR', sans-serif; }
+    .drag-over { border: 2px dashed #3b82f6 !important; background: #eff6ff !important; }
+    .dragging { opacity: 0.5; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <nav class="bg-gray-900 text-white shadow-lg">
+    <div class="max-w-7xl mx-auto px-4 py-4">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <a href="/" class="text-xl font-bold text-rose-400">ClassIn Live</a>
+          <span class="text-gray-400">|</span>
+          <span class="text-gray-300">홈페이지 관리</span>
+        </div>
+        <a href="/admin" class="text-sm text-gray-400 hover:text-white"><i class="fas fa-arrow-left mr-1"></i>관리자 대시보드</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="max-w-7xl mx-auto px-4 py-8">
+    <!-- 안내 -->
+    <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+      <p class="text-sm text-blue-700"><i class="fas fa-info-circle mr-1"></i>메인 홈페이지에 표시되는 3개 섹션의 코스를 관리합니다. 코스를 추가/제거하고 표시 순서를 변경할 수 있습니다.</p>
+    </div>
+
+    <!-- 베스트 코스 섹션 -->
+    <div class="bg-white rounded-xl p-6 shadow-sm mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-2">
+          <i class="fas fa-fire text-orange-500 text-lg"></i>
+          <h2 class="text-lg font-bold text-gray-800">베스트 코스</h2>
+          <span id="bestsellerCount" class="text-xs bg-orange-100 text-orange-600 font-semibold px-2 py-0.5 rounded-full">0/8</span>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="openAddCourseModal('bestseller')" class="text-sm bg-orange-500 hover:bg-orange-600 text-white px-3 py-1.5 rounded-lg transition-all">
+            <i class="fas fa-plus mr-1"></i>코스 추가
+          </button>
+          <button onclick="saveOrder('bestseller')" class="text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-lg transition-all">
+            <i class="fas fa-save mr-1"></i>순서 저장
+          </button>
+        </div>
+      </div>
+      <p class="text-xs text-gray-400 mb-3">is_bestseller = 1인 코스가 평점순으로 최대 8개 표시됩니다.</p>
+      <div id="bestsellerList" class="space-y-2">
+        <p class="text-sm text-gray-400 py-4 text-center">로딩 중...</p>
+      </div>
+    </div>
+
+    <!-- 예정된 라이브 코스 섹션 -->
+    <div class="bg-white rounded-xl p-6 shadow-sm mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
+          <h2 class="text-lg font-bold text-gray-800">예정된 라이브 양방향 코스</h2>
+          <span id="liveCount" class="text-xs bg-red-100 text-red-600 font-semibold px-2 py-0.5 rounded-full">0</span>
+        </div>
+        <button onclick="saveOrder('live')" class="text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-lg transition-all">
+          <i class="fas fa-save mr-1"></i>순서 저장
+        </button>
+      </div>
+      <p class="text-xs text-gray-400 mb-3">class_type = 'live'인 코스가 자동 포함됩니다. 순서만 변경 가능합니다.</p>
+      <div id="liveList" class="space-y-2">
+        <p class="text-sm text-gray-400 py-4 text-center">로딩 중...</p>
+      </div>
+    </div>
+
+    <!-- 신규 코스 섹션 -->
+    <div class="bg-white rounded-xl p-6 shadow-sm mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-2">
+          <i class="fas fa-sparkles text-blue-500 text-lg"></i>
+          <h2 class="text-lg font-bold text-gray-800">신규 코스</h2>
+          <span id="newCount" class="text-xs bg-blue-100 text-blue-600 font-semibold px-2 py-0.5 rounded-full">0/8</span>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="openAddCourseModal('new')" class="text-sm bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded-lg transition-all">
+            <i class="fas fa-plus mr-1"></i>코스 추가
+          </button>
+          <button onclick="saveOrder('new')" class="text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-lg transition-all">
+            <i class="fas fa-save mr-1"></i>순서 저장
+          </button>
+        </div>
+      </div>
+      <p class="text-xs text-gray-400 mb-3">is_new = 1인 코스가 생성일순으로 최대 8개 표시됩니다.</p>
+      <div id="newList" class="space-y-2">
+        <p class="text-sm text-gray-400 py-4 text-center">로딩 중...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 코스 추가 모달 -->
+  <div id="addCourseModal" class="fixed inset-0 bg-black/50 z-50 hidden items-center justify-center" onclick="if(event.target===this)closeAddCourseModal()">
+    <div class="bg-white rounded-2xl w-full max-w-lg mx-4 max-h-[80vh] flex flex-col">
+      <div class="p-5 border-b border-gray-100">
+        <div class="flex items-center justify-between">
+          <h3 id="addCourseModalTitle" class="text-lg font-bold text-gray-800">코스 추가</h3>
+          <button onclick="closeAddCourseModal()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="mt-3">
+          <input type="text" id="courseSearchInput" placeholder="코스명 또는 강사명으로 검색..."
+            class="w-full px-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            oninput="filterCourses()">
+        </div>
+      </div>
+      <div id="courseSearchResults" class="p-4 overflow-y-auto flex-1">
+        <p class="text-sm text-gray-400 text-center py-4">로딩 중...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 알림 모달 -->
+  <div id="alertModal" class="fixed inset-0 bg-black/50 z-50 hidden items-center justify-center" onclick="if(event.target===this)this.style.display='none'">
+    <div class="bg-white rounded-2xl p-6 max-w-sm mx-4 text-center">
+      <h3 id="alertTitle" class="text-lg font-bold text-gray-800 mb-2"></h3>
+      <p id="alertMessage" class="text-sm text-gray-600 mb-4"></p>
+      <button onclick="document.getElementById('alertModal').style.display='none'" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold px-6 py-2 rounded-lg">확인</button>
+    </div>
+  </div>
+
+<script>
+let sections = { bestseller: [], newCourses: [], liveCourses: [], allActive: [] };
+let currentSection = '';
+
+function showAlert(title, msg) {
+  document.getElementById('alertTitle').textContent = title;
+  document.getElementById('alertMessage').textContent = msg;
+  document.getElementById('alertModal').style.display = 'flex';
+}
+
+async function loadSections() {
+  try {
+    const res = await fetch('/api/admin/homepage/sections');
+    sections = await res.json();
+    renderSection('bestseller', sections.bestseller, 'bestsellerList', 'bestsellerCount');
+    renderSection('live', sections.liveCourses, 'liveList', 'liveCount');
+    renderSection('new', sections.newCourses, 'newList', 'newCount');
+  } catch (e) {
+    showAlert('오류', '데이터를 불러오지 못했습니다.');
+  }
+}
+
+function renderSection(type, courses, listId, countId) {
+  const list = document.getElementById(listId);
+  const countEl = document.getElementById(countId);
+
+  if (type === 'live') {
+    countEl.textContent = courses.length;
+  } else {
+    countEl.textContent = courses.length + '/8';
+  }
+
+  if (courses.length === 0) {
+    list.innerHTML = '<p class="text-sm text-gray-400 py-4 text-center">등록된 코스가 없습니다.</p>';
+    return;
+  }
+
+  list.innerHTML = courses.map((cls, idx) => \`
+    <div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg group" draggable="true"
+         data-section="\${type}" data-id="\${cls.id}" data-index="\${idx}"
+         ondragstart="onDragStart(event)" ondragover="onDragOver(event)" ondrop="onDrop(event)" ondragend="onDragEnd(event)">
+      <div class="cursor-grab text-gray-300 hover:text-gray-500">
+        <i class="fas fa-grip-vertical"></i>
+      </div>
+      <span class="text-xs text-gray-400 font-mono w-5 text-center">\${idx + 1}</span>
+      <img src="\${cls.thumbnail || ''}" class="w-14 h-10 rounded-lg object-cover bg-gray-200 flex-shrink-0" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 56 40%22><rect fill=%22%23e5e7eb%22 width=%2256%22 height=%2240%22/></svg>'">
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-semibold text-gray-800 truncate">\${cls.title}</p>
+        <p class="text-xs text-gray-500">\${cls.instructor_name} · \${cls.price ? cls.price.toLocaleString() + '원' : '무료'}</p>
+      </div>
+      <div class="flex items-center gap-1">
+        \${cls.is_bestseller ? '<span class="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded font-semibold">BEST</span>' : ''}
+        \${cls.is_new ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-semibold">NEW</span>' : ''}
+        \${cls.class_type === 'live' ? '<span class="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded font-semibold">LIVE</span>' : ''}
+      </div>
+      <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <button onclick="moveCourse('\${type}', \${idx}, -1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 \${idx === 0 ? 'invisible' : ''}">
+          <i class="fas fa-chevron-up text-xs"></i>
+        </button>
+        <button onclick="moveCourse('\${type}', \${idx}, 1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 \${idx === courses.length - 1 ? 'invisible' : ''}">
+          <i class="fas fa-chevron-down text-xs"></i>
+        </button>
+        \${type !== 'live' ? \`<button onclick="removeCourse('\${type}', \${cls.id})" class="w-7 h-7 flex items-center justify-center rounded hover:bg-red-100 text-red-400 hover:text-red-600">
+          <i class="fas fa-times text-xs"></i>
+        </button>\` : ''}
+      </div>
+    </div>
+  \`).join('');
+}
+
+// 드래그 앤 드롭
+let dragItem = null;
+
+function onDragStart(e) {
+  dragItem = e.currentTarget;
+  dragItem.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+
+function onDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  const target = e.currentTarget;
+  if (target !== dragItem && target.dataset.section === dragItem.dataset.section) {
+    target.classList.add('drag-over');
+  }
+}
+
+function onDrop(e) {
+  e.preventDefault();
+  const target = e.currentTarget;
+  target.classList.remove('drag-over');
+  if (!dragItem || target === dragItem) return;
+
+  const section = dragItem.dataset.section;
+  if (target.dataset.section !== section) return;
+
+  const fromIdx = parseInt(dragItem.dataset.index);
+  const toIdx = parseInt(target.dataset.index);
+
+  let arr;
+  if (section === 'bestseller') arr = sections.bestseller;
+  else if (section === 'new') arr = sections.newCourses;
+  else arr = sections.liveCourses;
+
+  const [moved] = arr.splice(fromIdx, 1);
+  arr.splice(toIdx, 0, moved);
+
+  const listId = section === 'bestseller' ? 'bestsellerList' : section === 'new' ? 'newList' : 'liveList';
+  const countId = section === 'bestseller' ? 'bestsellerCount' : section === 'new' ? 'newCount' : 'liveCount';
+  renderSection(section, arr, listId, countId);
+}
+
+function onDragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+  document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+  dragItem = null;
+}
+
+// 순서 이동 (위/아래 버튼)
+function moveCourse(section, idx, direction) {
+  let arr;
+  if (section === 'bestseller') arr = sections.bestseller;
+  else if (section === 'new') arr = sections.newCourses;
+  else arr = sections.liveCourses;
+
+  const newIdx = idx + direction;
+  if (newIdx < 0 || newIdx >= arr.length) return;
+
+  [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
+
+  const listId = section === 'bestseller' ? 'bestsellerList' : section === 'new' ? 'newList' : 'liveList';
+  const countId = section === 'bestseller' ? 'bestsellerCount' : section === 'new' ? 'newCount' : 'liveCount';
+  renderSection(section, arr, listId, countId);
+}
+
+// 순서 저장
+async function saveOrder(section) {
+  let arr;
+  if (section === 'bestseller') arr = sections.bestseller;
+  else if (section === 'new') arr = sections.newCourses;
+  else arr = sections.liveCourses;
+
+  const items = arr.map((cls, idx) => ({ id: cls.id, sortOrder: idx + 1 }));
+
+  try {
+    const res = await fetch('/api/admin/homepage/reorder', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showAlert('완료', '순서가 저장되었습니다.');
+    } else {
+      showAlert('오류', data.error || '저장에 실패했습니다.');
+    }
+  } catch (e) {
+    showAlert('오류', '네트워크 오류가 발생했습니다.');
+  }
+}
+
+// 코스 추가 모달
+function openAddCourseModal(section) {
+  currentSection = section;
+  const modal = document.getElementById('addCourseModal');
+  const title = document.getElementById('addCourseModalTitle');
+
+  if (section === 'bestseller') title.textContent = '베스트 코스에 추가';
+  else title.textContent = '신규 코스에 추가';
+
+  document.getElementById('courseSearchInput').value = '';
+  modal.style.display = 'flex';
+  filterCourses();
+  document.getElementById('courseSearchInput').focus();
+}
+
+function closeAddCourseModal() {
+  document.getElementById('addCourseModal').style.display = 'none';
+  currentSection = '';
+}
+
+function filterCourses() {
+  const query = document.getElementById('courseSearchInput').value.toLowerCase();
+  const container = document.getElementById('courseSearchResults');
+
+  // 현재 섹션에 이미 있는 코스 ID 목록
+  let currentIds;
+  if (currentSection === 'bestseller') currentIds = new Set(sections.bestseller.map(c => c.id));
+  else currentIds = new Set(sections.newCourses.map(c => c.id));
+
+  const filtered = sections.allActive.filter(cls => {
+    const matchesQuery = !query || cls.title.toLowerCase().includes(query) || (cls.instructor_name || '').toLowerCase().includes(query);
+    const notInSection = !currentIds.has(cls.id);
+    return matchesQuery && notInSection;
+  });
+
+  if (filtered.length === 0) {
+    container.innerHTML = '<p class="text-sm text-gray-400 text-center py-4">검색 결과가 없습니다.</p>';
+    return;
+  }
+
+  container.innerHTML = filtered.map(cls => \`
+    <button onclick="addCourseToSection(\${cls.id})" class="w-full flex items-center gap-3 p-3 hover:bg-gray-50 rounded-lg text-left transition-all">
+      <img src="\${cls.thumbnail || ''}" class="w-12 h-8 rounded object-cover bg-gray-200 flex-shrink-0" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 48 32%22><rect fill=%22%23e5e7eb%22 width=%2248%22 height=%2232%22/></svg>'">
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-medium text-gray-800 truncate">\${cls.title}</p>
+        <p class="text-xs text-gray-500">\${cls.instructor_name} · \${cls.price ? cls.price.toLocaleString() + '원' : '무료'}</p>
+      </div>
+      <div class="flex items-center gap-1">
+        \${cls.is_bestseller ? '<span class="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded">BEST</span>' : ''}
+        \${cls.is_new ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded">NEW</span>' : ''}
+        \${cls.class_type === 'live' ? '<span class="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded">LIVE</span>' : ''}
+      </div>
+      <i class="fas fa-plus text-blue-400 text-sm"></i>
+    </button>
+  \`).join('');
+}
+
+async function addCourseToSection(courseId) {
+  const flag = currentSection === 'bestseller' ? { isBestseller: 1 } : { isNew: 1 };
+
+  try {
+    const res = await fetch('/api/admin/classes/' + courseId + '/homepage-flags', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(flag)
+    });
+    const data = await res.json();
+    if (data.success) {
+      closeAddCourseModal();
+      await loadSections();
+      showAlert('완료', '코스가 추가되었습니다.');
+    } else {
+      showAlert('오류', data.error || '추가에 실패했습니다.');
+    }
+  } catch (e) {
+    showAlert('오류', '네트워크 오류가 발생했습니다.');
+  }
+}
+
+async function removeCourse(section, courseId) {
+  if (!confirm('이 코스를 섹션에서 제거하시겠습니까?')) return;
+
+  const flag = section === 'bestseller' ? { isBestseller: 0 } : { isNew: 0 };
+
+  try {
+    const res = await fetch('/api/admin/classes/' + courseId + '/homepage-flags', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(flag)
+    });
+    const data = await res.json();
+    if (data.success) {
+      await loadSections();
+      showAlert('완료', '코스가 제거되었습니다.');
+    } else {
+      showAlert('오류', data.error || '제거에 실패했습니다.');
+    }
+  } catch (e) {
+    showAlert('오류', '네트워크 오류가 발생했습니다.');
+  }
+}
+
+// 초기 로드
+loadSections();
+</script>
+</body>
+</html>
+`)
+})
 
 export default app
 
