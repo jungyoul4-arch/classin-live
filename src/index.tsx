@@ -442,6 +442,7 @@ async function cancelHectoPayment(
     orgTrdNo: string
     cnclAmt: string
     cnclRsn?: string
+    method?: string
   }
 ): Promise<{ success: boolean; outStatCd?: string; outRsltCd?: string; outRsltMsg?: string; error?: string }> {
   const now = new Date()
@@ -459,7 +460,7 @@ async function cancelHectoPayment(
     params: {
       mchtId: config.MID,
       ver: '0A19',
-      method: 'CA',
+      method: params.method || 'CA',
       bizType: 'C0',
       encCd: '23',
       mchtTrdNo: params.mchtTrdNo,
@@ -1923,7 +1924,7 @@ app.get('/api/user/:userId/enrollments', async (c) => {
         AND datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') > datetime('now')
       ORDER BY scheduled_at ASC LIMIT 1
     )
-    WHERE e.user_id = ?
+    WHERE e.user_id = ? AND (e.status IS NULL OR e.status != 'cancelled')
     ORDER BY COALESCE(next_lesson.scheduled_at, e.enrolled_at) DESC
   `).bind(userId).all()
   return c.json(results)
@@ -6499,7 +6500,7 @@ app.post('/api/payment/hecto/noti', async (c) => {
 
       // 주문 상태 업데이트
       await c.env.DB.prepare(`
-        UPDATE orders SET payment_status = 'completed', transaction_id = ?, updated_at = datetime('now')
+        UPDATE orders SET payment_status = 'completed', transaction_id = ?
         WHERE id = ?
       `).bind(params.trdNo || params.mchtTrdNo, orderId).run()
 
@@ -6573,7 +6574,7 @@ app.post('/api/admin/orders/:orderId/update', async (c) => {
   const { status, trdNo } = await c.req.json()
 
   await c.env.DB.prepare(`
-    UPDATE orders SET payment_status = ?, transaction_id = COALESCE(?, transaction_id), updated_at = datetime('now')
+    UPDATE orders SET payment_status = ?, transaction_id = COALESCE(?, transaction_id)
     WHERE id = ?
   `).bind(status, trdNo, orderId).run()
 
@@ -6587,7 +6588,7 @@ app.post('/api/payment/hecto/complete', async (c) => {
   try {
     // 주문 상태 업데이트
     await c.env.DB.prepare(`
-      UPDATE orders SET payment_status = 'completed', transaction_id = ?, updated_at = datetime('now')
+      UPDATE orders SET payment_status = 'completed', transaction_id = ?
       WHERE id = ?
     `).bind(trdNo || mchtTrdNo, orderId).run()
 
@@ -6661,7 +6662,7 @@ app.post('/api/payment/hecto/cancel', async (c) => {
   if (cancelResult.success) {
     // 주문 상태 업데이트
     await c.env.DB.prepare(`
-      UPDATE orders SET payment_status = 'cancelled', updated_at = datetime('now')
+      UPDATE orders SET payment_status = 'cancelled'
       WHERE id = ?
     `).bind(orderId).run()
 
@@ -6681,7 +6682,7 @@ app.post('/api/payment/hecto/cancel', async (c) => {
   return c.json({ success: false, error: cancelResult.error || '결제 취소에 실패했습니다.' }, 500)
 })
 
-// 관리자: 수동 결제/수강 취소 (헥토 API 호출 없이)
+// 관리자: 결제/수강 취소 (헥토 PG 카드결제 취소 포함)
 app.post('/api/admin/orders/:orderId/cancel', async (c) => {
   const sessionToken = getSessionToken(c)
   const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
@@ -6697,31 +6698,102 @@ app.post('/api/admin/orders/:orderId/cancel', async (c) => {
     return c.json({ error: '주문을 찾을 수 없습니다.' }, 404)
   }
 
-  // 주문 상태 업데이트
-  await c.env.DB.prepare(`
-    UPDATE orders SET payment_status = 'cancelled', updated_at = datetime('now')
-    WHERE id = ?
-  `).bind(orderId).run()
+  let pgCancelResult: { success: boolean; skipped?: boolean; error?: string } = { success: true, skipped: true }
 
-  // 수강 취소 처리
-  if (order.class_id) {
-    await c.env.DB.prepare(`
-      UPDATE enrollments SET status = 'cancelled', updated_at = datetime('now')
-      WHERE user_id = ? AND class_id = ?
-    `).bind(order.user_id, order.class_id).run()
+  // 헥토 PG 카드결제 취소 시도 (transaction_id가 헥토 형식인 경우)
+  if (order.transaction_id && order.transaction_id.startsWith('SOFP_') && order.payment_status === 'completed') {
+    if (c.env.HECTO_MID && c.env.HECTO_LICENSE_KEY && c.env.HECTO_AES_KEY) {
+      const config: HectoConfig = {
+        MID: c.env.HECTO_MID,
+        LICENSE_KEY: c.env.HECTO_LICENSE_KEY,
+        AES_KEY: c.env.HECTO_AES_KEY,
+        PAYMENT_SERVER: c.env.HECTO_PAYMENT_SERVER || 'https://tbnpg.settlebank.co.kr',
+        CANCEL_SERVER: c.env.HECTO_CANCEL_SERVER || 'https://tbgw.settlebank.co.kr'
+      }
 
-    await c.env.DB.prepare('UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?').bind(order.class_id).run()
+      const now = new Date()
+      const mchtTrdNo = `CNCL${now.toISOString().slice(0, 10).replace(/-/g, '')}${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`
+
+      // transaction_id에서 결제수단 코드 추출 (SOFP_PGxx... → xx)
+      const paymentMethodCode = order.transaction_id.substring(7, 9)
+
+      pgCancelResult = await cancelHectoPayment(config, {
+        mchtTrdNo,
+        orgTrdNo: order.transaction_id,
+        cnclAmt: String(order.amount),
+        cnclRsn: reason || '관리자 취소',
+        method: paymentMethodCode
+      })
+
+      console.log('[Admin] Hecto cancel result:', pgCancelResult)
+    }
   }
 
-  // lesson 취소
-  if (order.order_type === 'lesson') {
-    await c.env.DB.prepare(`
-      DELETE FROM lesson_enrollments WHERE user_id = ? AND payment_id = ?
-    `).bind(order.user_id, orderId).run()
+  // DB 업데이트
+  let orderUpdateResult = null;
+  let enrollmentUpdateResult = null;
+  try {
+    // 주문 상태 업데이트
+    orderUpdateResult = await c.env.DB.prepare(`
+      UPDATE orders SET payment_status = 'cancelled'
+      WHERE id = ?
+    `).bind(orderId).run()
+    console.log('[Admin] Order update result:', JSON.stringify(orderUpdateResult))
+
+    // 수강 취소 처리
+    if (order.class_id) {
+      enrollmentUpdateResult = await c.env.DB.prepare(`
+        UPDATE enrollments SET status = 'cancelled', updated_at = datetime('now')
+        WHERE user_id = ? AND class_id = ?
+      `).bind(order.user_id, order.class_id).run()
+      console.log('[Admin] Enrollment update result:', JSON.stringify(enrollmentUpdateResult))
+
+      const classUpdateResult = await c.env.DB.prepare('UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?').bind(order.class_id).run()
+      console.log('[Admin] Class update result:', JSON.stringify(classUpdateResult))
+    }
+
+    // lesson 취소
+    if (order.order_type === 'lesson') {
+      await c.env.DB.prepare(`
+        DELETE FROM lesson_enrollments WHERE user_id = ? AND payment_id = ?
+      `).bind(order.user_id, orderId).run()
+    }
+  } catch (dbError: any) {
+    console.error('[Admin] DB update error:', dbError.message)
+    return c.json({
+      success: false,
+      error: 'DB 업데이트 실패: ' + dbError.message,
+      pgSuccess: pgCancelResult.success
+    })
   }
 
-  console.log('[Admin] Manual cancel:', orderId, reason)
-  return c.json({ success: true, message: '결제 및 수강이 취소되었습니다.' })
+  console.log('[Admin] Cancel completed:', orderId, reason, 'PG:', pgCancelResult.success)
+
+  if (!pgCancelResult.success && !pgCancelResult.skipped) {
+    return c.json({
+      success: true,
+      message: '수강은 취소되었으나 카드결제 취소에 실패했습니다. (' + (pgCancelResult.error || pgCancelResult.outRsltMsg || 'Unknown') + ')',
+      pgError: pgCancelResult.error
+    })
+  }
+
+  // 업데이트 후 바로 확인
+  const verifyOrder = await c.env.DB.prepare('SELECT id, payment_status FROM orders WHERE id = ?').bind(orderId).first()
+  const verifyEnrollment = order.class_id ? await c.env.DB.prepare('SELECT id, status FROM enrollments WHERE user_id = ? AND class_id = ?').bind(order.user_id, order.class_id).first() : null
+
+  return c.json({
+    success: true,
+    message: '결제 및 수강이 취소되었습니다.',
+    debug: {
+      orderId,
+      classId: order.class_id,
+      pgSuccess: pgCancelResult.success,
+      orderUpdateResult,
+      enrollmentUpdateResult,
+      verifyOrder,
+      verifyEnrollment
+    }
+  })
 })
 
 // ==================== HTML Pages ====================
@@ -6984,6 +7056,7 @@ const modalsHTML = `
     </div>
     <h3 class="text-xl font-bold text-dark-900 mb-2">결제 완료!</h3>
     <p id="successMessage" class="text-sm text-gray-600 mb-4">결제가 성공적으로 완료되었습니다.</p>
+    <div id="classinSessionInfo" class="hidden"></div>
     
     
     <div class="flex gap-2">
@@ -13252,6 +13325,7 @@ app.get('/admin/orders', async (c) => {
       try {
         var res = await fetch('/api/admin/orders');
         var data = await res.json();
+        console.log("[Cancel Response]", data);
 
         if (data.error) {
           document.getElementById('ordersTableBody').innerHTML = '<tr><td colspan="8" class="py-8 text-center text-red-400">' + data.error + '</td></tr>';
@@ -13279,7 +13353,7 @@ app.get('/admin/orders', async (c) => {
             '<td class="py-3 px-3 text-right font-medium">' + Number(order.amount).toLocaleString() + '원</td>' +
             '<td class="py-3 px-3 text-center"><span class="px-2 py-1 rounded-full text-xs font-medium ' + statusClass + '">' + statusText + '</span></td>' +
             '<td class="py-3 px-3 text-xs text-gray-500">' + (order.transaction_id || '-') + '</td>' +
-            '<td class="py-3 px-3 text-xs text-gray-500">' + (order.created_at || '-') + '</td>' +
+            '<td class="py-3 px-3 text-xs text-gray-500">' + (order.created_at ? new Date(order.created_at + 'Z').toLocaleString('ko-KR', {timeZone: 'Asia/Seoul'}) : '-') + '</td>' +
             '<td class="py-3 px-3 text-center">' + cancelBtn + '</td>' +
           '</tr>';
         }).join('');
@@ -13301,9 +13375,10 @@ app.get('/admin/orders', async (c) => {
           body: JSON.stringify({ reason: reason })
         });
         var data = await res.json();
+        console.log('[Cancel API Response]', JSON.stringify(data));
 
         if (data.success) {
-          showModal('완료', '결제 및 수강이 취소되었습니다.');
+          showModal(data.pgError ? '주의' : '완료', data.message || '결제 및 수강이 취소되었습니다.');
           loadOrders();
         } else {
           showModal('오류', data.error || '취소에 실패했습니다.');
