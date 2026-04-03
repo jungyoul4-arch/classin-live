@@ -34,11 +34,20 @@ function applyBranding(html: string, env: Bindings): string {
     .replaceAll('{{APP_BADGE}}', appBadge)
 }
 
+// 브랜딩 치환이 실제로 필요한지 판단 (기본값과 다를 때만)
+function needsBranding(env: Bindings): boolean {
+  const appName = env.APP_NAME || 'ClassIn Live'
+  const appBadge = env.APP_BADGE || 'LIVE'
+  return appName !== 'ClassIn Live' || appBadge !== 'LIVE'
+}
+
 const app = new Hono<{ Bindings: Bindings }>()
 
-// 미들웨어: 모든 HTML 응답에 브랜드명 자동 치환 적용
+// 미들웨어: 브랜딩 치환이 필요한 환경에서만 HTML 후처리 적용
+// live 환경(기본값)에서는 스킵하여 메모리 2배 사용 방지
 app.use('*', async (c, next) => {
   await next()
+  if (!needsBranding(c.env)) return
   const contentType = c.res.headers.get('content-type')
   if (contentType?.includes('text/html')) {
     const body = await c.res.text()
@@ -1815,7 +1824,7 @@ app.get('/api/classes/:id/reviews', async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT r.*, u.name as user_name, u.avatar as user_avatar
     FROM reviews r JOIN users u ON r.user_id = u.id
-    WHERE r.class_id = ? ORDER BY r.created_at DESC
+    WHERE r.class_id = ? ORDER BY r.created_at DESC LIMIT 100
   `).bind(id).all()
   return c.json(results)
 })
@@ -2559,7 +2568,7 @@ app.get('/api/user/:userId/orders', async (c) => {
     SELECT o.*, c.title as class_title, c.thumbnail as class_thumbnail
     FROM orders o
     LEFT JOIN classes c ON o.class_id = c.id
-    WHERE o.user_id = ? ORDER BY o.created_at DESC
+    WHERE o.user_id = ? ORDER BY o.created_at DESC LIMIT 200
   `).bind(userId).all()
   return c.json(results)
 })
@@ -2890,7 +2899,7 @@ app.post('/api/admin/test-codes/create', async (c) => {
 
 // Admin: Get test access codes
 app.get('/api/admin/test-codes', async (c) => {
-  const { results } = await c.env.DB.prepare('SELECT * FROM test_access_codes ORDER BY created_at DESC').all()
+  const { results } = await c.env.DB.prepare('SELECT * FROM test_access_codes ORDER BY created_at DESC LIMIT 500').all()
   return c.json(results)
 })
 
@@ -4618,18 +4627,19 @@ app.delete('/api/admin/classes/:id', async (c) => {
   }
 
   // 관련 테이블들 삭제 (FOREIGN KEY 제약 해결)
-  await c.env.DB.prepare('DELETE FROM classin_sessions WHERE class_id = ?').bind(classId).run()
-  await c.env.DB.prepare('DELETE FROM enrollments WHERE class_id = ?').bind(classId).run()
-  await c.env.DB.prepare('DELETE FROM orders WHERE class_id = ?').bind(classId).run()
-  await c.env.DB.prepare('DELETE FROM lessons WHERE class_id = ?').bind(classId).run()
-  await c.env.DB.prepare('DELETE FROM reviews WHERE class_id = ?').bind(classId).run()
-  await c.env.DB.prepare('DELETE FROM wishlist WHERE class_id = ?').bind(classId).run()
-  await c.env.DB.prepare('DELETE FROM cart WHERE class_id = ?').bind(classId).run()
-  await c.env.DB.prepare('DELETE FROM subscriptions WHERE class_id = ?').bind(classId).run()
-  await c.env.DB.prepare('DELETE FROM class_lessons WHERE class_id = ?').bind(classId).run()
-
-  // 코스 삭제
-  await c.env.DB.prepare('DELETE FROM classes WHERE id = ?').bind(classId).run()
+  // DB.batch(): 10개 순차 DELETE를 단일 트랜잭션으로 묶어 네트워크 왕복 9회 절감
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM classin_sessions WHERE class_id = ?').bind(classId),
+    c.env.DB.prepare('DELETE FROM enrollments WHERE class_id = ?').bind(classId),
+    c.env.DB.prepare('DELETE FROM orders WHERE class_id = ?').bind(classId),
+    c.env.DB.prepare('DELETE FROM lessons WHERE class_id = ?').bind(classId),
+    c.env.DB.prepare('DELETE FROM reviews WHERE class_id = ?').bind(classId),
+    c.env.DB.prepare('DELETE FROM wishlist WHERE class_id = ?').bind(classId),
+    c.env.DB.prepare('DELETE FROM cart WHERE class_id = ?').bind(classId),
+    c.env.DB.prepare('DELETE FROM subscriptions WHERE class_id = ?').bind(classId),
+    c.env.DB.prepare('DELETE FROM class_lessons WHERE class_id = ?').bind(classId),
+    c.env.DB.prepare('DELETE FROM classes WHERE id = ?').bind(classId),
+  ])
 
   return c.json({ success: true, message: '코스가 삭제되었습니다.' })
 })
@@ -4638,37 +4648,37 @@ app.delete('/api/admin/classes/:id', async (c) => {
 
 // 관리자: 홈페이지 3개 섹션 코스 목록 조회
 app.get('/api/admin/homepage/sections', async (c) => {
-  const bestseller = await c.env.DB.prepare(`
-    SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
-           i.display_name as instructor_name
-    FROM classes c JOIN instructors i ON c.instructor_id = i.id
-    WHERE c.status = 'active' AND c.is_bestseller = 1
-    ORDER BY c.homepage_sort_order ASC, c.rating DESC
-  `).all()
-
-  const newCourses = await c.env.DB.prepare(`
-    SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
-           i.display_name as instructor_name
-    FROM classes c JOIN instructors i ON c.instructor_id = i.id
-    WHERE c.status = 'active' AND c.is_new = 1
-    ORDER BY c.homepage_sort_order ASC, c.created_at DESC
-  `).all()
-
-  const liveCourses = await c.env.DB.prepare(`
-    SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
-           i.display_name as instructor_name
-    FROM classes c JOIN instructors i ON c.instructor_id = i.id
-    WHERE c.status = 'active' AND c.class_type = 'live'
-    ORDER BY c.homepage_sort_order ASC, c.schedule_start ASC
-  `).all()
-
-  const allActive = await c.env.DB.prepare(`
-    SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.status,
-           i.display_name as instructor_name
-    FROM classes c JOIN instructors i ON c.instructor_id = i.id
-    WHERE c.status = 'active'
-    ORDER BY c.title ASC
-  `).all()
+  // DB.batch(): 4개 쿼리를 단일 호출로 묶어 네트워크 왕복 3회 절감
+  const [bestseller, newCourses, liveCourses, allActive] = await c.env.DB.batch([
+    c.env.DB.prepare(`
+      SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
+             i.display_name as instructor_name
+      FROM classes c JOIN instructors i ON c.instructor_id = i.id
+      WHERE c.status = 'active' AND c.is_bestseller = 1
+      ORDER BY c.homepage_sort_order ASC, c.rating DESC
+    `),
+    c.env.DB.prepare(`
+      SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
+             i.display_name as instructor_name
+      FROM classes c JOIN instructors i ON c.instructor_id = i.id
+      WHERE c.status = 'active' AND c.is_new = 1
+      ORDER BY c.homepage_sort_order ASC, c.created_at DESC
+    `),
+    c.env.DB.prepare(`
+      SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
+             i.display_name as instructor_name
+      FROM classes c JOIN instructors i ON c.instructor_id = i.id
+      WHERE c.status = 'active' AND c.class_type = 'live'
+      ORDER BY c.homepage_sort_order ASC, c.schedule_start ASC
+    `),
+    c.env.DB.prepare(`
+      SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.status,
+             i.display_name as instructor_name
+      FROM classes c JOIN instructors i ON c.instructor_id = i.id
+      WHERE c.status = 'active'
+      ORDER BY c.title ASC
+    `)
+  ])
 
   return c.json({
     bestseller: bestseller.results,
@@ -5846,11 +5856,12 @@ app.get('/api/classin/lesson-enter/:lessonId', async (c) => {
 
   const userName = enrollment?.user_name || 'Student'
 
-  // 6. 학생을 기관과 코스에 추가
-  const schoolResult = await addSchoolStudent(classInConfig, studentUid, userName)
+  // 6. 학생을 기관과 코스에 추가 (독립적이므로 병렬 실행)
+  const [schoolResult, courseResult] = await Promise.all([
+    addSchoolStudent(classInConfig, studentUid, userName),
+    addStudentToCourse(classInConfig, lesson.classin_course_id, studentUid)
+  ])
   console.log('lesson-enter addSchoolStudent:', JSON.stringify(schoolResult))
-
-  const courseResult = await addStudentToCourse(classInConfig, lesson.classin_course_id, studentUid)
   console.log('lesson-enter addStudentToCourse:', JSON.stringify(courseResult))
 
   // 7. 로그인 URL 생성
@@ -8417,22 +8428,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ==================== Main Page ====================
 app.get('/', async (c) => {
-  const categories = await c.env.DB.prepare('SELECT * FROM categories ORDER BY sort_order').all()
-  const featured = await c.env.DB.prepare(`
-    SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
-    FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
-    WHERE c.status = 'active' AND c.is_bestseller = 1 ORDER BY c.homepage_sort_order ASC, c.rating DESC LIMIT 8
-  `).all()
-  const newClasses = await c.env.DB.prepare(`
-    SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
-    FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
-    WHERE c.status = 'active' AND c.is_new = 1 ORDER BY c.homepage_sort_order ASC, c.created_at DESC LIMIT 8
-  `).all()
-  const liveClasses = await c.env.DB.prepare(`
-    SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
-    FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
-    WHERE c.status = 'active' AND c.class_type = 'live' ORDER BY c.homepage_sort_order ASC, c.schedule_start ASC LIMIT 8
-  `).all()
+  // DB.batch(): 4개 쿼리를 단일 호출로 묶어 네트워크 왕복 3회 절감
+  const [categories, featured, newClasses, liveClasses] = await c.env.DB.batch([
+    c.env.DB.prepare('SELECT * FROM categories ORDER BY sort_order'),
+    c.env.DB.prepare(`
+      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
+      FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
+      WHERE c.status = 'active' AND c.is_bestseller = 1 ORDER BY c.homepage_sort_order ASC, c.rating DESC LIMIT 8
+    `),
+    c.env.DB.prepare(`
+      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
+      FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
+      WHERE c.status = 'active' AND c.is_new = 1 ORDER BY c.homepage_sort_order ASC, c.created_at DESC LIMIT 8
+    `),
+    c.env.DB.prepare(`
+      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
+      FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
+      WHERE c.status = 'active' AND c.class_type = 'live' ORDER BY c.homepage_sort_order ASC, c.schedule_start ASC LIMIT 8
+    `)
+  ])
 
   const html = `${headHTML}
 <body class="bg-gray-50 min-h-screen">
