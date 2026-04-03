@@ -6498,10 +6498,17 @@ app.post('/api/payment/hecto/noti', async (c) => {
       const lessonId = parseInt(mchtParamParts[3]) || null
       const orderType = mchtParamParts[4] || 'class'
 
-      // 주문 상태 업데이트
+      // 이미 취소된 주문은 업데이트하지 않음
+      const existingOrder = await c.env.DB.prepare('SELECT payment_status FROM orders WHERE id = ?').bind(orderId).first() as any
+      if (existingOrder?.payment_status === 'cancelled') {
+        console.log('[Hecto Noti] Order already cancelled, skipping update:', orderId)
+        return c.text('OK')
+      }
+
+      // 주문 상태 업데이트 (취소되지 않은 경우만)
       await c.env.DB.prepare(`
         UPDATE orders SET payment_status = 'completed', transaction_id = ?
-        WHERE id = ?
+        WHERE id = ? AND payment_status != 'cancelled'
       `).bind(params.trdNo || params.mchtTrdNo, orderId).run()
 
       // 수강 등록 처리
@@ -6550,7 +6557,7 @@ app.get('/api/admin/orders', async (c) => {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
 
-  const { results: orders } = await c.env.DB.prepare(`
+    const { results: orders } = await c.env.DB.prepare(`
     SELECT o.*, u.name as user_name, u.email as user_email, cl.title as class_title
     FROM orders o
     LEFT JOIN users u ON o.user_id = u.id
@@ -6586,10 +6593,17 @@ app.post('/api/payment/hecto/complete', async (c) => {
   const { orderId, userId, classId, lessonId, orderType, trdNo, mchtTrdNo } = await c.req.json()
 
   try {
-    // 주문 상태 업데이트
+    // 이미 취소된 주문은 처리하지 않음
+    const existingOrder = await c.env.DB.prepare('SELECT payment_status FROM orders WHERE id = ?').bind(orderId).first() as any
+    if (existingOrder?.payment_status === 'cancelled') {
+      console.log('[Hecto Complete] Order already cancelled, skipping:', orderId)
+      return c.json({ success: false, error: 'Order already cancelled' })
+    }
+
+    // 주문 상태 업데이트 (취소되지 않은 경우만)
     await c.env.DB.prepare(`
       UPDATE orders SET payment_status = 'completed', transaction_id = ?
-      WHERE id = ?
+      WHERE id = ? AND payment_status != 'cancelled'
     `).bind(trdNo || mchtTrdNo, orderId).run()
 
     // 수강 등록 처리
@@ -6683,6 +6697,7 @@ app.post('/api/payment/hecto/cancel', async (c) => {
 })
 
 // 관리자: 결제/수강 취소 (헥토 PG 카드결제 취소 포함)
+// 순서: DB 업데이트 먼저 → PG 취소 나중에 (PG 취소가 오래 걸려서 Worker 타임아웃 방지)
 app.post('/api/admin/orders/:orderId/cancel', async (c) => {
   const sessionToken = getSessionToken(c)
   const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
@@ -6698,9 +6713,40 @@ app.post('/api/admin/orders/:orderId/cancel', async (c) => {
     return c.json({ error: '주문을 찾을 수 없습니다.' }, 404)
   }
 
-  let pgCancelResult: { success: boolean; skipped?: boolean; error?: string } = { success: true, skipped: true }
+  // 1. DB 업데이트 먼저 (빠름)
+  try {
+    // 주문 상태 업데이트
+    await c.env.DB.prepare(`
+      UPDATE orders SET payment_status = 'cancelled'
+      WHERE id = ?
+    `).bind(orderId).run()
 
-  // 헥토 PG 카드결제 취소 시도 (transaction_id가 헥토 형식인 경우)
+    // 수강 취소 처리
+    if (order.class_id) {
+      await c.env.DB.prepare(`
+        UPDATE enrollments SET status = 'cancelled', updated_at = datetime('now')
+        WHERE user_id = ? AND class_id = ?
+      `).bind(order.user_id, order.class_id).run()
+
+      await c.env.DB.prepare('UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?').bind(order.class_id).run()
+    }
+
+    // lesson 취소
+    if (order.order_type === 'lesson') {
+      await c.env.DB.prepare(`
+        DELETE FROM lesson_enrollments WHERE user_id = ? AND payment_id = ?
+      `).bind(order.user_id, orderId).run()
+    }
+  } catch (dbError: any) {
+    console.error('[Admin] DB update error:', dbError.message)
+    return c.json({
+      success: false,
+      error: 'DB 업데이트 실패: ' + dbError.message
+    })
+  }
+
+  // 2. PG 카드결제 취소 (느림 - 3~4초 소요)
+  let pgCancelResult: { success: boolean; skipped?: boolean; error?: string } = { success: true, skipped: true }
   if (order.transaction_id && order.transaction_id.startsWith('SOFP_') && order.payment_status === 'completed') {
     if (c.env.HECTO_MID && c.env.HECTO_LICENSE_KEY && c.env.HECTO_AES_KEY) {
       const config: HectoConfig = {
@@ -6729,45 +6775,6 @@ app.post('/api/admin/orders/:orderId/cancel', async (c) => {
     }
   }
 
-  // DB 업데이트
-  let orderUpdateResult = null;
-  let enrollmentUpdateResult = null;
-  try {
-    // 주문 상태 업데이트
-    orderUpdateResult = await c.env.DB.prepare(`
-      UPDATE orders SET payment_status = 'cancelled'
-      WHERE id = ?
-    `).bind(orderId).run()
-    console.log('[Admin] Order update result:', JSON.stringify(orderUpdateResult))
-
-    // 수강 취소 처리
-    if (order.class_id) {
-      enrollmentUpdateResult = await c.env.DB.prepare(`
-        UPDATE enrollments SET status = 'cancelled', updated_at = datetime('now')
-        WHERE user_id = ? AND class_id = ?
-      `).bind(order.user_id, order.class_id).run()
-      console.log('[Admin] Enrollment update result:', JSON.stringify(enrollmentUpdateResult))
-
-      const classUpdateResult = await c.env.DB.prepare('UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?').bind(order.class_id).run()
-      console.log('[Admin] Class update result:', JSON.stringify(classUpdateResult))
-    }
-
-    // lesson 취소
-    if (order.order_type === 'lesson') {
-      await c.env.DB.prepare(`
-        DELETE FROM lesson_enrollments WHERE user_id = ? AND payment_id = ?
-      `).bind(order.user_id, orderId).run()
-    }
-  } catch (dbError: any) {
-    console.error('[Admin] DB update error:', dbError.message)
-    return c.json({
-      success: false,
-      error: 'DB 업데이트 실패: ' + dbError.message,
-      pgSuccess: pgCancelResult.success
-    })
-  }
-
-  console.log('[Admin] Cancel completed:', orderId, reason, 'PG:', pgCancelResult.success)
 
   if (!pgCancelResult.success && !pgCancelResult.skipped) {
     return c.json({
@@ -6777,22 +6784,9 @@ app.post('/api/admin/orders/:orderId/cancel', async (c) => {
     })
   }
 
-  // 업데이트 후 바로 확인
-  const verifyOrder = await c.env.DB.prepare('SELECT id, payment_status FROM orders WHERE id = ?').bind(orderId).first()
-  const verifyEnrollment = order.class_id ? await c.env.DB.prepare('SELECT id, status FROM enrollments WHERE user_id = ? AND class_id = ?').bind(order.user_id, order.class_id).first() : null
-
   return c.json({
     success: true,
-    message: '결제 및 수강이 취소되었습니다.',
-    debug: {
-      orderId,
-      classId: order.class_id,
-      pgSuccess: pgCancelResult.success,
-      orderUpdateResult,
-      enrollmentUpdateResult,
-      verifyOrder,
-      verifyEnrollment
-    }
+    message: '결제 및 수강이 취소되었습니다.'
   })
 })
 
@@ -13346,15 +13340,15 @@ app.get('/admin/orders', async (c) => {
           var cancelBtn = order.payment_status === 'completed' ?
                 '<button onclick="cancelOrder(' + order.id + ')" class="bg-red-50 text-red-500 hover:bg-red-100 px-3 py-1 rounded-lg text-xs font-medium"><i class="fas fa-times-circle mr-1"></i>취소</button>' :
                 '<span class="text-gray-300">-</span>';
-          return '<tr class="border-b border-gray-100 hover:bg-gray-50">' +
+          return '<tr class="border-b border-gray-100 hover:bg-gray-50" data-order-id="' + order.id + '">' +
             '<td class="py-3 px-3 font-medium">#' + order.id + '</td>' +
             '<td class="py-3 px-3">' + (order.user_name || '-') + '<br><span class="text-xs text-gray-400">' + (order.user_email || '') + '</span></td>' +
             '<td class="py-3 px-3">' + (order.class_title || '-') + '</td>' +
             '<td class="py-3 px-3 text-right font-medium">' + Number(order.amount).toLocaleString() + '원</td>' +
-            '<td class="py-3 px-3 text-center"><span class="px-2 py-1 rounded-full text-xs font-medium ' + statusClass + '">' + statusText + '</span></td>' +
+            '<td class="py-3 px-3 text-center status-cell"><span class="px-2 py-1 rounded-full text-xs font-medium ' + statusClass + '">' + statusText + '</span></td>' +
             '<td class="py-3 px-3 text-xs text-gray-500">' + (order.transaction_id || '-') + '</td>' +
             '<td class="py-3 px-3 text-xs text-gray-500">' + (order.created_at ? new Date(order.created_at + 'Z').toLocaleString('ko-KR', {timeZone: 'Asia/Seoul'}) : '-') + '</td>' +
-            '<td class="py-3 px-3 text-center">' + cancelBtn + '</td>' +
+            '<td class="py-3 px-3 text-center action-cell">' + cancelBtn + '</td>' +
           '</tr>';
         }).join('');
       } catch (e) {
@@ -13379,7 +13373,18 @@ app.get('/admin/orders', async (c) => {
 
         if (data.success) {
           showModal(data.pgError ? '주의' : '완료', data.message || '결제 및 수강이 취소되었습니다.');
-          loadOrders();
+          // D1 복제 지연 문제로 UI 직접 업데이트
+          var row = document.querySelector('tr[data-order-id="' + orderId + '"]');
+          if (row) {
+            var statusCell = row.querySelector('.status-cell');
+            if (statusCell) {
+              statusCell.innerHTML = '<span class="px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-700">취소됨</span>';
+            }
+            var actionCell = row.querySelector('.action-cell');
+            if (actionCell) {
+              actionCell.innerHTML = '<span class="text-gray-300">-</span>';
+            }
+          }
         } else {
           showModal('오류', data.error || '취소에 실패했습니다.');
         }
