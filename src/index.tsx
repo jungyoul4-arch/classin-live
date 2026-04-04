@@ -6769,61 +6769,68 @@ function validateAndSaveStep(step: number, message: string, app: any): { error?:
       return { updates: { proposed_lessons_count: count, proposed_duration_minutes: duration } }
     }
     case 4: {
-      // 스케줄 파싱 (시작일, 요일, 시간)
-      const dayMap: Record<string, string> = { '월': 'mon', '화': 'tue', '수': 'wed', '목': 'thu', '금': 'fri', '토': 'sat', '일': 'sun', 'mon': 'mon', 'tue': 'tue', 'wed': 'wed', 'thu': 'thu', 'fri': 'fri', 'sat': 'sat', 'sun': 'sun' }
+      // 스케줄 파싱 — UI에서 "2026-04-14, 월/수, 19:00" 형식 또는 자연어 입력
 
       // 날짜 파싱 (다양한 형식 지원)
-      const dateMatch = msg.match(/(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})|(\d{1,2})월\s*(\d{1,2})일/)
+      const dateMatch = msg.match(/(\d{4}-\d{2}-\d{2})|(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})|(\d{1,2})월\s*(\d{1,2})일/)
       let startDate: string | null = null
       if (dateMatch) {
         if (dateMatch[1]) {
-          startDate = dateMatch[1].replace(/[/.]/g, '-')
-        } else if (dateMatch[2] && dateMatch[3]) {
+          startDate = dateMatch[1]
+        } else if (dateMatch[2]) {
+          startDate = dateMatch[2].replace(/[/.]/g, '-')
+        } else if (dateMatch[3] && dateMatch[4]) {
           const year = new Date().getFullYear()
-          const month = dateMatch[2].padStart(2, '0')
-          const day = dateMatch[3].padStart(2, '0')
+          const month = dateMatch[3].padStart(2, '0')
+          const day = dateMatch[4].padStart(2, '0')
           startDate = `${year}-${month}-${day}`
         }
       }
-      if (!startDate) return { error: '시작일을 입력해주세요 (예: 4월 14일 또는 2026-04-14)' }
+      if (!startDate) return { error: '시작일, 요일, 시간을 함께 입력해주세요\n예: 4월 14일, 월/수, 저녁 7시' }
 
       // 시작일이 오늘 이후인지 확인
       const today = new Date().toISOString().split('T')[0]
       if (startDate < today) return { error: '시작일은 오늘 이후여야 합니다' }
 
-      // 요일 파싱 (단독 글자만 매칭, "평일"의 "일" 오매칭 방지)
+      // 날짜 부분 제거 후 요일 파싱 (날짜의 "월","일" 오인 방지)
+      const msgNoDates = msg.replace(/\d{4}-\d{2}-\d{2}/g, '').replace(/\d{1,2}월\s*\d{1,2}일/g, '')
       const days: string[] = []
-      const dayRegex = /(?:^|[\/,\s])([월화수목금토일])(?=[\/,\s요]|$)/g
-      let dayMatch
-      while ((dayMatch = dayRegex.exec(msg)) !== null) {
-        const korDay = dayMatch[1]
-        const korMap: Record<string, string> = { '월': 'mon', '화': 'tue', '수': 'wed', '목': 'thu', '금': 'fri', '토': 'sat', '일': 'sun' }
-        if (korMap[korDay]) days.push(korMap[korDay])
+      const korMap: Record<string, string> = { '월': 'mon', '화': 'tue', '수': 'wed', '목': 'thu', '금': 'fri', '토': 'sat', '일': 'sun' }
+      // "X요일" 전체 표기 지원
+      const fullDayRegex = /([월화수목금토일])요일/g
+      let fdm
+      while ((fdm = fullDayRegex.exec(msgNoDates)) !== null) {
+        if (korMap[fdm[1]]) days.push(korMap[fdm[1]])
       }
-      // 영어 요일도 지원
+      // 단독 글자 (월/수, 월,수 등)
+      const shortDayRegex = /(?:^|[\/,\s])([월화수목금토일])(?=[\/,\s]|$)/g
+      let sdm
+      while ((sdm = shortDayRegex.exec(msgNoDates)) !== null) {
+        const val = korMap[sdm[1]]
+        if (val && !days.includes(val)) days.push(val)
+      }
+      // 영어 요일
       for (const eng of ['mon','tue','wed','thu','fri','sat','sun']) {
         if (msg.toLowerCase().includes(eng) && !days.includes(eng)) days.push(eng)
       }
       const uniqueDays = [...new Set(days)]
-      if (uniqueDays.length === 0) return { error: '수업 요일을 선택해주세요 (예: 월/수)' }
+      if (uniqueDays.length === 0) return { error: '요일을 선택해주세요 (예: 월/수 또는 토요일)' }
 
-      // 시간 파싱 (저녁/오후 + 숫자 조합 지원)
-      const timeMatch = msg.match(/(\d{1,2})\s*[:시]\s*(\d{0,2})/)
-      let time = '19:00' // 기본값
-      if (timeMatch) {
-        let hour = parseInt(timeMatch[1])
-        const min = timeMatch[2] ? parseInt(timeMatch[2]) : 0
-        // "저녁 7시" or "오후 3시" → 12시간제 보정
-        if (hour < 12 && (msg.includes('저녁') || msg.includes('오후') || msg.includes('밤'))) {
-          hour += 12
-        }
-        time = `${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`
-      } else if (msg.includes('저녁')) {
-        time = '19:00'
-      } else if (msg.includes('오후')) {
-        time = '14:00'
-      } else if (msg.includes('오전')) {
-        time = '10:00'
+      // 시간 파싱 (HH:MM 형식 우선, 그 다음 자연어)
+      const exactTime = msg.match(/(\d{2}):(\d{2})/)
+      let time = '19:00'
+      if (exactTime) {
+        time = exactTime[0]
+      } else {
+        const timeMatch = msg.match(/(\d{1,2})\s*[:시]\s*(\d{0,2})/)
+        if (timeMatch) {
+          let hour = parseInt(timeMatch[1])
+          const min = timeMatch[2] ? parseInt(timeMatch[2]) : 0
+          if (hour < 12 && (msg.includes('저녁') || msg.includes('오후') || msg.includes('밤'))) hour += 12
+          time = `${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`
+        } else if (msg.includes('저녁')) { time = '19:00' }
+        else if (msg.includes('오후')) { time = '14:00' }
+        else if (msg.includes('오전')) { time = '10:00' }
       }
 
       return { updates: {
@@ -9444,9 +9451,49 @@ ${navHTML}
     </div>
 
     <div id="chatInputArea" class="border-t p-4">
-      <div class="flex gap-2">
-        <input type="text" id="chatInput" class="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="메시지를 입력하세요..." onkeydown="if(event.key==='Enter')sendChat()">
-        <button onclick="sendChat()" class="px-5 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium">전송</button>
+      <!-- 기본 텍스트 입력 -->
+      <div id="textInputArea">
+        <div class="flex gap-2">
+          <input type="text" id="chatInput" class="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="메시지를 입력하세요..." onkeydown="if(event.key==='Enter')sendChat()">
+          <button onclick="sendChat()" class="px-5 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium">전송</button>
+        </div>
+      </div>
+      <!-- Step 4: 스케줄 클릭 UI -->
+      <div id="scheduleUI" class="hidden space-y-3">
+        <div>
+          <label class="text-xs font-medium text-gray-500 mb-1 block">시작일</label>
+          <input type="date" id="schedDate" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+        </div>
+        <div>
+          <label class="text-xs font-medium text-gray-500 mb-1 block">요일 선택</label>
+          <div class="flex gap-1.5">
+            <button type="button" onclick="toggleDay(this,'mon')" data-day="mon" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">월</button>
+            <button type="button" onclick="toggleDay(this,'tue')" data-day="tue" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">화</button>
+            <button type="button" onclick="toggleDay(this,'wed')" data-day="wed" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">수</button>
+            <button type="button" onclick="toggleDay(this,'thu')" data-day="thu" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">목</button>
+            <button type="button" onclick="toggleDay(this,'fri')" data-day="fri" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">금</button>
+            <button type="button" onclick="toggleDay(this,'sat')" data-day="sat" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">토</button>
+            <button type="button" onclick="toggleDay(this,'sun')" data-day="sun" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">일</button>
+          </div>
+        </div>
+        <div>
+          <label class="text-xs font-medium text-gray-500 mb-1 block">시간</label>
+          <select id="schedTime" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+            <option value="09:00">오전 9시</option>
+            <option value="10:00">오전 10시</option>
+            <option value="11:00">오전 11시</option>
+            <option value="13:00">오후 1시</option>
+            <option value="14:00">오후 2시</option>
+            <option value="15:00">오후 3시</option>
+            <option value="16:00">오후 4시</option>
+            <option value="17:00">오후 5시</option>
+            <option value="18:00">저녁 6시</option>
+            <option value="19:00" selected>저녁 7시</option>
+            <option value="20:00">저녁 8시</option>
+            <option value="21:00">밤 9시</option>
+          </select>
+        </div>
+        <button onclick="submitSchedule()" class="w-full py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium text-sm">다음 단계</button>
       </div>
       <div class="flex gap-2 mt-2">
         <button onclick="sendPrev()" class="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-100">← 이전 단계</button>
@@ -9480,6 +9527,16 @@ function addMessage(text, isAgent) {
 function updateStep(step) {
   conversationStep = step;
   document.getElementById('stepIndicator').textContent = 'Step ' + Math.min(step, 6) + '/6';
+  // Step 4: 클릭형 스케줄 UI 표시
+  var scheduleUI = document.getElementById('scheduleUI');
+  var textInput = document.getElementById('textInputArea');
+  if (step === 4) {
+    if (scheduleUI) scheduleUI.classList.remove('hidden');
+    if (textInput) textInput.classList.add('hidden');
+  } else {
+    if (scheduleUI) scheduleUI.classList.add('hidden');
+    if (textInput) textInput.classList.remove('hidden');
+  }
 }
 
 async function initChat() {
@@ -9518,12 +9575,12 @@ async function initChat() {
   updateStep(conversationStep);
 }
 
-async function sendChat() {
+async function sendChat(skipBubble) {
   const input = document.getElementById('chatInput');
   const message = input.value.trim();
   if (!message || !applicationId) return;
 
-  addMessage(message, false);
+  if (!skipBubble) addMessage(message, false);
   input.value = '';
 
   const token = localStorage.getItem('classin_token');
@@ -9547,6 +9604,28 @@ async function sendChat() {
 function sendPrev() {
   document.getElementById('chatInput').value = '이전';
   sendChat();
+}
+
+// Step 4: 스케줄 클릭 UI
+var selectedDays = [];
+function toggleDay(btn, day) {
+  var idx = selectedDays.indexOf(day);
+  if (idx >= 0) { selectedDays.splice(idx,1); btn.classList.remove('bg-primary-600','text-white','border-primary-600'); btn.classList.add('border-gray-300'); }
+  else { selectedDays.push(day); btn.classList.add('bg-primary-600','text-white','border-primary-600'); btn.classList.remove('border-gray-300'); }
+}
+function submitSchedule() {
+  var date = document.getElementById('schedDate').value;
+  if (!date) { alert('시작일을 선택해주세요'); return; }
+  if (selectedDays.length === 0) { alert('요일을 하나 이상 선택해주세요'); return; }
+  var time = document.getElementById('schedTime').value;
+  var dayNames = {mon:'월',tue:'화',wed:'수',thu:'목',fri:'금',sat:'토',sun:'일'};
+  var dayStr = selectedDays.map(function(d){return dayNames[d]}).join('/');
+  var msg = date + ', ' + dayStr + ', ' + time;
+  addMessage(dayStr + '요일 ' + time + ' (' + date + ' 시작)', false);
+  document.getElementById('chatInput').value = msg;
+  sendChat(true);
+  selectedDays = [];
+  document.querySelectorAll('.day-btn').forEach(function(b){b.classList.remove('bg-primary-600','text-white','border-primary-600');b.classList.add('border-gray-300');});
 }
 
 initChat();
