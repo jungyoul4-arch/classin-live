@@ -421,12 +421,12 @@ async function getClassInLoginUrl(
         // authTicket이 있으면 자동 로그인 가능
         if (authTicket && authTicket !== 'null') {
           // Build web URL with authTicket (자동 로그인)
-          url = `https://www.eeo.cn/client/invoke/index.html?telephone=${telephone}&authTicket=${authTicket}&classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
+          url = `https://www.eeo.cn/client/invoke/index.html?telephone=${telephone}&password=${encodeURIComponent('ClassIn2024!')}&authTicket=${authTicket}&classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
           return { url }
         } else {
           // authTicket 없으면 수동 로그인 필요 (2021년 6월 이후 일부 계정)
           console.log('getLoginLinked: authTicket is null or missing, manual login required')
-          url = `https://www.eeo.cn/client/invoke/index.html?telephone=${telephone}&classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
+          url = `https://www.eeo.cn/client/invoke/index.html?telephone=${telephone}&password=${encodeURIComponent('ClassIn2024!')}&classId=${classIdParam}&courseId=${courseIdParam}&schoolId=${schoolIdParam}`
           return { url, requiresManualLogin: true }
         }
       }
@@ -4192,22 +4192,162 @@ app.delete('/api/admin/classes/:id', async (c) => {
     return c.json({ error: `${enrollments.count}명의 활성 수강생이 있습니다. 먼저 수강을 종료해주세요.` }, 400)
   }
 
-  // 관련 테이블들 삭제 (FOREIGN KEY 제약 해결)
-  // DB.batch(): 10개 순차 DELETE를 단일 트랜잭션으로 묶어 네트워크 왕복 9회 절감
-  await c.env.DB.batch([
-    c.env.DB.prepare('DELETE FROM classin_sessions WHERE class_id = ?').bind(classId),
-    c.env.DB.prepare('DELETE FROM enrollments WHERE class_id = ?').bind(classId),
-    c.env.DB.prepare('DELETE FROM orders WHERE class_id = ?').bind(classId),
-    c.env.DB.prepare('DELETE FROM lessons WHERE class_id = ?').bind(classId),
-    c.env.DB.prepare('DELETE FROM reviews WHERE class_id = ?').bind(classId),
-    c.env.DB.prepare('DELETE FROM wishlist WHERE class_id = ?').bind(classId),
-    c.env.DB.prepare('DELETE FROM cart WHERE class_id = ?').bind(classId),
-    c.env.DB.prepare('DELETE FROM subscriptions WHERE class_id = ?').bind(classId),
-    c.env.DB.prepare('DELETE FROM class_lessons WHERE class_id = ?').bind(classId),
-    c.env.DB.prepare('DELETE FROM classes WHERE id = ?').bind(classId),
-  ])
+  try {
+    // lesson_enrollments는 class_lessons의 ID를 참조하므로 먼저 삭제
+    const { results: lessonIds } = await c.env.DB.prepare('SELECT id FROM class_lessons WHERE class_id = ?').bind(classId).all()
+    if (lessonIds.length > 0) {
+      for (const l of lessonIds) {
+        await c.env.DB.prepare('DELETE FROM lesson_enrollments WHERE class_lesson_id = ?').bind(l.id).run()
+      }
+    }
+
+    // class_request_applications의 created_class_id 참조 해제
+    await c.env.DB.prepare('UPDATE class_request_applications SET created_class_id = NULL WHERE created_class_id = ?').bind(classId).run()
+
+    // 관련 테이블들 삭제 (FOREIGN KEY 제약 해결)
+    await c.env.DB.batch([
+      c.env.DB.prepare('DELETE FROM classin_sessions WHERE class_id = ?').bind(classId),
+      c.env.DB.prepare('DELETE FROM enrollments WHERE class_id = ?').bind(classId),
+      c.env.DB.prepare('DELETE FROM orders WHERE class_id = ?').bind(classId),
+      c.env.DB.prepare('DELETE FROM lessons WHERE class_id = ?').bind(classId),
+      c.env.DB.prepare('DELETE FROM reviews WHERE class_id = ?').bind(classId),
+      c.env.DB.prepare('DELETE FROM wishlist WHERE class_id = ?').bind(classId),
+      c.env.DB.prepare('DELETE FROM cart WHERE class_id = ?').bind(classId),
+      c.env.DB.prepare('DELETE FROM subscriptions WHERE class_id = ?').bind(classId),
+      c.env.DB.prepare('DELETE FROM class_lessons WHERE class_id = ?').bind(classId),
+      c.env.DB.prepare('DELETE FROM classes WHERE id = ?').bind(classId),
+    ])
+  } catch (e: any) {
+    return c.json({ error: '삭제 실패: ' + e.message }, 500)
+  }
 
   return c.json({ success: true, message: '코스가 삭제되었습니다.' })
+})
+
+// ==================== 강사 수업 편집 API ====================
+
+// 헬퍼: 강사 본인 수업 확인
+async function verifyInstructorOwnership(c: any, classId: number): Promise<{ cls: any; instructor: any; user: any } | null> {
+  const user = await getUserFromToken(c)
+  if (!user) { c.json({ error: '로그인이 필요합니다.' }, 401); return null }
+
+  const cls = await c.env.DB.prepare(`
+    SELECT c.*, i.user_id as instructor_user_id, i.id as instructor_id
+    FROM classes c JOIN instructors i ON c.instructor_id = i.id WHERE c.id = ?
+  `).bind(classId).first() as any
+
+  if (!cls) { c.json({ error: '수업을 찾을 수 없습니다.' }, 404); return null }
+  if (cls.instructor_user_id !== user.id) { c.json({ error: '본인의 수업만 편집할 수 있습니다.' }, 403); return null }
+
+  return { cls, instructor: { id: cls.instructor_id, user_id: cls.instructor_user_id }, user }
+}
+
+// 강사: 수업 기본정보 수정
+app.put('/api/instructor/classes/:id', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const ownership = await verifyInstructorOwnership(c, classId)
+  if (!ownership) return
+
+  const { title, description, whatYouLearn } = await c.req.json()
+
+  await c.env.DB.prepare(`
+    UPDATE classes SET
+      title = COALESCE(?, title),
+      description = COALESCE(?, description),
+      what_you_learn = COALESCE(?, what_you_learn),
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(title || null, description || null, whatYouLearn || null, classId).run()
+
+  return c.json({ success: true })
+})
+
+// 강사: 썸네일 업로드
+app.post('/api/instructor/classes/:id/thumbnail', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const ownership = await verifyInstructorOwnership(c, classId)
+  if (!ownership) return
+
+  const formData = await c.req.formData()
+  const file = formData.get('file') as File
+  if (!file) return c.json({ error: '파일이 없습니다.' }, 400)
+
+  const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+  if (!allowedTypes.includes(file.type)) return c.json({ error: '지원하지 않는 이미지 형식입니다.' }, 400)
+  if (file.size > 5 * 1024 * 1024) return c.json({ error: '파일 크기는 5MB 이하여야 합니다.' }, 400)
+
+  const ext = file.name.split('.').pop() || 'jpg'
+  const filename = `thumbnails/class-${classId}-${Date.now()}.${ext}`
+  const arrayBuffer = await file.arrayBuffer()
+
+  await c.env.IMAGES.put(filename, arrayBuffer, { httpMetadata: { contentType: file.type } })
+
+  const imageUrl = `/api/images/${filename}`
+  await c.env.DB.prepare('UPDATE classes SET thumbnail = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(imageUrl, classId).run()
+
+  return c.json({ success: true, url: imageUrl })
+})
+
+// 강사: 커리큘럼 조회
+app.get('/api/instructor/classes/:id/curriculum', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const ownership = await verifyInstructorOwnership(c, classId)
+  if (!ownership) return
+
+  const { results } = await c.env.DB.prepare('SELECT * FROM lessons WHERE class_id = ? ORDER BY sort_order ASC').bind(classId).all()
+  return c.json({ lessons: results })
+})
+
+// 강사: 커리큘럼 항목 추가
+app.post('/api/instructor/classes/:id/curriculum', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const ownership = await verifyInstructorOwnership(c, classId)
+  if (!ownership) return
+
+  const { title, description, chapterTitle } = await c.req.json()
+  if (!title) return c.json({ error: '제목을 입력해주세요.' }, 400)
+
+  const maxOrder = await c.env.DB.prepare('SELECT MAX(sort_order) as max FROM lessons WHERE class_id = ?').bind(classId).first() as any
+  const nextOrder = (maxOrder?.max || 0) + 1
+
+  const result = await c.env.DB.prepare(`
+    INSERT INTO lessons (class_id, title, description, chapter_title, sort_order)
+    VALUES (?, ?, ?, ?, ?)
+  `).bind(classId, title, description || '', chapterTitle || '', nextOrder).run()
+
+  // 커리큘럼 수 업데이트
+  await c.env.DB.prepare('UPDATE classes SET lesson_count = (SELECT COUNT(*) FROM lessons WHERE class_id = ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(classId, classId).run()
+
+  return c.json({ success: true, id: result.meta.last_row_id })
+})
+
+// 강사: 커리큘럼 항목 수정
+app.put('/api/instructor/classes/:id/curriculum/:lessonId', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const lessonId = parseInt(c.req.param('lessonId'))
+  const ownership = await verifyInstructorOwnership(c, classId)
+  if (!ownership) return
+
+  const { title, description, chapterTitle } = await c.req.json()
+
+  await c.env.DB.prepare(`
+    UPDATE lessons SET title = COALESCE(?, title), description = COALESCE(?, description), chapter_title = COALESCE(?, chapter_title) WHERE id = ? AND class_id = ?
+  `).bind(title || null, description || null, chapterTitle || null, lessonId, classId).run()
+
+  return c.json({ success: true })
+})
+
+// 강사: 커리큘럼 항목 삭제
+app.delete('/api/instructor/classes/:id/curriculum/:lessonId', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const lessonId = parseInt(c.req.param('lessonId'))
+  const ownership = await verifyInstructorOwnership(c, classId)
+  if (!ownership) return
+
+  await c.env.DB.prepare('DELETE FROM lessons WHERE id = ? AND class_id = ?').bind(lessonId, classId).run()
+  await c.env.DB.prepare('UPDATE classes SET lesson_count = (SELECT COUNT(*) FROM lessons WHERE class_id = ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(classId, classId).run()
+
+  return c.json({ success: true })
 })
 
 // ==================== 홈페이지 관리 API ====================
@@ -5456,6 +5596,7 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
   const lessonId = c.req.param('lessonId')
   const shouldRedirect = c.req.query('redirect') === 'true'
   const mode = c.req.query('mode') || 'instructor'  // 'instructor' (강사) or 'observer' (청강생)
+  try {
 
   // Get lesson info with instructor details (including virtual account)
   const lesson = await c.env.DB.prepare(`
@@ -5495,7 +5636,20 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
 
   if (useVirtualAccount) {
     // T(teachers): 가상계정 사용 (authTicket 발급 + 강사 권한)
-    virtualAccount = lesson.instructor_virtual_account || ''
+    // 강사에게 이미 classin_uid가 있으면 해당 UID의 가상계정을 사용 (수업 생성 시 teacherUid와 일치해야 함)
+    if (lesson.instructor_classin_uid) {
+      const existingVa = await c.env.DB.prepare(
+        'SELECT account_uid FROM classin_virtual_accounts WHERE classin_uid = ?'
+      ).bind(lesson.instructor_classin_uid).first() as any
+      if (existingVa) {
+        virtualAccount = existingVa.account_uid
+        instructorUid = lesson.instructor_classin_uid
+      }
+    }
+
+    if (!virtualAccount) {
+      virtualAccount = lesson.instructor_virtual_account || ''
+    }
 
     // 가상계정이 없으면 할당
     if (!virtualAccount) {
@@ -5528,8 +5682,11 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
       console.log('Assigned virtual account to instructor:', virtualAccount)
     }
 
-    // 가상계정으로 ClassIn 등록
-    const regResult = await registerVirtualAccount(classInConfig, virtualAccount, lesson.instructor_name || 'Instructor', INSTRUCTOR_DEFAULT_PASSWORD)
+    // 가상계정으로 ClassIn 등록 (이미 UID가 있으면 건너뜀)
+    if (instructorUid) {
+      console.log('Using existing instructor UID:', instructorUid, 'with virtual account:', virtualAccount)
+    }
+    const regResult = !instructorUid ? await registerVirtualAccount(classInConfig, virtualAccount, lesson.instructor_name || 'Instructor', INSTRUCTOR_DEFAULT_PASSWORD) : { uid: instructorUid, success: true }
     console.log('Virtual account register result:', JSON.stringify(regResult))
 
     if (regResult.uid) {
@@ -5628,6 +5785,13 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
     `)
   }
   return c.json({ success: false, error: loginUrlResult.error, debug: debugInfo })
+  } catch (err: any) {
+    console.error('instructor-enter error:', err)
+    if (shouldRedirect) {
+      return c.html(`<html><body style="font-family:sans-serif;padding:20px"><h2>강사 입장 오류</h2><p>${err.message}</p><pre>${err.stack || ''}</pre></body></html>`)
+    }
+    return c.json({ error: err.message }, 500)
+  }
 })
 
 // ==================== Subscription API Routes ====================
@@ -6462,11 +6626,15 @@ app.post('/api/class-requests', async (c) => {
   if (!title || !description) return c.json({ error: '제목과 설명은 필수입니다.' }, 400)
 
   const result = await c.env.DB.prepare(`
-    INSERT INTO class_requests (user_id, title, description, category_id, preferred_schedule, budget_min, budget_max)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO class_requests (user_id, title, description, category_id, preferred_schedule, budget_min, budget_max, interest_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
   `).bind(user.id, title, description, categoryId || null, preferredSchedule || null, budgetMin || null, budgetMax || null).run()
 
-  return c.json({ success: true, id: result.meta.last_row_id })
+  const requestId = result.meta.last_row_id
+  // 요청자를 자동으로 관심자에 추가
+  await c.env.DB.prepare('INSERT OR IGNORE INTO class_request_interests (request_id, user_id) VALUES (?, ?)').bind(requestId, user.id).run()
+
+  return c.json({ success: true, id: requestId })
 })
 
 // 수업 요청 게시판 목록
@@ -6587,6 +6755,7 @@ app.post('/api/class-requests/:id/apply', async (c) => {
       applicationId: existing.id,
       conversationStep: existing.conversation_step,
       status: existing.status,
+      agentMessage: getAgentMessage(existing.conversation_step, existing, request),
       message: '이미 지원이 진행 중입니다.'
     })
   }
@@ -6696,7 +6865,7 @@ app.get('/api/applications/:id', async (c) => {
 function getAgentMessage(step: number, app: any, request: any): string {
   switch (step) {
     case 0:
-      return '안녕하세요! 수업을 만들어주셔서 감사합니다. 먼저 간단한 자기소개와 관련 경력을 알려주세요. (최소 10자)'
+      return '안녕하세요! 이 수업에 관심을 가져주셔서 감사합니다. 먼저 간단한 자기소개와 관련 경력을 알려주세요. (최소 10자)'
     case 1:
       return `좋습니다! 이제 수업 제목을 정해볼까요?${request ? ` 요청 내용: "${request.title}"을 참고해서 제안해주세요.` : ''}`
     case 2:
@@ -6976,6 +7145,8 @@ async function runAutomation(c: any, appId: number, startStep: number) {
           app_row.proposed_level || 'all'
         ).run()
         classId = classResult.meta.last_row_id as number
+        // 즉시 created_class_id 저장 (재시도 시 복원 가능하도록)
+        await c.env.DB.prepare('UPDATE class_request_applications SET created_class_id = ? WHERE id = ?').bind(classId, appId).run()
       }
     } catch (e: any) {
       await c.env.DB.prepare('UPDATE class_request_applications SET automation_error = ? WHERE id = ?').bind('Step 2 실패: ' + e.message, appId).run()
@@ -6983,6 +7154,11 @@ async function runAutomation(c: any, appId: number, startStep: number) {
     }
   } else {
     classId = app_row.created_class_id
+    // created_class_id가 없으면 instructorId로 최근 생성된 class 복원
+    if (!classId && instructorId) {
+      const recent = await c.env.DB.prepare('SELECT id FROM classes WHERE instructor_id = ? ORDER BY id DESC LIMIT 1').bind(instructorId).first() as any
+      classId = recent?.id || null
+    }
   }
 
   // Step 3: ClassIn 코스 생성
@@ -6994,6 +7170,7 @@ async function runAutomation(c: any, appId: number, startStep: number) {
       if (!cls?.classin_course_id) {
         const courseResult = await createClassInCourse(config, app_row.proposed_title)
         if (courseResult.error) throw new Error(courseResult.error)
+        if (!courseResult.courseId) throw new Error('ClassIn API가 코스 ID를 반환하지 않았습니다')
         await c.env.DB.prepare('UPDATE classes SET classin_course_id = ? WHERE id = ?').bind(courseResult.courseId, classId).run()
       }
     } catch (e: any) {
@@ -7007,8 +7184,17 @@ async function runAutomation(c: any, appId: number, startStep: number) {
     try {
       await c.env.DB.prepare('UPDATE class_request_applications SET automation_step = 4 WHERE id = ?').bind(appId).run()
 
-      const cls = await c.env.DB.prepare('SELECT id, classin_course_id, duration_minutes FROM classes WHERE id = ?').bind(classId).first() as any
-      if (!cls?.classin_course_id) throw new Error('ClassIn 코스 ID가 없습니다')
+      if (!classId) throw new Error('classId가 없습니다. 처음부터 재시도해주세요.')
+      let cls = await c.env.DB.prepare('SELECT id, classin_course_id, duration_minutes FROM classes WHERE id = ?').bind(classId).first() as any
+      if (!cls?.classin_course_id) {
+        // Step 3에서 코스 생성이 안 됐으면 여기서 재시도
+        const courseResult = await createClassInCourse(config, app_row.proposed_title)
+        if (courseResult.error) throw new Error('코스 생성 실패: ' + courseResult.error)
+        if (!courseResult.courseId) throw new Error('ClassIn API가 코스 ID를 반환하지 않았습니다')
+        await c.env.DB.prepare('UPDATE classes SET classin_course_id = ? WHERE id = ?').bind(courseResult.courseId, classId).run()
+        cls = await c.env.DB.prepare('SELECT id, classin_course_id, duration_minutes FROM classes WHERE id = ?').bind(classId).first() as any
+        if (!cls?.classin_course_id) throw new Error('ClassIn 코스 ID가 없습니다')
+      }
 
       // 이미 생성된 레슨 수 확인 (멱등성)
       const existingCount = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM class_lessons WHERE class_id = ?').bind(classId).first() as any
@@ -7046,10 +7232,10 @@ async function runAutomation(c: any, appId: number, startStep: number) {
           const useVirtual = c.env.USE_INSTRUCTOR_VIRTUAL_ACCOUNT === 'true'
           if (useVirtual) {
             const va = await c.env.DB.prepare(
-              "SELECT id, classin_uid, phone, password FROM virtual_accounts WHERE status = 'available' AND account_type = 'instructor' LIMIT 1"
+              "SELECT id, account_uid, account_password FROM classin_virtual_accounts WHERE status = 'available' LIMIT 1"
             ).first() as any
             if (va) {
-              await registerInstructorWithClassIn(config, c.env.DB, instructor.id, va.classin_uid, va.phone, va.id, instructor.display_name || app_row.applicant_name)
+              await registerInstructorWithClassIn(c.env.DB, instructor.id, config, va.account_uid)
             }
           }
         }
@@ -7068,17 +7254,18 @@ async function runAutomation(c: any, appId: number, startStep: number) {
           const endTimestamp = utcTimestamp + (app_row.proposed_duration_minutes || 60) * 60
           const durationMins = app_row.proposed_duration_minutes || 60
 
-          const lessonResult = await createClassInLesson(config, {
-            courseId: cls.classin_course_id,
-            className: `${app_row.proposed_title} - ${i + 1}회차`,
-            beginTime: utcTimestamp,
-            endTime: endTimestamp,
-            teacherUid: updatedInstructor?.classin_uid || ''
-          })
+          const lessonResult = await createClassInLesson(
+            config,
+            cls.classin_course_id,
+            `${app_row.proposed_title} - ${i + 1}회차`,
+            utcTimestamp,
+            endTimestamp,
+            updatedInstructor?.classin_uid || ''
+          )
 
           const scheduledAt = new Date((utcTimestamp + 9 * 3600) * 1000).toISOString()
           await c.env.DB.prepare(`
-            INSERT INTO class_lessons (class_id, lesson_title, scheduled_at, duration_minutes, classin_course_id, classin_class_id, classin_instructor_url, sort_order, status)
+            INSERT INTO class_lessons (class_id, lesson_title, scheduled_at, duration_minutes, classin_course_id, classin_class_id, classin_instructor_url, lesson_number, status)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
           `).bind(
             classId,
@@ -9262,8 +9449,21 @@ ${navHTML}
       </select>
     </div>
     <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">희망 요일</label>
+      <div class="flex flex-wrap gap-2 mb-3" id="reqDayBtns">
+        ${['평일','주말','월','화','수','목','금','토','일'].map(d =>
+          `<button type="button" onclick="toggleDayBtn(this)" data-day="${d}" class="px-3 py-1.5 rounded-full border border-gray-300 text-sm hover:border-primary-400 hover:bg-primary-50 transition">${d}</button>`
+        ).join('')}
+      </div>
       <label class="block text-sm font-medium text-gray-700 mb-1">희망 시간대</label>
-      <input type="text" id="reqSchedule" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="예: 평일 저녁 7시~9시">
+      <div class="flex flex-wrap gap-2" id="reqTimeBtns">
+        ${['오전 (9~12시)','오후 (1~5시)','저녁 (6~8시)','밤 (9~11시)'].map(t =>
+          `<button type="button" onclick="toggleDayBtn(this)" data-time="${t}" class="px-3 py-1.5 rounded-full border border-gray-300 text-sm hover:border-primary-400 hover:bg-primary-50 transition">${t}</button>`
+        ).join('')}
+        <button type="button" onclick="toggleOther(this)" data-time="기타" class="px-3 py-1.5 rounded-full border border-gray-300 text-sm hover:border-primary-400 hover:bg-primary-50 transition">기타</button>
+      </div>
+      <input type="text" id="reqScheduleOther" class="hidden w-full mt-2 px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 text-sm" placeholder="예: 새벽 5시~7시" oninput="updateScheduleValue()">
+      <input type="hidden" id="reqSchedule">
     </div>
     <div class="grid grid-cols-2 gap-4">
       <div>
@@ -9280,6 +9480,36 @@ ${navHTML}
 </main>
 
 <script>
+function toggleDayBtn(btn) {
+  btn.classList.toggle('bg-primary-100');
+  btn.classList.toggle('border-primary-500');
+  btn.classList.toggle('text-primary-700');
+  updateScheduleValue();
+}
+function toggleOther(btn) {
+  btn.classList.toggle('bg-primary-100');
+  btn.classList.toggle('border-primary-500');
+  btn.classList.toggle('text-primary-700');
+  var otherInput = document.getElementById('reqScheduleOther');
+  if (btn.classList.contains('bg-primary-100')) {
+    otherInput.classList.remove('hidden');
+    otherInput.focus();
+  } else {
+    otherInput.classList.add('hidden');
+    otherInput.value = '';
+  }
+  updateScheduleValue();
+}
+function updateScheduleValue() {
+  var days = Array.from(document.querySelectorAll('#reqDayBtns button.bg-primary-100')).map(function(b){return b.dataset.day});
+  var times = Array.from(document.querySelectorAll('#reqTimeBtns button.bg-primary-100:not([data-time="기타"])')).map(function(b){return b.dataset.time});
+  var other = document.getElementById('reqScheduleOther').value.trim();
+  if (other) times.push(other);
+  var parts = [];
+  if (days.length) parts.push(days.join(', '));
+  if (times.length) parts.push(times.join(', '));
+  document.getElementById('reqSchedule').value = parts.join(' / ') || '';
+}
 document.getElementById('requestForm').addEventListener('submit', async function(e) {
   e.preventDefault();
   const token = localStorage.getItem('classin_token');
@@ -9531,7 +9761,7 @@ function renderStepUI(step) {
       '<option value="09:00">오전 9시</option><option value="10:00">오전 10시</option><option value="11:00">오전 11시</option>' +
       '<option value="13:00">오후 1시</option><option value="14:00">오후 2시</option><option value="15:00">오후 3시</option>' +
       '<option value="16:00">오후 4시</option><option value="17:00">오후 5시</option><option value="18:00">저녁 6시</option>' +
-      '<option value="19:00" selected>저녁 7시</option><option value="20:00">저녁 8시</option><option value="21:00">밤 9시</option>' +
+      '<option value="19:00" selected>저녁 7시</option><option value="20:00">저녁 8시</option><option value="21:00">밤 9시</option><option value="22:00">밤 10시</option><option value="23:00">밤 11시</option>' +
       '</select></div>' +
       '<button onclick="submitSchedule()" class="w-full py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium text-sm">다음</button>';
   } else if (step === 5) {
@@ -9663,7 +9893,7 @@ ${footerHTML}
 app.get('/class/:slug', async (c) => {
   const slug = decodeURIComponent(c.req.param('slug'))
   const cls = await c.env.DB.prepare(`
-    SELECT c.*, i.id as iid, i.display_name as instructor_name, i.profile_image as instructor_image, i.bio as instructor_bio, i.specialty as instructor_specialty, i.total_students as instructor_total_students, i.total_classes as instructor_total_classes, i.rating as instructor_rating, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug
+    SELECT c.*, i.id as iid, i.user_id as instructor_user_id, i.display_name as instructor_name, i.profile_image as instructor_image, i.bio as instructor_bio, i.specialty as instructor_specialty, i.total_students as instructor_total_students, i.total_classes as instructor_total_classes, i.rating as instructor_rating, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug
     FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id WHERE c.slug = ?
   `).bind(slug).first() as any
   
@@ -10141,7 +10371,7 @@ ${navHTML}
 
 <script>
 // 강의 버튼 활성화 함수
-function activateLessonButtons() {
+function activateLessonButtons(isInstructor) {
   document.querySelectorAll('.lesson-action-btn').forEach(function(wrapper) {
     const lessonId = wrapper.dataset.lessonId;
     const joinUrl = wrapper.dataset.joinUrl;
@@ -10152,6 +10382,11 @@ function activateLessonButtons() {
     const currentUser = JSON.parse(localStorage.getItem('classin_user') || 'null');
     const currentUserId = currentUser ? currentUser.id : '';
 
+    // 강사는 instructor-enter API 사용
+    const enterUrl = isInstructor
+      ? '/api/classin/instructor-enter/' + lessonId + '?redirect=true'
+      : '/api/classin/lesson-enter/' + lessonId + '?redirect=true&userId=' + currentUserId;
+
     if (state === 'recorded') {
       wrapper.innerHTML = '<button onclick="openWatchWindow(' + lessonId + ')" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>';
     } else if (state === 'ended') {
@@ -10160,11 +10395,9 @@ function activateLessonButtons() {
         ? '<a href="' + replayUrl + '" target="_blank" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>다시보기</a>'
         : '<span class="text-gray-400 text-sm">다시보기 없음</span>';
     } else if (state === 'live') {
-      // 라이브 진행중 - 새 API로 입장 (수강 여부 확인 + ClassIn 입장)
-      wrapper.innerHTML = '<a href="/api/classin/lesson-enter/' + lessonId + '?redirect=true&userId=' + currentUserId + '" target="_blank" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-video mr-1"></i>입장하기</a>';
+      wrapper.innerHTML = '<a href="' + enterUrl + '" target="_blank" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-video mr-1"></i>' + (isInstructor ? '강의실 입장' : '입장하기') + '</a>';
     } else {
-      // 예정된 강의 - 새 API로 입장
-      wrapper.innerHTML = '<a href="/api/classin/lesson-enter/' + lessonId + '?redirect=true&userId=' + currentUserId + '" target="_blank" class="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30"><i class="fas fa-door-open mr-1"></i>입장하기</a>';
+      wrapper.innerHTML = '<a href="' + enterUrl + '" target="_blank" class="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-primary-500/30"><i class="fas fa-door-open mr-1"></i>' + (isInstructor ? '강의실 입장' : '입장하기') + '</a>';
     }
   });
 }
@@ -10179,8 +10412,9 @@ function activateLessonButtons() {
   console.log('[Enrollment Check] courseId:', courseId, 'userId:', user.id);
 
   // 강사/관리자는 모든 강의 접근 가능
+  const isThisClassInstructor = (user.id === ${cls.instructor_user_id || 0});
   if (user.role === 'instructor' || user.role === 'admin' || user.is_instructor === 1) {
-    activateLessonButtons();
+    activateLessonButtons(isThisClassInstructor);
     return;
   }
 
@@ -10444,9 +10678,24 @@ document.getElementById('reviewContent')?.addEventListener('input', checkReviewR
     .catch(() => {});
 })();
 
-// 강사는 다른 코스 수강 불가
+// 강사 본인 수업이면 "수업 관리" 버튼 표시
 document.addEventListener('DOMContentLoaded', () => {
   const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  const instructorUserId = ${cls.instructor_user_id || 0};
+  if (user && user.id === instructorUserId) {
+    const enrollBtn = document.getElementById('btnEnrollOnetime');
+    if (enrollBtn) {
+      enrollBtn.innerHTML = '<i class="fas fa-cog mr-2"></i>수업 관리';
+      enrollBtn.className = 'w-full h-12 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl transition-all flex items-center justify-center shadow-lg';
+      enrollBtn.onclick = function(e) { e.preventDefault(); window.location.href = '/instructor/classes/${cls.id}/edit'; };
+      enrollBtn.disabled = false;
+    }
+    var monthlyBtn = document.getElementById('btnEnrollMonthly');
+    if (monthlyBtn) monthlyBtn.parentElement.classList.add('hidden');
+    var cartBtn = document.getElementById('btnAddToCart');
+    if (cartBtn) cartBtn.parentElement.classList.add('hidden');
+    return;
+  }
   if (user && (user.role === 'instructor' || user.is_instructor === 1)) {
     const disableBtn = (btn, text) => {
       if (!btn) return;
@@ -10731,6 +10980,253 @@ ${globalScripts}
 })
 
 // ==================== Instructor Mypage ====================
+// ==================== 강사 수업 편집 페이지 ====================
+app.get('/instructor/classes/:id/edit', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const cls = await c.env.DB.prepare(`
+    SELECT c.*, i.user_id as instructor_user_id, i.display_name as instructor_name, cat.name as category_name
+    FROM classes c JOIN instructors i ON c.instructor_id = i.id LEFT JOIN categories cat ON c.category_id = cat.id WHERE c.id = ?
+  `).bind(classId).first() as any
+  if (!cls) return c.html('<h1>수업을 찾을 수 없습니다</h1>', 404)
+
+  const { results: curriculum } = await c.env.DB.prepare('SELECT * FROM lessons WHERE class_id = ? ORDER BY sort_order ASC').bind(classId).all()
+  const whatYouLearn = cls.what_you_learn ? cls.what_you_learn.split('|') : []
+
+  const html = `${headHTML}
+<body class="bg-gray-50 min-h-screen">
+${navHTML}
+<main class="max-w-4xl mx-auto px-4 py-8">
+  <a href="/class/${cls.slug}" class="text-sm text-gray-500 hover:text-gray-700 mb-4 inline-block"><i class="fas fa-arrow-left mr-1"></i>수업 페이지로 돌아가기</a>
+
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-gray-900">수업 관리</h1>
+    <span class="text-sm text-gray-500">${cls.category_name || ''}</span>
+  </div>
+
+  <!-- 탭 -->
+  <div class="flex border-b mb-6">
+    <button onclick="switchTab('info')" id="tab-info" class="px-6 py-3 text-sm font-medium border-b-2 border-primary-500 text-primary-600">기본 정보</button>
+    <button onclick="switchTab('curriculum')" id="tab-curriculum" class="px-6 py-3 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700">커리큘럼</button>
+    <button onclick="switchTab('thumbnail')" id="tab-thumbnail" class="px-6 py-3 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700">썸네일</button>
+  </div>
+
+  <!-- 기본 정보 탭 -->
+  <div id="panel-info">
+    <div class="bg-white rounded-xl border p-6 space-y-5">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">수업 제목</label>
+        <input type="text" id="editTitle" value="${(cls.title || '').replace(/"/g, '&quot;')}" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">수업 설명</label>
+        <textarea id="editDesc" rows="5" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500">${cls.description || ''}</textarea>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">배울 내용 (줄바꿈으로 구분)</label>
+        <textarea id="editLearn" rows="4" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="각 줄에 하나씩 입력하세요">${whatYouLearn.join('\\n')}</textarea>
+      </div>
+      <button onclick="saveBasicInfo()" class="w-full py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium"><i class="fas fa-save mr-2"></i>저장하기</button>
+    </div>
+  </div>
+
+  <!-- 커리큘럼 탭 -->
+  <div id="panel-curriculum" class="hidden">
+    <div class="bg-white rounded-xl border p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-semibold text-gray-900">커리큘럼 항목</h3>
+        <button onclick="addCurrItem()" class="px-4 py-2 bg-primary-600 text-white rounded-lg text-sm hover:bg-primary-700 transition"><i class="fas fa-plus mr-1"></i>추가</button>
+      </div>
+      <div id="currList" class="space-y-3">
+        ${curriculum.length === 0 ? '<p class="text-gray-400 text-sm py-8 text-center">아직 커리큘럼이 없습니다. 항목을 추가해주세요.</p>' :
+          (curriculum as any[]).map((l: any, i: number) => `
+          <div class="curr-item border border-gray-200 rounded-lg p-4" data-id="${l.id}">
+            <div class="flex items-start gap-3">
+              <span class="w-7 h-7 bg-primary-100 text-primary-600 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0">${i + 1}</span>
+              <div class="flex-1 space-y-2">
+                <input type="text" value="${(l.title || '').replace(/"/g, '&quot;')}" class="curr-title w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-medium" placeholder="강의 제목">
+                <textarea class="curr-desc w-full px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-600" rows="2" placeholder="강의 설명 (선택)">${l.description || ''}</textarea>
+              </div>
+              <button onclick="deleteCurrItem(this, ${l.id})" class="text-gray-400 hover:text-red-500 p-1"><i class="fas fa-trash-alt"></i></button>
+            </div>
+          </div>`).join('')}
+      </div>
+      <button onclick="saveCurriculum()" class="w-full py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium mt-4"><i class="fas fa-save mr-2"></i>커리큘럼 저장</button>
+    </div>
+  </div>
+
+  <!-- 썸네일 탭 -->
+  <div id="panel-thumbnail" class="hidden">
+    <div class="bg-white rounded-xl border p-6">
+      <h3 class="font-semibold text-gray-900 mb-4">수업 썸네일</h3>
+      <div class="mb-4">
+        ${cls.thumbnail
+          ? `<img src="${cls.thumbnail}" alt="현재 썸네일" class="w-full max-w-md rounded-lg border">`
+          : '<div class="w-full max-w-md h-48 bg-gray-100 rounded-lg border flex items-center justify-center text-gray-400"><i class="fas fa-image text-3xl"></i></div>'}
+      </div>
+      <div id="dropZone" class="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center hover:border-primary-400 hover:bg-primary-50 transition cursor-pointer"
+        onclick="document.getElementById('thumbFile').click()"
+        ondragover="event.preventDefault(); this.classList.add('border-primary-500','bg-primary-50')"
+        ondragleave="this.classList.remove('border-primary-500','bg-primary-50')"
+        ondrop="event.preventDefault(); this.classList.remove('border-primary-500','bg-primary-50'); uploadThumb(event.dataTransfer.files[0])">
+        <i class="fas fa-cloud-upload-alt text-3xl text-gray-400 mb-2"></i>
+        <p class="text-sm text-gray-500">클릭하거나 이미지를 드래그하여 업로드</p>
+        <p class="text-xs text-gray-400 mt-1">JPG, PNG, WebP (최대 5MB)</p>
+      </div>
+      <input type="file" id="thumbFile" accept="image/*" class="hidden" onchange="uploadThumb(this.files[0])">
+      <div id="uploadProgress" class="hidden mt-3">
+        <div class="w-full bg-gray-200 rounded-full h-2"><div id="uploadBar" class="bg-primary-500 h-2 rounded-full transition-all" style="width:0%"></div></div>
+        <p id="uploadStatus" class="text-xs text-gray-500 mt-1 text-center">업로드 중...</p>
+      </div>
+    </div>
+  </div>
+</main>
+
+${globalScripts}
+<script>
+const CLASS_ID = ${classId};
+var currCounter = ${curriculum.length};
+
+function switchTab(tab) {
+  ['info','curriculum','thumbnail'].forEach(function(t) {
+    document.getElementById('panel-'+t).classList.toggle('hidden', t !== tab);
+    var tabBtn = document.getElementById('tab-'+t);
+    if (t === tab) {
+      tabBtn.classList.add('border-primary-500','text-primary-600');
+      tabBtn.classList.remove('border-transparent','text-gray-500');
+    } else {
+      tabBtn.classList.remove('border-primary-500','text-primary-600');
+      tabBtn.classList.add('border-transparent','text-gray-500');
+    }
+  });
+}
+
+async function saveBasicInfo() {
+  var token = localStorage.getItem('classin_token');
+  var learn = document.getElementById('editLearn').value.split('\\n').filter(function(l){return l.trim()}).join('|');
+  var res = await fetch('/api/instructor/classes/' + CLASS_ID, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+    body: JSON.stringify({
+      title: document.getElementById('editTitle').value,
+      description: document.getElementById('editDesc').value,
+      whatYouLearn: learn || null
+    })
+  });
+  var data = await res.json();
+  if (data.success) alert('저장되었습니다!');
+  else alert(data.error || '저장 실패');
+}
+
+function addCurrItem() {
+  currCounter++;
+  var list = document.getElementById('currList');
+  var empty = list.querySelector('p.text-gray-400');
+  if (empty) empty.remove();
+  var num = list.querySelectorAll('.curr-item').length + 1;
+  var div = document.createElement('div');
+  div.className = 'curr-item border border-gray-200 rounded-lg p-4';
+  div.dataset.id = 'new';
+  div.innerHTML = '<div class="flex items-start gap-3">' +
+    '<span class="w-7 h-7 bg-primary-100 text-primary-600 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0">' + num + '</span>' +
+    '<div class="flex-1 space-y-2">' +
+    '<input type="text" class="curr-title w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-medium" placeholder="강의 제목">' +
+    '<textarea class="curr-desc w-full px-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-600" rows="2" placeholder="강의 설명 (선택)"></textarea>' +
+    '</div>' +
+    '<button onclick="this.closest(\\'.curr-item\\').remove(); renumberCurr()" class="text-gray-400 hover:text-red-500 p-1"><i class="fas fa-trash-alt"></i></button>' +
+    '</div>';
+  list.appendChild(div);
+}
+
+function renumberCurr() {
+  document.querySelectorAll('.curr-item').forEach(function(el, i) {
+    var num = el.querySelector('span');
+    if (num) num.textContent = (i + 1).toString();
+  });
+}
+
+async function deleteCurrItem(btn, id) {
+  if (!confirm('이 항목을 삭제하시겠습니까?')) return;
+  var token = localStorage.getItem('classin_token');
+  await fetch('/api/instructor/classes/' + CLASS_ID + '/curriculum/' + id, {
+    method: 'DELETE', headers: { Authorization: 'Bearer ' + token }
+  });
+  btn.closest('.curr-item').remove();
+  renumberCurr();
+}
+
+async function saveCurriculum() {
+  var token = localStorage.getItem('classin_token');
+  var items = document.querySelectorAll('.curr-item');
+  // 기존 항목 삭제 후 전체 재생성
+  var existingIds = [];
+  items.forEach(function(el) { if (el.dataset.id !== 'new') existingIds.push(el.dataset.id); });
+
+  // 모든 항목을 순서대로 저장
+  for (var i = 0; i < items.length; i++) {
+    var el = items[i];
+    var title = el.querySelector('.curr-title').value.trim();
+    var desc = el.querySelector('.curr-desc').value.trim();
+    if (!title) continue;
+
+    if (el.dataset.id === 'new') {
+      var res = await fetch('/api/instructor/classes/' + CLASS_ID + '/curriculum', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+        body: JSON.stringify({ title: title, description: desc })
+      });
+      var data = await res.json();
+      if (data.id) el.dataset.id = data.id;
+    } else {
+      await fetch('/api/instructor/classes/' + CLASS_ID + '/curriculum/' + el.dataset.id, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+        body: JSON.stringify({ title: title, description: desc })
+      });
+    }
+  }
+  alert('커리큘럼이 저장되었습니다!');
+  location.reload();
+}
+
+async function uploadThumb(file) {
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) { alert('5MB 이하 이미지만 업로드 가능합니다.'); return; }
+
+  var progress = document.getElementById('uploadProgress');
+  progress.classList.remove('hidden');
+  document.getElementById('uploadBar').style.width = '30%';
+  document.getElementById('uploadStatus').textContent = '업로드 중...';
+
+  var token = localStorage.getItem('classin_token');
+  var fd = new FormData();
+  fd.append('file', file);
+
+  try {
+    document.getElementById('uploadBar').style.width = '60%';
+    var res = await fetch('/api/instructor/classes/' + CLASS_ID + '/thumbnail', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token },
+      body: fd
+    });
+    var data = await res.json();
+    document.getElementById('uploadBar').style.width = '100%';
+
+    if (data.success) {
+      document.getElementById('uploadStatus').textContent = '업로드 완료!';
+      setTimeout(function() { location.reload(); }, 500);
+    } else {
+      document.getElementById('uploadStatus').textContent = data.error || '업로드 실패';
+    }
+  } catch (e) {
+    document.getElementById('uploadStatus').textContent = '업로드 실패: ' + e.message;
+  }
+}
+</script>
+</body></html>`
+
+  return c.html(html)
+})
+
 app.get('/instructor/mypage', async (c) => {
   const html = `${headHTML}
 <body class="bg-gray-50 min-h-screen">

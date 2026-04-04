@@ -44,6 +44,18 @@
   - **절대 `wrangler pages deploy`를 직접 실행하지 말 것** → 반드시 `npm run deploy:teachers` 또는 `npm run deploy:live` 사용
   - live와 teachers는 완전히 독립된 서비스, 독립된 DB → 배포 시 올바른 config가 적용되었는지 API 호출로 검증
 
+### 2026-04-04: 수업 매칭 자동화 runAutomation 다수 버그
+- **실수 1**: `virtual_accounts` → 실제 테이블명은 `classin_virtual_accounts`, 컬럼명도 불일치
+- **실수 2**: `createClassInLesson`을 객체로 호출 (`config, { courseId, ... }`) → 개별 인자 필요
+- **실수 3**: `created_class_id`를 Step 5에서야 저장 → Step 4 실패 후 재시도 시 classId가 null
+- **실수 4**: `class_lessons`의 `sort_order` 컬럼이 teachers DB에는 `lesson_number`로 다름
+- **실수 5**: 강사 입장 시 수업 생성에 사용된 ClassIn UID와 다른 UID로 입장 → 강사 권한 미부여
+- **교훈**:
+  - live와 teachers DB 스키마가 **다를 수 있음** → 양쪽 `PRAGMA table_info()` 확인 필수
+  - 함수 호출 시 **시그니처(인자 순서/개수)** 반드시 확인 — 객체 vs 개별 인자 혼동 주의
+  - 재시도(retry) 설계 시 **중간 상태를 즉시 저장** — 마지막 Step에 몰아두면 재시도 broken
+  - ClassIn 가상계정은 수업 생성 시 teacherUid와 **동일한 UID**로 입장해야 강사 권한 부여됨
+
 ## 작업 컨벤션
 - 커밋 메시지: 한글 또는 영어, feat/fix/refactor 프리픽스
 - DB 변경 시 마이그레이션 파일 생성 필수 (migrations/00XX_*.sql)
