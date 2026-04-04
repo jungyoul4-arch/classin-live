@@ -1395,6 +1395,89 @@ app.get('/api/classes/:id/reviews', async (c) => {
   return c.json(results)
 })
 
+// ===== Q&A 게시판 =====
+
+// 수업 Q&A 목록 조회 (질문 + 답글 트리)
+app.get('/api/classes/:id/comments', async (c) => {
+  const classId = c.req.param('id')
+  const { results } = await c.env.DB.prepare(`
+    SELECT cc.*, u.name as user_name, u.avatar as user_avatar
+    FROM class_comments cc JOIN users u ON cc.user_id = u.id
+    WHERE cc.class_id = ? ORDER BY cc.created_at ASC
+  `).bind(classId).all()
+
+  const questions: any[] = []
+  const replyMap: Record<number, any[]> = {}
+  for (const row of results as any[]) {
+    if (!row.parent_id) {
+      questions.push({ ...row, replies: [] })
+    } else {
+      if (!replyMap[row.parent_id]) replyMap[row.parent_id] = []
+      replyMap[row.parent_id].push(row)
+    }
+  }
+  for (const q of questions) {
+    q.replies = replyMap[q.id] || []
+  }
+  questions.reverse()
+  return c.json(questions)
+})
+
+// Q&A 질문/답글 작성
+app.post('/api/classes/:id/comments', async (c) => {
+  const classId = c.req.param('id')
+  const token = c.req.header('Authorization')?.replace('Bearer ', '')
+  if (!token) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  let payload: any
+  try { payload = await verifyJWT(token, c.env.JWT_SECRET) } catch { return c.json({ error: '인증이 만료되었습니다.' }, 401) }
+
+  const { content, parent_id } = await c.req.json()
+  if (!content?.trim()) return c.json({ error: '내용을 입력해주세요.' }, 400)
+
+  // 강사 여부 판별
+  const cls = await c.env.DB.prepare('SELECT instructor_id FROM classes WHERE id = ?').bind(classId).first() as any
+  if (!cls) return c.json({ error: '수업을 찾을 수 없습니다.' }, 404)
+  const instructor = await c.env.DB.prepare('SELECT user_id FROM instructors WHERE id = ?').bind(cls.instructor_id).first() as any
+  const isInstructor = instructor && instructor.user_id === payload.sub ? 1 : 0
+
+  const result = await c.env.DB.prepare(
+    'INSERT INTO class_comments (class_id, user_id, parent_id, content, is_instructor) VALUES (?, ?, ?, ?, ?)'
+  ).bind(classId, payload.sub, parent_id || null, content.trim(), isInstructor).run()
+
+  const user = await c.env.DB.prepare('SELECT name, avatar FROM users WHERE id = ?').bind(payload.sub).first() as any
+
+  return c.json({
+    id: result.meta.last_row_id,
+    class_id: Number(classId),
+    user_id: payload.sub,
+    parent_id: parent_id || null,
+    content: content.trim(),
+    is_instructor: isInstructor,
+    user_name: user?.name || '사용자',
+    user_avatar: user?.avatar || null,
+    created_at: new Date().toISOString(),
+    replies: []
+  })
+})
+
+// Q&A 댓글 삭제 (본인 또는 admin)
+app.delete('/api/classes/:id/comments/:commentId', async (c) => {
+  const commentId = c.req.param('commentId')
+  const token = c.req.header('Authorization')?.replace('Bearer ', '')
+  if (!token) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  let payload: any
+  try { payload = await verifyJWT(token, c.env.JWT_SECRET) } catch { return c.json({ error: '인증이 만료되었습니다.' }, 401) }
+
+  const comment = await c.env.DB.prepare('SELECT user_id FROM class_comments WHERE id = ?').bind(commentId).first() as any
+  if (!comment) return c.json({ error: '댓글을 찾을 수 없습니다.' }, 404)
+  if (comment.user_id !== payload.sub && payload.role !== 'admin') return c.json({ error: '삭제 권한이 없습니다.' }, 403)
+
+  await c.env.DB.prepare('DELETE FROM class_comments WHERE id = ? OR parent_id = ?').bind(commentId, commentId).run()
+  return c.json({ success: true })
+})
+
 // Simple auth - login
 app.post('/api/auth/login', async (c) => {
   const { email, password } = await c.req.json()
@@ -10362,8 +10445,38 @@ ${navHTML}
           `).join('')}
         </div>
       </div>
+
+      <!-- Q&A 게시판 -->
+      <div class="bg-white rounded-2xl p-6 border border-gray-100" id="qna">
+        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-question-circle text-blue-500 mr-2"></i>Q&A <span class="text-sm font-normal text-gray-500" id="qnaCount"></span></h2>
+
+        <!-- 질문 작성 폼 (로그인 시) -->
+        <div id="qnaFormSection" class="mb-6">
+          <div class="border border-gray-200 rounded-xl p-4 bg-gray-50">
+            <p class="text-sm font-semibold text-dark-800 mb-3"><i class="fas fa-pen mr-1 text-blue-500"></i>질문하기</p>
+            <textarea id="qnaContent" rows="3" placeholder="수업에 대해 궁금한 점을 질문해주세요. 강사님이 직접 답변해드립니다!" class="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400 resize-none bg-white"></textarea>
+            <div class="flex items-center justify-between mt-3">
+              <p class="text-xs text-gray-400">질문은 본인만 삭제할 수 있습니다</p>
+              <button onclick="submitQna(${cls.id})" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white text-sm font-semibold rounded-lg transition-all">질문 등록</button>
+            </div>
+          </div>
+        </div>
+        <!-- 비로그인 안내 -->
+        <div id="qnaLoginPrompt" class="hidden mb-6">
+          <div class="p-3 bg-blue-50 border border-blue-200 rounded-xl text-center">
+            <p class="text-sm text-blue-700"><i class="fas fa-lock mr-1"></i>질문을 작성하려면 <a href="/login" class="font-semibold underline">로그인</a>이 필요합니다.</p>
+          </div>
+        </div>
+
+        <div class="space-y-4" id="qnaList">
+          <div class="text-center py-8 text-gray-400 text-sm" id="qnaEmpty">
+            <i class="fas fa-comment-dots text-2xl mb-2 block"></i>
+            아직 질문이 없습니다. 첫 번째 질문을 남겨보세요!
+          </div>
+        </div>
+      </div>
     </div>
-    
+
     <!-- Sidebar spacer for sticky card on desktop -->
     <div class="hidden md:block md:col-span-2"></div>
   </div>
@@ -10710,6 +10823,142 @@ document.addEventListener('DOMContentLoaded', () => {
     disableBtn(document.getElementById('btnAddToCart'), '수강 불가');
   }
 });
+
+// ===== Q&A 게시판 JS =====
+const QNA_CLASS_ID = ${cls.id};
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderComment(c, isReply) {
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  const canDelete = user && (user.id === c.user_id || user.role === 'admin');
+  const initial = (c.user_name || 'U').charAt(0);
+  const badge = c.is_instructor ? ' <span class="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-bold rounded">강사</span>' : '';
+  const deleteBtn = canDelete ? ' <button onclick="deleteQna(' + c.id + ',this)" class="text-xs text-gray-400 hover:text-red-500 transition-colors">삭제</button>' : '';
+  const replyBtn = !isReply ? '<button onclick="showReplyForm(' + c.id + ')" class="text-xs text-blue-500 hover:text-blue-700 transition-colors mt-2"><i class="fas fa-reply mr-1"></i>답글</button>' : '';
+  const dateStr = new Date(c.created_at).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' });
+  const avatarColor = c.is_instructor ? 'bg-blue-100 text-blue-600' : 'bg-gray-200 text-gray-500';
+  const bgClass = isReply ? 'ml-8 bg-gray-50' : 'bg-white';
+
+  var h = '<div class="' + bgClass + ' rounded-xl p-4 border border-gray-100" data-comment-id="' + c.id + '">';
+  h += '<div class="flex items-start gap-3">';
+  h += '<div class="w-8 h-8 rounded-full ' + avatarColor + ' flex items-center justify-center text-xs font-bold flex-shrink-0">' + initial + '</div>';
+  h += '<div class="flex-1 min-w-0">';
+  h += '<div class="flex items-center flex-wrap gap-1 mb-1"><span class="text-sm font-medium text-dark-800">' + escHtml(c.user_name) + '</span>' + badge + '<span class="text-xs text-gray-400">' + dateStr + '</span>' + deleteBtn + '</div>';
+  h += '<p class="text-sm text-dark-600 leading-relaxed whitespace-pre-line">' + escHtml(c.content) + '</p>';
+  h += replyBtn;
+  h += '</div></div>';
+
+  if (!isReply) {
+    h += '<div class="space-y-2 mt-3" id="replies-' + c.id + '">';
+    if (c.replies && c.replies.length > 0) {
+      c.replies.forEach(function(r) { h += renderComment(r, true); });
+    }
+    h += '</div>';
+    h += '<div id="replyForm-' + c.id + '" class="hidden mt-3 ml-8"></div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+function showReplyForm(parentId) {
+  var user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  if (!user) { window.location.href = '/login'; return; }
+  document.querySelectorAll('[id^="replyForm-"]').forEach(function(el) { el.classList.add('hidden'); el.innerHTML = ''; });
+  var el = document.getElementById('replyForm-' + parentId);
+  el.innerHTML = '<div class="flex gap-2"><textarea id="replyText-' + parentId + '" rows="2" placeholder="답글을 작성해주세요..." class="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-400 resize-none"></textarea><div class="flex flex-col gap-1"><button onclick="submitReply(' + parentId + ')" class="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-xs font-semibold rounded-lg transition-all">등록</button><button onclick="hideReplyForm(' + parentId + ')" class="px-3 py-1.5 bg-gray-200 hover:bg-gray-300 text-gray-600 text-xs rounded-lg transition-all">취소</button></div></div>';
+  el.classList.remove('hidden');
+  document.getElementById('replyText-' + parentId).focus();
+}
+
+function hideReplyForm(parentId) {
+  var el = document.getElementById('replyForm-' + parentId);
+  el.classList.add('hidden');
+  el.innerHTML = '';
+}
+
+async function submitQna(classId) {
+  var user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  if (!user) { window.location.href = '/login'; return; }
+  var content = document.getElementById('qnaContent').value.trim();
+  if (!content) return alert('질문 내용을 입력해주세요.');
+  var token = localStorage.getItem('classin_token');
+  try {
+    var res = await fetch('/api/classes/' + classId + '/comments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ content: content })
+    });
+    var data = await res.json();
+    if (data.error) return alert(data.error);
+    document.getElementById('qnaContent').value = '';
+    document.getElementById('qnaEmpty').classList.add('hidden');
+    document.getElementById('qnaList').insertAdjacentHTML('afterbegin', renderComment(data, false));
+    updateQnaCount(1);
+  } catch(e) { alert('오류가 발생했습니다.'); }
+}
+
+async function submitReply(parentId) {
+  var content = document.getElementById('replyText-' + parentId).value.trim();
+  if (!content) return;
+  var token = localStorage.getItem('classin_token');
+  try {
+    var res = await fetch('/api/classes/' + QNA_CLASS_ID + '/comments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ content: content, parent_id: parentId })
+    });
+    var data = await res.json();
+    if (data.error) return alert(data.error);
+    hideReplyForm(parentId);
+    document.getElementById('replies-' + parentId).insertAdjacentHTML('beforeend', renderComment(data, true));
+  } catch(e) { alert('오류가 발생했습니다.'); }
+}
+
+async function deleteQna(commentId, btn) {
+  if (!confirm('정말 삭제하시겠습니까?')) return;
+  var token = localStorage.getItem('classin_token');
+  try {
+    var res = await fetch('/api/classes/' + QNA_CLASS_ID + '/comments/' + commentId, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    var data = await res.json();
+    if (data.success) {
+      var el = btn.closest('[data-comment-id="' + commentId + '"]');
+      if (el) el.remove();
+      updateQnaCount(-1);
+    } else { alert(data.error || '삭제에 실패했습니다.'); }
+  } catch(e) { alert('삭제에 실패했습니다.'); }
+}
+
+var qnaTotal = 0;
+function updateQnaCount(delta) {
+  qnaTotal += delta;
+  document.getElementById('qnaCount').textContent = '(' + qnaTotal + '개)';
+  if (qnaTotal <= 0) document.getElementById('qnaEmpty').classList.remove('hidden');
+}
+
+// Q&A 초기 로드
+(async function initQna() {
+  var user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  if (!user) {
+    document.getElementById('qnaFormSection').classList.add('hidden');
+    document.getElementById('qnaLoginPrompt').classList.remove('hidden');
+  }
+  try {
+    var res = await fetch('/api/classes/' + QNA_CLASS_ID + '/comments');
+    var questions = await res.json();
+    qnaTotal = questions.length;
+    document.getElementById('qnaCount').textContent = '(' + qnaTotal + '개)';
+    if (questions.length > 0) {
+      document.getElementById('qnaEmpty').classList.add('hidden');
+      document.getElementById('qnaList').innerHTML = questions.map(function(q) { return renderComment(q, false); }).join('');
+    }
+  } catch(e) { console.log('Q&A load failed:', e); }
+})();
 </script>
 
 ${footerHTML}
