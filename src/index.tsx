@@ -9451,50 +9451,8 @@ ${navHTML}
     </div>
 
     <div id="chatInputArea" class="border-t p-4">
-      <!-- 기본 텍스트 입력 -->
-      <div id="textInputArea">
-        <div class="flex gap-2">
-          <input type="text" id="chatInput" class="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="메시지를 입력하세요..." onkeydown="if(event.key==='Enter')sendChat()">
-          <button onclick="sendChat()" class="px-5 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium">전송</button>
-        </div>
-      </div>
-      <!-- Step 4: 스케줄 클릭 UI -->
-      <div id="scheduleUI" class="hidden space-y-3">
-        <div>
-          <label class="text-xs font-medium text-gray-500 mb-1 block">시작일</label>
-          <input type="date" id="schedDate" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
-        </div>
-        <div>
-          <label class="text-xs font-medium text-gray-500 mb-1 block">요일 선택</label>
-          <div class="flex gap-1.5">
-            <button type="button" onclick="toggleDay(this,'mon')" data-day="mon" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">월</button>
-            <button type="button" onclick="toggleDay(this,'tue')" data-day="tue" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">화</button>
-            <button type="button" onclick="toggleDay(this,'wed')" data-day="wed" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">수</button>
-            <button type="button" onclick="toggleDay(this,'thu')" data-day="thu" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">목</button>
-            <button type="button" onclick="toggleDay(this,'fri')" data-day="fri" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">금</button>
-            <button type="button" onclick="toggleDay(this,'sat')" data-day="sat" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">토</button>
-            <button type="button" onclick="toggleDay(this,'sun')" data-day="sun" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">일</button>
-          </div>
-        </div>
-        <div>
-          <label class="text-xs font-medium text-gray-500 mb-1 block">시간</label>
-          <select id="schedTime" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
-            <option value="09:00">오전 9시</option>
-            <option value="10:00">오전 10시</option>
-            <option value="11:00">오전 11시</option>
-            <option value="13:00">오후 1시</option>
-            <option value="14:00">오후 2시</option>
-            <option value="15:00">오후 3시</option>
-            <option value="16:00">오후 4시</option>
-            <option value="17:00">오후 5시</option>
-            <option value="18:00">저녁 6시</option>
-            <option value="19:00" selected>저녁 7시</option>
-            <option value="20:00">저녁 8시</option>
-            <option value="21:00">밤 9시</option>
-          </select>
-        </div>
-        <button onclick="submitSchedule()" class="w-full py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium text-sm">다음 단계</button>
-      </div>
+      <input type="hidden" id="chatInput" value="">
+      <div id="stepUI" class="space-y-3"></div>
       <div class="flex gap-2 mt-2">
         <button onclick="sendPrev()" class="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-100">← 이전 단계</button>
         <span id="stepIndicator" class="text-xs text-gray-400 ml-auto py-1">Step 0/6</span>
@@ -9505,109 +9463,178 @@ ${navHTML}
 
 <script>
 const REQUEST_ID = ${requestId};
+const REQUEST_TITLE = ${JSON.stringify(request.title)};
 let applicationId = null;
 let conversationStep = 0;
+var selectedDays = [];
 
 function addMessage(text, isAgent) {
-  const container = document.getElementById('chatMessages');
-  const div = document.createElement('div');
-  div.className = isAgent
-    ? 'flex items-start gap-3'
-    : 'flex items-start gap-3 justify-end';
-
-  const bubble = isAgent
+  var c = document.getElementById('chatMessages');
+  var d = document.createElement('div');
+  d.className = isAgent ? 'flex items-start gap-3' : 'flex items-start gap-3 justify-end';
+  d.innerHTML = isAgent
     ? '<div class="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center flex-shrink-0"><span class="text-sm">🤖</span></div><div class="bg-gray-100 rounded-xl rounded-tl-sm px-4 py-3 max-w-xs"><p class="text-sm text-gray-800 whitespace-pre-line">' + text + '</p></div>'
     : '<div class="bg-primary-600 text-white rounded-xl rounded-tr-sm px-4 py-3 max-w-xs"><p class="text-sm whitespace-pre-line">' + text + '</p></div>';
-
-  div.innerHTML = bubble;
-  container.appendChild(div);
-  container.scrollTop = container.scrollHeight;
+  c.appendChild(d); c.scrollTop = c.scrollHeight;
 }
 
-function updateStep(step) {
-  conversationStep = step;
+function renderStepUI(step) {
+  var ui = document.getElementById('stepUI');
   document.getElementById('stepIndicator').textContent = 'Step ' + Math.min(step, 6) + '/6';
-  // Step 4: 클릭형 스케줄 UI 표시
-  var scheduleUI = document.getElementById('scheduleUI');
-  var textInput = document.getElementById('textInputArea');
-  if (step === 4) {
-    if (scheduleUI) scheduleUI.classList.remove('hidden');
-    if (textInput) textInput.classList.add('hidden');
+  conversationStep = step;
+
+  if (step === 0) {
+    ui.innerHTML = '<textarea id="bioInput" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="간단한 자기소개와 관련 경력 (최소 10자)"></textarea>' +
+      '<button onclick="submitText(document.getElementById(\\x27bioInput\\x27).value)" class="w-full py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium text-sm mt-2">다음</button>';
+  } else if (step === 1) {
+    var t = REQUEST_TITLE;
+    ui.innerHTML = '<div class="grid grid-cols-1 gap-2">' +
+      '<button onclick="submitText(this.textContent)" class="text-left px-4 py-3 border border-gray-200 rounded-lg hover:border-primary-400 hover:bg-primary-50 transition text-sm">' + t + ' 마스터 클래스</button>' +
+      '<button onclick="submitText(this.textContent)" class="text-left px-4 py-3 border border-gray-200 rounded-lg hover:border-primary-400 hover:bg-primary-50 transition text-sm">' + t + ' 입문 과정</button>' +
+      '<button onclick="submitText(this.textContent)" class="text-left px-4 py-3 border border-gray-200 rounded-lg hover:border-primary-400 hover:bg-primary-50 transition text-sm">' + t + ' 실전 워크숍</button>' +
+      '<div class="flex gap-2"><input type="text" id="customTitle" class="flex-1 px-3 py-2.5 border border-gray-300 rounded-lg text-sm" placeholder="직접 입력...">' +
+      '<button onclick="submitText(document.getElementById(\\x27customTitle\\x27).value)" class="px-4 py-2.5 bg-gray-200 rounded-lg text-sm font-medium hover:bg-gray-300">확인</button></div>' +
+    '</div>';
+  } else if (step === 2) {
+    ui.innerHTML = '<textarea id="descInput" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="수업에서 무엇을 배울 수 있는지 설명해주세요 (최소 20자)"></textarea>' +
+      '<label class="text-xs font-medium text-gray-500 mt-2 mb-1 block">난이도</label>' +
+      '<div class="grid grid-cols-4 gap-2">' +
+      '<button onclick="pickLevel(this,\\x27초급\\x27)" class="lvl-btn py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400">초급</button>' +
+      '<button onclick="pickLevel(this,\\x27중급\\x27)" class="lvl-btn py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400">중급</button>' +
+      '<button onclick="pickLevel(this,\\x27고급\\x27)" class="lvl-btn py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400">고급</button>' +
+      '<button onclick="pickLevel(this,\\x27전체\\x27)" class="lvl-btn py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 bg-primary-600 text-white border-primary-600">전체</button>' +
+      '</div>' +
+      '<button onclick="submitStep2()" class="w-full py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium text-sm mt-3">다음</button>';
+    window._selectedLevel = '전체';
+  } else if (step === 3) {
+    ui.innerHTML = '<label class="text-xs font-medium text-gray-500 mb-1 block">총 회차</label>' +
+      '<div class="flex gap-2 flex-wrap">' +
+      ['4','6','8','10','12'].map(function(n){return '<button onclick="pickCount(this,'+n+')" class="cnt-btn px-4 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400'+(n==='8'?' bg-primary-600 text-white border-primary-600':'')+'">'+n+'회</button>'}).join('') +
+      '<input type="number" id="customCount" class="w-16 px-2 py-2 border border-gray-300 rounded-lg text-sm text-center" placeholder="기타" min="1" max="50" onchange="pickCount(null,this.value)">' +
+      '</div>' +
+      '<label class="text-xs font-medium text-gray-500 mt-3 mb-1 block">회당 시간</label>' +
+      '<div class="flex gap-2 flex-wrap">' +
+      ['30','45','60','90','120'].map(function(n){return '<button onclick="pickDur(this,'+n+')" class="dur-btn px-4 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400'+(n==='60'?' bg-primary-600 text-white border-primary-600':'')+'">'+n+'분</button>'}).join('') +
+      '</div>' +
+      '<button onclick="submitStep3()" class="w-full py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium text-sm mt-3">다음</button>';
+    window._count = 8; window._dur = 60;
+  } else if (step === 4) {
+    selectedDays = [];
+    ui.innerHTML = '<div><label class="text-xs font-medium text-gray-500 mb-1 block">시작일</label>' +
+      '<input type="date" id="schedDate" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"></div>' +
+      '<div><label class="text-xs font-medium text-gray-500 mb-1 block">요일 선택</label>' +
+      '<div class="flex gap-1.5">' +
+      [['mon','월'],['tue','화'],['wed','수'],['thu','목'],['fri','금'],['sat','토'],['sun','일']].map(function(d){return '<button type="button" onclick="toggleDay(this,\\x27'+d[0]+'\\x27)" class="day-btn flex-1 py-2 rounded-lg border border-gray-300 text-sm font-medium hover:border-primary-400 transition">'+d[1]+'</button>'}).join('') +
+      '</div></div>' +
+      '<div><label class="text-xs font-medium text-gray-500 mb-1 block">시간</label>' +
+      '<select id="schedTime" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">' +
+      '<option value="09:00">오전 9시</option><option value="10:00">오전 10시</option><option value="11:00">오전 11시</option>' +
+      '<option value="13:00">오후 1시</option><option value="14:00">오후 2시</option><option value="15:00">오후 3시</option>' +
+      '<option value="16:00">오후 4시</option><option value="17:00">오후 5시</option><option value="18:00">저녁 6시</option>' +
+      '<option value="19:00" selected>저녁 7시</option><option value="20:00">저녁 8시</option><option value="21:00">밤 9시</option>' +
+      '</select></div>' +
+      '<button onclick="submitSchedule()" class="w-full py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium text-sm">다음</button>';
+  } else if (step === 5) {
+    ui.innerHTML = '<div class="grid grid-cols-3 gap-2">' +
+      ['50,000','100,000','150,000','200,000','300,000','500,000'].map(function(p){return '<button onclick="submitText(\\x27'+p.replace(/,/g,'')+'\\x27);addMessage(\\x27'+p+'원\\x27,false)" class="py-3 rounded-lg border border-gray-200 hover:border-primary-400 hover:bg-primary-50 text-sm font-medium transition">'+p+'원</button>'}).join('') +
+      '</div>' +
+      '<div class="flex gap-2 mt-2"><input type="number" id="customPrice" class="flex-1 px-3 py-2.5 border border-gray-300 rounded-lg text-sm" placeholder="직접 입력 (원)">' +
+      '<button onclick="var v=document.getElementById(\\x27customPrice\\x27).value;if(v)submitText(v)" class="px-4 py-2.5 bg-gray-200 rounded-lg text-sm font-medium hover:bg-gray-300">확인</button></div>';
+  } else if (step === 6) {
+    ui.innerHTML = '<div class="flex gap-3">' +
+      '<button onclick="submitText(\\x27네\\x27)" class="flex-1 py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium">제출하기</button>' +
+      '<button onclick="sendPrev()" class="flex-1 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition font-medium text-gray-600">수정하기</button>' +
+      '</div>';
   } else {
-    if (scheduleUI) scheduleUI.classList.add('hidden');
-    if (textInput) textInput.classList.remove('hidden');
+    ui.innerHTML = '';
+    document.getElementById('chatInputArea').style.display = 'none';
   }
 }
 
 async function initChat() {
-  const token = localStorage.getItem('classin_token');
+  var token = localStorage.getItem('classin_token');
   if (!token) { alert('로그인이 필요합니다.'); window.location.href = '/class-requests/' + REQUEST_ID; return; }
-
-  // 지원 시작 또는 기존 지원 이어하기
-  const res = await fetch('/api/class-requests/' + REQUEST_ID + '/apply', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }
+  var res = await fetch('/api/class-requests/' + REQUEST_ID + '/apply', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }
   });
-  const data = await res.json();
+  var data = await res.json();
   if (data.error) { alert(data.error); window.location.href = '/class-requests/' + REQUEST_ID; return; }
-
   applicationId = data.applicationId;
   conversationStep = data.conversationStep;
-
   document.getElementById('chatMessages').innerHTML = '';
-
   if (data.status === 'submitted') {
     addMessage('지원이 이미 제출되었습니다. 관리자 검토를 기다려주세요.', true);
-    document.getElementById('chatInputArea').style.display = 'none';
-    return;
+    document.getElementById('chatInputArea').style.display = 'none'; return;
   }
-
-  // 기존 대화 복원을 위해 상태 조회
   if (conversationStep > 0) {
-    const appRes = await fetch('/api/applications/' + applicationId, {
-      headers: { Authorization: 'Bearer ' + token }
-    });
-    const appData = await appRes.json();
+    var appRes = await fetch('/api/applications/' + applicationId, { headers: { Authorization: 'Bearer ' + token } });
+    var appData = await appRes.json();
     addMessage(appData.agentMessage || data.agentMessage, true);
-  } else {
-    addMessage(data.agentMessage, true);
-  }
-  updateStep(conversationStep);
+  } else { addMessage(data.agentMessage, true); }
+  renderStepUI(conversationStep);
 }
 
-async function sendChat(skipBubble) {
-  const input = document.getElementById('chatInput');
-  const message = input.value.trim();
-  if (!message || !applicationId) return;
-
-  if (!skipBubble) addMessage(message, false);
-  input.value = '';
-
-  const token = localStorage.getItem('classin_token');
-  const res = await fetch('/api/applications/' + applicationId + '/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+async function sendAPI(message, bubbleText) {
+  if (!applicationId) return;
+  if (bubbleText) addMessage(bubbleText, false);
+  var token = localStorage.getItem('classin_token');
+  var res = await fetch('/api/applications/' + applicationId + '/chat', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
     body: JSON.stringify({ message: message })
   });
-  const data = await res.json();
-
+  var data = await res.json();
+  if (data.isError) { addMessage(data.agentMessage, true); return; }
   if (data.error) { addMessage(data.error, true); return; }
-
   addMessage(data.agentMessage, true);
-  updateStep(data.conversationStep);
-
-  if (data.status === 'submitted') {
-    document.getElementById('chatInputArea').style.display = 'none';
-  }
+  if (data.status === 'submitted') { document.getElementById('chatInputArea').style.display = 'none'; return; }
+  renderStepUI(data.conversationStep);
 }
 
-function sendPrev() {
-  document.getElementById('chatInput').value = '이전';
-  sendChat();
+function submitText(val) {
+  if (!val || !val.trim()) return;
+  document.getElementById('chatInput').value = val.trim();
+  addMessage(val.trim(), false);
+  var token = localStorage.getItem('classin_token');
+  fetch('/api/applications/' + applicationId + '/chat', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+    body: JSON.stringify({ message: val.trim() })
+  }).then(function(r){return r.json()}).then(function(data){
+    if (data.isError) { addMessage(data.agentMessage, true); return; }
+    if (data.error) { addMessage(data.error, true); return; }
+    addMessage(data.agentMessage, true);
+    if (data.status === 'submitted') { document.getElementById('chatInputArea').style.display = 'none'; return; }
+    renderStepUI(data.conversationStep);
+  });
 }
 
-// Step 4: 스케줄 클릭 UI
-var selectedDays = [];
+function sendPrev() { sendAPI('이전', '← 이전 단계'); }
+
+// Step 2 helpers
+function pickLevel(btn, level) {
+  window._selectedLevel = level;
+  document.querySelectorAll('.lvl-btn').forEach(function(b){b.classList.remove('bg-primary-600','text-white','border-primary-600');b.classList.add('border-gray-300');});
+  if(btn){btn.classList.add('bg-primary-600','text-white','border-primary-600');btn.classList.remove('border-gray-300');}
+}
+function submitStep2() {
+  var desc = document.getElementById('descInput').value.trim();
+  if (!desc) { alert('수업 설명을 입력해주세요'); return; }
+  submitText(desc + '\\n' + (window._selectedLevel || '전체'));
+}
+
+// Step 3 helpers
+function pickCount(btn, n) {
+  window._count = parseInt(n);
+  document.querySelectorAll('.cnt-btn').forEach(function(b){b.classList.remove('bg-primary-600','text-white','border-primary-600');b.classList.add('border-gray-300');});
+  if(btn){btn.classList.add('bg-primary-600','text-white','border-primary-600');btn.classList.remove('border-gray-300');}
+}
+function pickDur(btn, n) {
+  window._dur = parseInt(n);
+  document.querySelectorAll('.dur-btn').forEach(function(b){b.classList.remove('bg-primary-600','text-white','border-primary-600');b.classList.add('border-gray-300');});
+  if(btn){btn.classList.add('bg-primary-600','text-white','border-primary-600');btn.classList.remove('border-gray-300');}
+}
+function submitStep3() { submitText((window._count||8) + '회 ' + (window._dur||60) + '분'); }
+
+// Step 4 helpers
 function toggleDay(btn, day) {
   var idx = selectedDays.indexOf(day);
   if (idx >= 0) { selectedDays.splice(idx,1); btn.classList.remove('bg-primary-600','text-white','border-primary-600'); btn.classList.add('border-gray-300'); }
@@ -9618,14 +9645,10 @@ function submitSchedule() {
   if (!date) { alert('시작일을 선택해주세요'); return; }
   if (selectedDays.length === 0) { alert('요일을 하나 이상 선택해주세요'); return; }
   var time = document.getElementById('schedTime').value;
-  var dayNames = {mon:'월',tue:'화',wed:'수',thu:'목',fri:'금',sat:'토',sun:'일'};
-  var dayStr = selectedDays.map(function(d){return dayNames[d]}).join('/');
-  var msg = date + ', ' + dayStr + ', ' + time;
-  addMessage(dayStr + '요일 ' + time + ' (' + date + ' 시작)', false);
-  document.getElementById('chatInput').value = msg;
-  sendChat(true);
+  var dn = {mon:'월',tue:'화',wed:'수',thu:'목',fri:'금',sat:'토',sun:'일'};
+  var ds = selectedDays.map(function(d){return dn[d]}).join('/');
+  sendAPI(date + ', ' + ds + ', ' + time, ds + '요일 ' + time + ' (' + date + ' 시작)');
   selectedDays = [];
-  document.querySelectorAll('.day-btn').forEach(function(b){b.classList.remove('bg-primary-600','text-white','border-primary-600');b.classList.add('border-gray-300');});
 }
 
 initChat();
