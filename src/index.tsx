@@ -9223,6 +9223,7 @@ function createRequest() {
 
 loadRequests('open');
 </script>
+${globalScripts}
 ${footerHTML}
 </body></html>`
   return c.html(applyBranding(html, c.env))
@@ -9300,6 +9301,7 @@ document.getElementById('requestForm').addEventListener('submit', async function
   }
 });
 </script>
+${globalScripts}
 ${footerHTML}
 </body></html>`
   return c.html(applyBranding(html, c.env))
@@ -9409,6 +9411,7 @@ function startApply(requestId) {
   window.location.href = '/class-requests/' + requestId + '/apply';
 }
 </script>
+${globalScripts}
 ${footerHTML}
 </body></html>`
   return c.html(applyBranding(html, c.env))
@@ -9548,6 +9551,7 @@ function sendPrev() {
 
 initChat();
 </script>
+${globalScripts}
 ${footerHTML}
 </body></html>`
   return c.html(applyBranding(html, c.env))
