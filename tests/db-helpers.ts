@@ -28,6 +28,8 @@ export const MIGRATION_FILES = [
   "0018_chunked_uploads.sql",
   "0019_instructor_registered_account.sql",
   "0020_homepage_sort_order.sql",
+  "0021_performance_indexes.sql",
+  "0022_class_request_system.sql",
 ] as const;
 
 // ─── Embedded migration SQL ────────────────────────────────────────
@@ -442,6 +444,24 @@ FROM classes c WHERE c.classin_class_id IS NOT NULL AND c.classin_class_id != ''
   "0020_homepage_sort_order.sql": [
     `ALTER TABLE classes ADD COLUMN homepage_sort_order INTEGER DEFAULT 0`,
   ],
+  "0021_performance_indexes.sql": [
+    `CREATE INDEX IF NOT EXISTS idx_classes_is_bestseller ON classes(is_bestseller)`,
+    `CREATE INDEX IF NOT EXISTS idx_classes_is_new ON classes(is_new)`,
+    `CREATE INDEX IF NOT EXISTS idx_classes_status_type ON classes(status, class_type)`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_class_id ON orders(class_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_classes_homepage_sort ON classes(homepage_sort_order)`,
+  ],
+  "0022_class_request_system.sql": [
+    `ALTER TABLE users ADD COLUMN is_instructor INTEGER DEFAULT 0 CHECK(is_instructor IN (0, 1))`,
+    `CREATE TABLE IF NOT EXISTS class_requests ( id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, description TEXT NOT NULL, category_id INTEGER REFERENCES categories(id), preferred_schedule TEXT, budget_min INTEGER, budget_max INTEGER, interest_count INTEGER DEFAULT 0, status TEXT DEFAULT 'open', matched_application_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP )`,
+    `CREATE TABLE IF NOT EXISTS class_request_applications ( id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER NOT NULL REFERENCES class_requests(id), user_id INTEGER NOT NULL REFERENCES users(id), applicant_name TEXT NOT NULL, applicant_email TEXT NOT NULL, applicant_phone TEXT, bio TEXT, proposed_title TEXT, proposed_description TEXT, proposed_level TEXT DEFAULT 'all', proposed_lessons_count INTEGER, proposed_duration_minutes INTEGER, proposed_schedule_start DATETIME, proposed_schedule_time TEXT, proposed_schedule_days TEXT, proposed_price INTEGER, conversation_step INTEGER DEFAULT 0, status TEXT DEFAULT 'draft', admin_note TEXT, reviewed_at DATETIME, automation_step INTEGER DEFAULT 0, automation_error TEXT, created_class_id INTEGER REFERENCES classes(id), created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(request_id, user_id) )`,
+    `CREATE TABLE IF NOT EXISTS class_request_interests ( id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER NOT NULL REFERENCES class_requests(id), user_id INTEGER NOT NULL REFERENCES users(id), created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(request_id, user_id) )`,
+    `CREATE INDEX IF NOT EXISTS idx_class_requests_status ON class_requests(status)`,
+    `CREATE INDEX IF NOT EXISTS idx_class_requests_user ON class_requests(user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_applications_request ON class_request_applications(request_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_applications_status ON class_request_applications(status)`,
+    `CREATE INDEX IF NOT EXISTS idx_interests_request ON class_request_interests(request_id)`,
+  ],
 };
 
 // ─── Seed SQL statements ───────────────────────────────────────────
@@ -536,7 +556,7 @@ const SEED_SQL: string[] = [
 // ─── Public API ────────────────────────────────────────────────────
 
 /**
- * Apply all 20 migrations in order to the given D1 database.
+ * Apply all 22 migrations in order to the given D1 database.
  * Returns an array of results for each migration file.
  */
 export async function applyAllMigrations(
@@ -618,6 +638,9 @@ export const EXPECTED_TABLES = [
   "class_lessons",
   "lesson_enrollments",
   "chunked_uploads",
+  "class_requests",
+  "class_request_applications",
+  "class_request_interests",
 ] as const;
 
 /**
@@ -672,4 +695,16 @@ export const EXPECTED_INDEXES = [
   // 0018
   "idx_chunked_uploads_upload_id",
   "idx_chunked_uploads_status",
+  // 0021
+  "idx_classes_is_bestseller",
+  "idx_classes_is_new",
+  "idx_classes_status_type",
+  "idx_orders_class_id",
+  "idx_classes_homepage_sort",
+  // 0022
+  "idx_class_requests_status",
+  "idx_class_requests_user",
+  "idx_applications_request",
+  "idx_applications_status",
+  "idx_interests_request",
 ] as const;

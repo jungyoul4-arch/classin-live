@@ -69,6 +69,11 @@ import type { StreamConfig } from './lib/stream'
 import { aes256Encrypt, aes256Decrypt, sha256Hash, encryptHectoPaymentParams, decryptHectoResultParams, verifyHectoNotiHash, cancelHectoPayment } from './lib/payment'
 import type { HectoConfig } from './lib/payment'
 
+// ==================== 듀얼 롤 헬퍼 (학생 겸 강사) ====================
+function isInstructorUser(user: any): boolean {
+  return user.role === 'instructor' || user.is_instructor === 1;
+}
+
 // ==================== ClassIn API Integration Module ====================
 
 interface ClassInConfig {
@@ -1333,7 +1338,7 @@ app.get('/api/classes/new', async (c) => {
 
 // Get single class detail
 app.get('/api/classes/:slug', async (c) => {
-  const slug = c.req.param('slug')
+  const slug = decodeURIComponent(c.req.param('slug'))
   const cls: any = await c.env.DB.prepare(`
     SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.bio as instructor_bio, i.specialty as instructor_specialty, i.total_students as instructor_total_students, i.total_classes as instructor_total_classes, i.rating as instructor_rating, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug
     FROM classes c
@@ -1393,13 +1398,13 @@ app.get('/api/classes/:id/reviews', async (c) => {
 // Simple auth - login
 app.post('/api/auth/login', async (c) => {
   const { email, password } = await c.req.json()
-  const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, subscription_plan, subscription_expires_at, is_test_account, test_expires_at, password_hash FROM users WHERE email = ?').bind(email).first() as any
+  const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, is_instructor, subscription_plan, subscription_expires_at, is_test_account, test_expires_at, password_hash FROM users WHERE email = ?').bind(email).first() as any
   if (!user) return c.json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' }, 401)
 
   const isValid = await verifyPassword(password, user.password_hash)
   if (!isValid) return c.json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' }, 401)
 
-  const token = await createJWT({ sub: user.id, email: user.email, role: user.role || 'user', exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }, c.env.JWT_SECRET)
+  const token = await createJWT({ sub: user.id, email: user.email, role: user.role || 'user', is_instructor: user.is_instructor || 0, exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }, c.env.JWT_SECRET)
   delete user.password_hash
 
   return c.json({ user, token })
@@ -1422,9 +1427,9 @@ app.post('/api/auth/register', async (c) => {
       'INSERT INTO users (email, password_hash, name, is_test_account, test_expires_at) VALUES (?, ?, ?, ?, ?)'
     ).bind(email, passwordHash, name, isTestAccount ? 1 : 0, testExpiresAt).run()
     const userId = result.meta.last_row_id
-    const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, is_test_account, test_expires_at FROM users WHERE id = ?').bind(userId).first() as any
+    const user = await c.env.DB.prepare('SELECT id, email, name, avatar, role, is_instructor, is_test_account, test_expires_at FROM users WHERE id = ?').bind(userId).first() as any
 
-    const token = await createJWT({ sub: user.id, email: user.email, role: user.role || 'user', exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }, c.env.JWT_SECRET)
+    const token = await createJWT({ sub: user.id, email: user.email, role: user.role || 'user', is_instructor: user.is_instructor || 0, exp: Date.now() + 30 * 24 * 60 * 60 * 1000 }, c.env.JWT_SECRET)
 
     return c.json({
       user,
@@ -1508,7 +1513,7 @@ app.get('/api/user/:userId/instructor-classes', async (c) => {
   const instructor = await c.env.DB.prepare(`
     SELECT i.id FROM instructors i
     JOIN users u ON i.user_id = u.id
-    WHERE u.id = ? AND u.role = 'instructor'
+    WHERE u.id = ? AND (u.role = 'instructor' OR u.is_instructor = 1)
   `).bind(userId).first() as any
 
   if (!instructor) {
@@ -1612,7 +1617,7 @@ app.get('/api/user/:userId/instructor-classes-with-lessons', async (c) => {
   const instructor = await c.env.DB.prepare(`
     SELECT i.id FROM instructors i
     JOIN users u ON i.user_id = u.id
-    WHERE u.id = ? AND u.role = 'instructor'
+    WHERE u.id = ? AND (u.role = 'instructor' OR u.is_instructor = 1)
   `).bind(userId).first() as any
 
   if (!instructor) {
@@ -1679,7 +1684,7 @@ app.post('/api/instructor/classes/:classId/create-sessions', async (c) => {
   const instructor = await c.env.DB.prepare(`
     SELECT i.id, i.classin_uid, i.classin_virtual_account, i.display_name FROM instructors i
     JOIN users u ON i.user_id = u.id
-    WHERE u.id = ? AND u.role = 'instructor'
+    WHERE u.id = ? AND (u.role = 'instructor' OR u.is_instructor = 1)
   `).bind(userId).first() as any
 
   if (!instructor) {
@@ -4023,7 +4028,7 @@ app.delete('/api/instructor/lessons/:lessonId', async (c) => {
   const instructor = await c.env.DB.prepare(`
     SELECT i.id FROM instructors i
     JOIN users u ON i.user_id = u.id
-    WHERE u.id = ? AND u.role = 'instructor'
+    WHERE u.id = ? AND (u.role = 'instructor' OR u.is_instructor = 1)
   `).bind(userId).first() as any
 
   if (!instructor) {
@@ -4725,7 +4730,7 @@ app.get('/api/admin/users', async (c) => {
   const offset = parseInt(c.req.query('offset') || '0')
 
   let query = `
-    SELECT id, email, name, phone, role, is_test_account, test_expires_at, created_at
+    SELECT id, email, name, phone, role, is_instructor, is_test_account, test_expires_at, created_at
     FROM users
   `
   const params: any[] = []
@@ -4754,7 +4759,7 @@ app.get('/api/admin/users', async (c) => {
     SELECT
       COUNT(*) as total,
       SUM(CASE WHEN role = 'student' THEN 1 ELSE 0 END) as students,
-      SUM(CASE WHEN role = 'instructor' THEN 1 ELSE 0 END) as instructors,
+      SUM(CASE WHEN role = 'instructor' OR is_instructor = 1 THEN 1 ELSE 0 END) as instructors,
       SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) as admins,
       SUM(CASE WHEN is_test_account = 1 THEN 1 ELSE 0 END) as test_accounts
     FROM users
@@ -4815,13 +4820,13 @@ app.put('/api/admin/users/:id', async (c) => {
 app.delete('/api/admin/users/:id', async (c) => {
   const userId = parseInt(c.req.param('id'))
 
-  const user = await c.env.DB.prepare('SELECT id, role FROM users WHERE id = ?').bind(userId).first() as any
+  const user = await c.env.DB.prepare('SELECT id, role, is_instructor FROM users WHERE id = ?').bind(userId).first() as any
   if (!user) {
     return c.json({ error: '회원을 찾을 수 없습니다.' }, 404)
   }
 
   // 강사인 경우 강사 레코드도 삭제
-  if (user.role === 'instructor') {
+  if (isInstructorUser(user)) {
     await c.env.DB.prepare('DELETE FROM instructors WHERE user_id = ?').bind(userId).run()
   }
 
@@ -6437,6 +6442,743 @@ app.post('/api/admin/orders/:orderId/cancel', async (c) => {
   })
 })
 
+// ==================== 수업 매칭 시스템 API ====================
+
+// JWT에서 사용자 정보 추출 헬퍼
+async function getUserFromToken(c: any): Promise<any | null> {
+  const auth = c.req.header('Authorization')
+  if (!auth?.startsWith('Bearer ')) return null
+  const payload = await verifyJWT(auth.slice(7), c.env.JWT_SECRET)
+  if (!payload) return null
+  return await c.env.DB.prepare('SELECT id, email, name, role, is_instructor FROM users WHERE id = ?').bind(payload.sub).first()
+}
+
+// 수업 요청 생성 (로그인 필수)
+app.post('/api/class-requests', async (c) => {
+  const user = await getUserFromToken(c)
+  if (!user) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  const { title, description, categoryId, preferredSchedule, budgetMin, budgetMax } = await c.req.json()
+  if (!title || !description) return c.json({ error: '제목과 설명은 필수입니다.' }, 400)
+
+  const result = await c.env.DB.prepare(`
+    INSERT INTO class_requests (user_id, title, description, category_id, preferred_schedule, budget_min, budget_max)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).bind(user.id, title, description, categoryId || null, preferredSchedule || null, budgetMin || null, budgetMax || null).run()
+
+  return c.json({ success: true, id: result.meta.last_row_id })
+})
+
+// 수업 요청 게시판 목록
+app.get('/api/class-requests', async (c) => {
+  const status = c.req.query('status') || 'open'
+  const limit = parseInt(c.req.query('limit') || '20')
+  const offset = parseInt(c.req.query('offset') || '0')
+
+  const { results } = await c.env.DB.prepare(`
+    SELECT cr.*, u.name as author_name, cat.name as category_name,
+           (SELECT COUNT(*) FROM class_request_applications WHERE request_id = cr.id AND status != 'rejected') as application_count
+    FROM class_requests cr
+    LEFT JOIN users u ON cr.user_id = u.id
+    LEFT JOIN categories cat ON cr.category_id = cat.id
+    WHERE cr.status = ?
+    ORDER BY cr.created_at DESC
+    LIMIT ? OFFSET ?
+  `).bind(status, limit, offset).all()
+
+  const countResult = await c.env.DB.prepare('SELECT COUNT(*) as total FROM class_requests WHERE status = ?').bind(status).first() as any
+
+  return c.json({ requests: results, total: countResult?.total || 0 })
+})
+
+// 수업 요청 상세
+app.get('/api/class-requests/:id', async (c) => {
+  const id = parseInt(c.req.param('id'))
+
+  const request = await c.env.DB.prepare(`
+    SELECT cr.*, u.name as author_name, u.email as author_email, cat.name as category_name
+    FROM class_requests cr
+    LEFT JOIN users u ON cr.user_id = u.id
+    LEFT JOIN categories cat ON cr.category_id = cat.id
+    WHERE cr.id = ?
+  `).bind(id).first()
+
+  if (!request) return c.json({ error: '요청을 찾을 수 없습니다.' }, 404)
+
+  // 지원자 목록 (제출된 것만)
+  const { results: applications } = await c.env.DB.prepare(`
+    SELECT id, applicant_name, bio, proposed_title, proposed_price, status, created_at
+    FROM class_request_applications
+    WHERE request_id = ? AND status != 'draft'
+    ORDER BY created_at ASC
+  `).bind(id).all()
+
+  return c.json({ request, applications })
+})
+
+// 관심 표시 토글 (로그인 필수)
+app.post('/api/class-requests/:id/interest', async (c) => {
+  const user = await getUserFromToken(c)
+  if (!user) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  const requestId = parseInt(c.req.param('id'))
+
+  // 이미 관심 표시했는지 확인
+  const existing = await c.env.DB.prepare(
+    'SELECT id FROM class_request_interests WHERE request_id = ? AND user_id = ?'
+  ).bind(requestId, user.id).first()
+
+  if (existing) {
+    // 관심 해제
+    await c.env.DB.batch([
+      c.env.DB.prepare('DELETE FROM class_request_interests WHERE request_id = ? AND user_id = ?').bind(requestId, user.id),
+      c.env.DB.prepare('UPDATE class_requests SET interest_count = MAX(0, interest_count - 1) WHERE id = ?').bind(requestId)
+    ])
+    return c.json({ interested: false })
+  } else {
+    // 관심 표시
+    await c.env.DB.batch([
+      c.env.DB.prepare('INSERT INTO class_request_interests (request_id, user_id) VALUES (?, ?)').bind(requestId, user.id),
+      c.env.DB.prepare('UPDATE class_requests SET interest_count = interest_count + 1 WHERE id = ?').bind(requestId)
+    ])
+    return c.json({ interested: true })
+  }
+})
+
+// 내 수업 요청 목록 (로그인 필수)
+app.get('/api/my/class-requests', async (c) => {
+  const user = await getUserFromToken(c)
+  if (!user) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  const { results } = await c.env.DB.prepare(`
+    SELECT cr.*, cat.name as category_name,
+           (SELECT COUNT(*) FROM class_request_applications WHERE request_id = cr.id AND status = 'submitted') as pending_applications
+    FROM class_requests cr
+    LEFT JOIN categories cat ON cr.category_id = cat.id
+    WHERE cr.user_id = ?
+    ORDER BY cr.created_at DESC
+  `).bind(user.id).all()
+
+  return c.json({ requests: results })
+})
+
+// ==================== 강사 지원 에이전트 API ====================
+
+// 지원 시작 (draft 생성, 로그인 필수)
+app.post('/api/class-requests/:id/apply', async (c) => {
+  const user = await getUserFromToken(c)
+  if (!user) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  const requestId = parseInt(c.req.param('id'))
+
+  // 요청 확인
+  const request = await c.env.DB.prepare('SELECT id, user_id, status FROM class_requests WHERE id = ?').bind(requestId).first() as any
+  if (!request) return c.json({ error: '요청을 찾을 수 없습니다.' }, 404)
+  if (request.status !== 'open') return c.json({ error: '이미 매칭된 요청입니다.' }, 400)
+  if (request.user_id === user.id) return c.json({ error: '본인의 요청에는 지원할 수 없습니다.' }, 403)
+
+  // 이미 지원했는지 확인
+  const existing = await c.env.DB.prepare(
+    'SELECT id, conversation_step, status FROM class_request_applications WHERE request_id = ? AND user_id = ?'
+  ).bind(requestId, user.id).first() as any
+
+  if (existing) {
+    return c.json({
+      applicationId: existing.id,
+      conversationStep: existing.conversation_step,
+      status: existing.status,
+      message: '이미 지원이 진행 중입니다.'
+    })
+  }
+
+  // 새 지원 생성
+  const result = await c.env.DB.prepare(`
+    INSERT INTO class_request_applications (request_id, user_id, applicant_name, applicant_email)
+    VALUES (?, ?, ?, ?)
+  `).bind(requestId, user.id, user.name || '', user.email).run()
+
+  return c.json({
+    applicationId: result.meta.last_row_id,
+    conversationStep: 0,
+    status: 'draft',
+    agentMessage: getAgentMessage(0, null, request)
+  })
+})
+
+// 에이전트 대화 메시지 전송
+app.post('/api/applications/:id/chat', async (c) => {
+  const user = await getUserFromToken(c)
+  if (!user) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  const appId = parseInt(c.req.param('id'))
+  const { message } = await c.req.json()
+
+  const app_row = await c.env.DB.prepare(`
+    SELECT a.*, cr.title as request_title, cr.description as request_description
+    FROM class_request_applications a
+    JOIN class_requests cr ON a.request_id = cr.id
+    WHERE a.id = ? AND a.user_id = ?
+  `).bind(appId, user.id).first() as any
+
+  if (!app_row) return c.json({ error: '지원을 찾을 수 없습니다.' }, 404)
+  if (app_row.status === 'submitted') return c.json({ error: '이미 제출된 지원입니다.' }, 400)
+
+  const step = app_row.conversation_step
+
+  // "이전" 입력 시 뒤로가기
+  if (message.trim() === '이전' && step > 0) {
+    await c.env.DB.prepare('UPDATE class_request_applications SET conversation_step = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(step - 1, appId).run()
+    return c.json({
+      conversationStep: step - 1,
+      agentMessage: getAgentMessage(step - 1, app_row, null)
+    })
+  }
+
+  // 현재 step에 맞는 데이터 파싱/검증/저장
+  const validation = validateAndSaveStep(step, message, app_row)
+  if (validation.error) {
+    return c.json({ conversationStep: step, agentMessage: validation.error, isError: true })
+  }
+
+  // DB 업데이트
+  const updates = validation.updates!
+  const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ')
+  const values = Object.values(updates)
+
+  if (step === 6) {
+    // 최종 제출
+    const setFinal = setClauses ? `${setClauses}, ` : ''
+    await c.env.DB.prepare(`UPDATE class_request_applications SET ${setFinal}status = 'submitted', conversation_step = 7, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .bind(...values, appId).run()
+    return c.json({
+      conversationStep: 7,
+      status: 'submitted',
+      agentMessage: '지원이 완료되었습니다! 관리자 검토 후 안내드리겠습니다. 감사합니다!'
+    })
+  }
+
+  await c.env.DB.prepare(`UPDATE class_request_applications SET ${setClauses}, conversation_step = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+    .bind(...values, step + 1, appId).run()
+
+  // 다음 step 메시지 반환 (업데이트된 데이터 포함)
+  const updatedApp = { ...app_row, ...updates, conversation_step: step + 1 }
+  return c.json({
+    conversationStep: step + 1,
+    agentMessage: getAgentMessage(step + 1, updatedApp, null)
+  })
+})
+
+// 지원 상태/대화 조회
+app.get('/api/applications/:id', async (c) => {
+  const user = await getUserFromToken(c)
+  if (!user) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  const appId = parseInt(c.req.param('id'))
+  const app_row = await c.env.DB.prepare(`
+    SELECT a.*, cr.title as request_title, cr.description as request_description, cr.preferred_schedule, cr.budget_min, cr.budget_max
+    FROM class_request_applications a
+    JOIN class_requests cr ON a.request_id = cr.id
+    WHERE a.id = ? AND a.user_id = ?
+  `).bind(appId, user.id).first() as any
+
+  if (!app_row) return c.json({ error: '지원을 찾을 수 없습니다.' }, 404)
+
+  return c.json({
+    application: app_row,
+    agentMessage: app_row.status === 'submitted'
+      ? '지원이 제출되었습니다. 관리자 검토를 기다려주세요.'
+      : getAgentMessage(app_row.conversation_step, app_row, null)
+  })
+})
+
+// 에이전트 메시지 생성
+function getAgentMessage(step: number, app: any, request: any): string {
+  switch (step) {
+    case 0:
+      return '안녕하세요! 수업을 만들어주셔서 감사합니다. 먼저 간단한 자기소개와 관련 경력을 알려주세요. (최소 10자)'
+    case 1:
+      return `좋습니다! 이제 수업 제목을 정해볼까요?${request ? ` 요청 내용: "${request.title}"을 참고해서 제안해주세요.` : ''}`
+    case 2:
+      return '수업에서 무엇을 배울 수 있는지 설명해주세요. 마지막 줄에 난이도를 적어주세요. (초급/중급/고급/전체)'
+    case 3:
+      return '총 몇 회 수업이고, 한 회에 몇 분으로 하실 건가요? (예: 8회 60분)'
+    case 4:
+      return '수업 시작일, 요일, 시간을 정해볼까요? (예: 4월 14일 시작, 월/수, 저녁 7시)'
+    case 5:
+      return '수강료를 얼마로 제안하시겠어요? (원 단위, 숫자만 입력)'
+    case 6: {
+      if (!app) return '요약 정보를 준비 중입니다...'
+      const days = app.proposed_schedule_days ? JSON.parse(app.proposed_schedule_days) : []
+      const dayNames: Record<string, string> = { mon: '월', tue: '화', wed: '수', thu: '목', fri: '금', sat: '토', sun: '일' }
+      const dayStr = days.map((d: string) => dayNames[d] || d).join(', ')
+      const levelNames: Record<string, string> = { beginner: '초급', intermediate: '중급', advanced: '고급', all: '전체' }
+      return `📋 지원 내용 요약\n\n` +
+        `👤 강사: ${app.applicant_name}\n` +
+        `📝 자기소개: ${app.bio}\n` +
+        `📚 수업 제목: ${app.proposed_title}\n` +
+        `📖 수업 설명: ${app.proposed_description}\n` +
+        `📊 난이도: ${levelNames[app.proposed_level] || app.proposed_level}\n` +
+        `🔢 구성: ${app.proposed_lessons_count}회 × ${app.proposed_duration_minutes}분\n` +
+        `📅 시작일: ${app.proposed_schedule_start?.split('T')[0] || app.proposed_schedule_start}\n` +
+        `⏰ 스케줄: ${dayStr} ${app.proposed_schedule_time}\n` +
+        `💰 수강료: ${Number(app.proposed_price).toLocaleString()}원\n\n` +
+        `이 내용으로 제출하시겠습니까? ("네" 또는 "이전")`
+    }
+    default:
+      return ''
+  }
+}
+
+// 입력 검증 + 저장 데이터 생성
+function validateAndSaveStep(step: number, message: string, app: any): { error?: string, updates?: Record<string, any> } {
+  const msg = message.trim()
+
+  switch (step) {
+    case 0: {
+      // 자기소개 (최소 10자)
+      if (msg.length < 10) return { error: '자기소개를 좀 더 상세히 작성해주세요 (최소 10자)' }
+      return { updates: { bio: msg } }
+    }
+    case 1: {
+      // 수업 제목 (최소 2자)
+      if (msg.length < 2) return { error: '수업 제목을 입력해주세요 (최소 2자)' }
+      return { updates: { proposed_title: msg } }
+    }
+    case 2: {
+      // 수업 설명 + 레벨
+      const lines = msg.split('\n').map(l => l.trim()).filter(Boolean)
+      const lastLine = lines[lines.length - 1]?.toLowerCase() || ''
+      const levelMap: Record<string, string> = { '초급': 'beginner', '중급': 'intermediate', '고급': 'advanced', '전체': 'all', 'beginner': 'beginner', 'intermediate': 'intermediate', 'advanced': 'advanced', 'all': 'all' }
+      const level = levelMap[lastLine]
+      let description = msg
+      if (level) {
+        description = lines.slice(0, -1).join('\n')
+      }
+      if (description.length < 20) return { error: '수업 설명을 좀 더 작성해주세요 (최소 20자)' }
+      return { updates: { proposed_description: description, proposed_level: level || 'all' } }
+    }
+    case 3: {
+      // 회차 + 시간 파싱 (예: "8회 60분", "8 60")
+      const nums = msg.match(/(\d+)/g)
+      if (!nums || nums.length < 2) return { error: '수업 회차와 시간을 입력해주세요 (예: 8회 60분)' }
+      const count = parseInt(nums[0])
+      const duration = parseInt(nums[1])
+      if (count < 1 || count > 50) return { error: '수업 회차는 1~50회 범위로 입력해주세요' }
+      if (duration < 30 || duration > 240) return { error: '수업 시간은 30~240분 범위로 입력해주세요' }
+      return { updates: { proposed_lessons_count: count, proposed_duration_minutes: duration } }
+    }
+    case 4: {
+      // 스케줄 파싱 (시작일, 요일, 시간)
+      const dayMap: Record<string, string> = { '월': 'mon', '화': 'tue', '수': 'wed', '목': 'thu', '금': 'fri', '토': 'sat', '일': 'sun', 'mon': 'mon', 'tue': 'tue', 'wed': 'wed', 'thu': 'thu', 'fri': 'fri', 'sat': 'sat', 'sun': 'sun' }
+
+      // 날짜 파싱 (다양한 형식 지원)
+      const dateMatch = msg.match(/(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})|(\d{1,2})월\s*(\d{1,2})일/)
+      let startDate: string | null = null
+      if (dateMatch) {
+        if (dateMatch[1]) {
+          startDate = dateMatch[1].replace(/[/.]/g, '-')
+        } else if (dateMatch[2] && dateMatch[3]) {
+          const year = new Date().getFullYear()
+          const month = dateMatch[2].padStart(2, '0')
+          const day = dateMatch[3].padStart(2, '0')
+          startDate = `${year}-${month}-${day}`
+        }
+      }
+      if (!startDate) return { error: '시작일을 입력해주세요 (예: 4월 14일 또는 2026-04-14)' }
+
+      // 시작일이 오늘 이후인지 확인
+      const today = new Date().toISOString().split('T')[0]
+      if (startDate < today) return { error: '시작일은 오늘 이후여야 합니다' }
+
+      // 요일 파싱 (단독 글자만 매칭, "평일"의 "일" 오매칭 방지)
+      const days: string[] = []
+      const dayRegex = /(?:^|[\/,\s])([월화수목금토일])(?=[\/,\s요]|$)/g
+      let dayMatch
+      while ((dayMatch = dayRegex.exec(msg)) !== null) {
+        const korDay = dayMatch[1]
+        const korMap: Record<string, string> = { '월': 'mon', '화': 'tue', '수': 'wed', '목': 'thu', '금': 'fri', '토': 'sat', '일': 'sun' }
+        if (korMap[korDay]) days.push(korMap[korDay])
+      }
+      // 영어 요일도 지원
+      for (const eng of ['mon','tue','wed','thu','fri','sat','sun']) {
+        if (msg.toLowerCase().includes(eng) && !days.includes(eng)) days.push(eng)
+      }
+      const uniqueDays = [...new Set(days)]
+      if (uniqueDays.length === 0) return { error: '수업 요일을 선택해주세요 (예: 월/수)' }
+
+      // 시간 파싱 (저녁/오후 + 숫자 조합 지원)
+      const timeMatch = msg.match(/(\d{1,2})\s*[:시]\s*(\d{0,2})/)
+      let time = '19:00' // 기본값
+      if (timeMatch) {
+        let hour = parseInt(timeMatch[1])
+        const min = timeMatch[2] ? parseInt(timeMatch[2]) : 0
+        // "저녁 7시" or "오후 3시" → 12시간제 보정
+        if (hour < 12 && (msg.includes('저녁') || msg.includes('오후') || msg.includes('밤'))) {
+          hour += 12
+        }
+        time = `${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`
+      } else if (msg.includes('저녁')) {
+        time = '19:00'
+      } else if (msg.includes('오후')) {
+        time = '14:00'
+      } else if (msg.includes('오전')) {
+        time = '10:00'
+      }
+
+      return { updates: {
+        proposed_schedule_start: startDate,
+        proposed_schedule_days: JSON.stringify(uniqueDays),
+        proposed_schedule_time: time
+      }}
+    }
+    case 5: {
+      // 가격 (숫자만)
+      const price = parseInt(msg.replace(/[,원\s]/g, ''))
+      if (isNaN(price) || price <= 0) return { error: '유효한 금액을 입력해주세요 (숫자만)' }
+      return { updates: { proposed_price: price } }
+    }
+    case 6: {
+      // 확인/제출
+      const yes = ['네', '예', '확인', 'yes', 'y']
+      if (yes.includes(msg.toLowerCase())) {
+        return { updates: {} }  // 제출 처리는 chat 핸들러에서
+      }
+      if (msg === '이전') {
+        return { error: 'back' }  // 뒤로가기는 상위에서 처리됨
+      }
+      return { error: '제출하시려면 "네", 수정하시려면 "이전"을 입력해주세요' }
+    }
+    default:
+      return { error: '잘못된 단계입니다.' }
+  }
+}
+
+// ==================== 관리자: 수업 매칭 관리 API ====================
+
+// 관리자 인증 헬퍼 (API용)
+async function requireAdminAPI(c: any): Promise<boolean> {
+  const sessionToken = getSessionToken(c)
+  return await checkAdminSession(c.env.DB, sessionToken)
+}
+
+// 관리자: 지원 목록
+app.get('/api/admin/applications', async (c) => {
+  if (!await requireAdminAPI(c)) return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  const status = c.req.query('status') || 'submitted'
+  const { results } = await c.env.DB.prepare(`
+    SELECT a.*, cr.title as request_title, cr.description as request_description, u.name as user_name, u.email as user_email
+    FROM class_request_applications a
+    JOIN class_requests cr ON a.request_id = cr.id
+    JOIN users u ON a.user_id = u.id
+    WHERE a.status = ?
+    ORDER BY a.created_at DESC
+  `).bind(status).all()
+  return c.json({ applications: results })
+})
+
+// 관리자: 지원 상세
+app.get('/api/admin/applications/:id', async (c) => {
+  if (!await requireAdminAPI(c)) return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  const id = parseInt(c.req.param('id'))
+  const app_row = await c.env.DB.prepare(`
+    SELECT a.*, cr.title as request_title, cr.description as request_description, cr.user_id as requester_id,
+           cr.preferred_schedule, cr.budget_min, cr.budget_max,
+           u.name as applicant_user_name, u.email as applicant_user_email, u.role as applicant_role, u.is_instructor as applicant_is_instructor,
+           requester.name as requester_name, requester.email as requester_email
+    FROM class_request_applications a
+    JOIN class_requests cr ON a.request_id = cr.id
+    JOIN users u ON a.user_id = u.id
+    JOIN users requester ON cr.user_id = requester.id
+    WHERE a.id = ?
+  `).bind(id).first()
+
+  if (!app_row) return c.json({ error: '지원을 찾을 수 없습니다.' }, 404)
+  return c.json({ application: app_row })
+})
+
+// 자동화 실행 함수
+async function runAutomation(c: any, appId: number, startStep: number) {
+  const app_row = await c.env.DB.prepare(`
+    SELECT a.*, cr.title as request_title, cr.user_id as requester_id, cr.category_id as request_category_id,
+           u.id as applicant_user_id, u.name as applicant_name, u.email as applicant_email, u.role as applicant_role, u.is_instructor as applicant_is_instructor
+    FROM class_request_applications a
+    JOIN class_requests cr ON a.request_id = cr.id
+    JOIN users u ON a.user_id = u.id
+    WHERE a.id = ?
+  `).bind(appId).first() as any
+
+  if (!app_row) throw new Error('Application not found')
+
+  const config: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+    ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+    : null
+
+  let instructorId: number | null = null
+  let classId: number | null = app_row.created_class_id || null
+
+  // Step 1: 강사 등록
+  if (startStep <= 1) {
+    try {
+      await c.env.DB.prepare('UPDATE class_request_applications SET automation_step = 1 WHERE id = ?').bind(appId).run()
+
+      const isAlreadyInstructor = app_row.applicant_role === 'instructor' || app_row.applicant_is_instructor === 1
+      if (!isAlreadyInstructor) {
+        await c.env.DB.prepare('UPDATE users SET is_instructor = 1 WHERE id = ?').bind(app_row.applicant_user_id).run()
+      }
+
+      // instructors 테이블에 레코드 확인/생성
+      const existingInstructor = await c.env.DB.prepare('SELECT id FROM instructors WHERE user_id = ?').bind(app_row.applicant_user_id).first() as any
+      if (existingInstructor) {
+        instructorId = existingInstructor.id
+      } else {
+        const insResult = await c.env.DB.prepare(
+          'INSERT INTO instructors (user_id, display_name, bio) VALUES (?, ?, ?)'
+        ).bind(app_row.applicant_user_id, app_row.applicant_name, app_row.bio || '').run()
+        instructorId = insResult.meta.last_row_id as number
+      }
+    } catch (e: any) {
+      await c.env.DB.prepare('UPDATE class_request_applications SET automation_error = ? WHERE id = ?').bind('Step 1 실패: ' + e.message, appId).run()
+      return { error: 'Step 1: 강사 등록 실패 - ' + e.message }
+    }
+  } else {
+    const existing = await c.env.DB.prepare('SELECT id FROM instructors WHERE user_id = ?').bind(app_row.applicant_user_id).first() as any
+    instructorId = existing?.id
+  }
+
+  // Step 2: 코스 생성
+  if (startStep <= 2) {
+    try {
+      await c.env.DB.prepare('UPDATE class_request_applications SET automation_step = 2 WHERE id = ?').bind(appId).run()
+
+      if (app_row.created_class_id) {
+        classId = app_row.created_class_id
+      } else {
+        const slug = (app_row.proposed_title || 'class').toLowerCase().replace(/[^a-z0-9가-힣]+/g, '-').replace(/^-|-$/g, '') + '-' + Date.now()
+        const classResult = await c.env.DB.prepare(`
+          INSERT INTO classes (title, slug, description, instructor_id, category_id, price, duration_minutes, level, class_type, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live', 'active')
+        `).bind(
+          app_row.proposed_title,
+          slug,
+          app_row.proposed_description || '',
+          instructorId,
+          app_row.request_category_id || 1,
+          app_row.proposed_price || 0,
+          app_row.proposed_duration_minutes || 60,
+          app_row.proposed_level || 'all'
+        ).run()
+        classId = classResult.meta.last_row_id as number
+      }
+    } catch (e: any) {
+      await c.env.DB.prepare('UPDATE class_request_applications SET automation_error = ? WHERE id = ?').bind('Step 2 실패: ' + e.message, appId).run()
+      return { error: 'Step 2: 코스 생성 실패 - ' + e.message }
+    }
+  } else {
+    classId = app_row.created_class_id
+  }
+
+  // Step 3: ClassIn 코스 생성
+  if (startStep <= 3 && config) {
+    try {
+      await c.env.DB.prepare('UPDATE class_request_applications SET automation_step = 3 WHERE id = ?').bind(appId).run()
+
+      const cls = await c.env.DB.prepare('SELECT classin_course_id FROM classes WHERE id = ?').bind(classId).first() as any
+      if (!cls?.classin_course_id) {
+        const courseResult = await createClassInCourse(config, app_row.proposed_title)
+        if (courseResult.error) throw new Error(courseResult.error)
+        await c.env.DB.prepare('UPDATE classes SET classin_course_id = ? WHERE id = ?').bind(courseResult.courseId, classId).run()
+      }
+    } catch (e: any) {
+      await c.env.DB.prepare('UPDATE class_request_applications SET automation_error = ? WHERE id = ?').bind('Step 3 실패: ' + e.message, appId).run()
+      return { error: 'Step 3: ClassIn 코스 생성 실패 - ' + e.message }
+    }
+  }
+
+  // Step 4: 수업 세션 생성
+  if (startStep <= 4 && config) {
+    try {
+      await c.env.DB.prepare('UPDATE class_request_applications SET automation_step = 4 WHERE id = ?').bind(appId).run()
+
+      const cls = await c.env.DB.prepare('SELECT id, classin_course_id, duration_minutes FROM classes WHERE id = ?').bind(classId).first() as any
+      if (!cls?.classin_course_id) throw new Error('ClassIn 코스 ID가 없습니다')
+
+      // 이미 생성된 레슨 수 확인 (멱등성)
+      const existingCount = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM class_lessons WHERE class_id = ?').bind(classId).first() as any
+      const alreadyCreated = existingCount?.cnt || 0
+      const totalLessons = app_row.proposed_lessons_count || 1
+
+      if (alreadyCreated < totalLessons) {
+        // 스케줄 계산
+        const days = app_row.proposed_schedule_days ? JSON.parse(app_row.proposed_schedule_days) : ['mon']
+        const time = app_row.proposed_schedule_time || '19:00'
+        const [hour, min] = time.split(':').map(Number)
+        const startDateStr = app_row.proposed_schedule_start || new Date().toISOString().split('T')[0]
+        const dayMap: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }
+        const dayNumbers = days.map((d: string) => dayMap[d] ?? 1)
+
+        // 날짜 계산
+        const dates: Date[] = []
+        const cursor = new Date(startDateStr + 'T00:00:00+09:00')
+        let safety = 0
+        while (dates.length < totalLessons && safety < 365) {
+          if (dayNumbers.includes(cursor.getDay())) {
+            dates.push(new Date(cursor))
+          }
+          cursor.setDate(cursor.getDate() + 1)
+          safety++
+        }
+
+        // 강사 정보
+        const instructor = await c.env.DB.prepare(
+          'SELECT id, classin_uid, classin_virtual_account, display_name FROM instructors WHERE id = ?'
+        ).bind(instructorId).first() as any
+
+        // 강사 ClassIn 등록 (가상계정)
+        if (!instructor?.classin_uid && config) {
+          const useVirtual = c.env.USE_INSTRUCTOR_VIRTUAL_ACCOUNT === 'true'
+          if (useVirtual) {
+            const va = await c.env.DB.prepare(
+              "SELECT id, classin_uid, phone, password FROM virtual_accounts WHERE status = 'available' AND account_type = 'instructor' LIMIT 1"
+            ).first() as any
+            if (va) {
+              await registerInstructorWithClassIn(config, c.env.DB, instructor.id, va.classin_uid, va.phone, va.id, instructor.display_name || app_row.applicant_name)
+            }
+          }
+        }
+
+        // 강사 재조회 (ClassIn 등록 후)
+        const updatedInstructor = await c.env.DB.prepare(
+          'SELECT id, classin_uid, classin_virtual_account, display_name FROM instructors WHERE id = ?'
+        ).bind(instructorId).first() as any
+
+        for (let i = alreadyCreated; i < dates.length; i++) {
+          const lessonDate = dates[i]
+          // KST → UTC 변환 (KST = UTC+9)
+          const kstDate = new Date(lessonDate)
+          kstDate.setHours(hour, min, 0, 0)
+          const utcTimestamp = Math.floor(kstDate.getTime() / 1000) - (9 * 3600)
+          const endTimestamp = utcTimestamp + (app_row.proposed_duration_minutes || 60) * 60
+          const durationMins = app_row.proposed_duration_minutes || 60
+
+          const lessonResult = await createClassInLesson(config, {
+            courseId: cls.classin_course_id,
+            className: `${app_row.proposed_title} - ${i + 1}회차`,
+            beginTime: utcTimestamp,
+            endTime: endTimestamp,
+            teacherUid: updatedInstructor?.classin_uid || ''
+          })
+
+          const scheduledAt = new Date((utcTimestamp + 9 * 3600) * 1000).toISOString()
+          await c.env.DB.prepare(`
+            INSERT INTO class_lessons (class_id, lesson_title, scheduled_at, duration_minutes, classin_course_id, classin_class_id, classin_instructor_url, sort_order, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
+          `).bind(
+            classId,
+            `${i + 1}회차`,
+            scheduledAt,
+            durationMins,
+            cls.classin_course_id,
+            lessonResult.classId || null,
+            lessonResult.joinUrl || null,
+            i + 1
+          ).run()
+        }
+      }
+    } catch (e: any) {
+      await c.env.DB.prepare('UPDATE class_request_applications SET automation_error = ? WHERE id = ?').bind('Step 4 실패: ' + e.message, appId).run()
+      return { error: 'Step 4: 수업 세션 생성 실패 - ' + e.message }
+    }
+  }
+
+  // Step 5: created_class_id 저장
+  if (startStep <= 5) {
+    await c.env.DB.prepare('UPDATE class_request_applications SET automation_step = 5, created_class_id = ? WHERE id = ?').bind(classId, appId).run()
+  }
+
+  // Step 6: 매칭 완료 + 다른 지원자 거절 + 학생 자동 등록
+  if (startStep <= 6) {
+    try {
+      await c.env.DB.prepare('UPDATE class_request_applications SET automation_step = 6 WHERE id = ?').bind(appId).run()
+
+      // class_requests 업데이트
+      await c.env.DB.prepare(
+        "UPDATE class_requests SET status = 'matched', matched_application_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+      ).bind(appId, app_row.request_id).run()
+
+      // 다른 지원자 거절
+      await c.env.DB.prepare(
+        "UPDATE class_request_applications SET status = 'rejected', admin_note = '다른 강사가 선정되었습니다', reviewed_at = CURRENT_TIMESTAMP WHERE request_id = ? AND id != ? AND status != 'rejected'"
+      ).bind(app_row.request_id, appId).run()
+
+      // 요청 학생을 수업에 자동 등록
+      const existingEnrollment = await c.env.DB.prepare(
+        'SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?'
+      ).bind(app_row.requester_id, classId).first()
+
+      if (!existingEnrollment) {
+        await c.env.DB.prepare(
+          "INSERT INTO enrollments (user_id, class_id, status) VALUES (?, ?, 'active')"
+        ).bind(app_row.requester_id, classId).run()
+      }
+    } catch (e: any) {
+      await c.env.DB.prepare('UPDATE class_request_applications SET automation_error = ? WHERE id = ?').bind('Step 6 실패: ' + e.message, appId).run()
+      return { error: 'Step 6: 매칭 완료 실패 - ' + e.message }
+    }
+  }
+
+  // Step 7: 완료
+  await c.env.DB.prepare(
+    "UPDATE class_request_applications SET automation_step = 7, automation_error = NULL, status = 'approved', reviewed_at = CURRENT_TIMESTAMP WHERE id = ?"
+  ).bind(appId).run()
+
+  return { success: true, classId }
+}
+
+// 관리자: 승인 (��동화 트리거)
+app.post('/api/admin/applications/:id/approve', async (c) => {
+  if (!await requireAdminAPI(c)) return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  const id = parseInt(c.req.param('id'))
+  const app_row = await c.env.DB.prepare('SELECT id, status, automation_step FROM class_request_applications WHERE id = ?').bind(id).first() as any
+  if (!app_row) return c.json({ error: '지원을 찾을 수 없습니다.' }, 404)
+  if (app_row.status !== 'submitted' && app_row.status !== 'approved') return c.json({ error: '제출된 지원만 승인할 수 있습니다.' }, 400)
+
+  const result = await runAutomation(c, id, 1)
+  if (result.error) return c.json({ success: false, error: result.error, step: app_row.automation_step })
+  return c.json({ success: true, classId: result.classId })
+})
+
+// 관리자: 거절
+app.post('/api/admin/applications/:id/reject', async (c) => {
+  if (!await requireAdminAPI(c)) return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  const id = parseInt(c.req.param('id'))
+  const { note } = await c.req.json()
+
+  const app_row = await c.env.DB.prepare('SELECT id, request_id, status FROM class_request_applications WHERE id = ?').bind(id).first() as any
+  if (!app_row) return c.json({ error: '지원을 찾을 수 없습니다.' }, 404)
+
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE class_request_applications SET status = 'rejected', admin_note = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(note || '', id),
+    c.env.DB.prepare("UPDATE class_requests SET status = 'open', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status != 'matched'").bind(app_row.request_id)
+  ])
+
+  return c.json({ success: true })
+})
+
+// 관리자: 재시도 (실패한 단계부터 재개)
+app.post('/api/admin/applications/:id/retry', async (c) => {
+  if (!await requireAdminAPI(c)) return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  const id = parseInt(c.req.param('id'))
+  const app_row = await c.env.DB.prepare('SELECT id, automation_step, automation_error FROM class_request_applications WHERE id = ?').bind(id).first() as any
+  if (!app_row) return c.json({ error: '지원을 찾을 수 없습니다.' }, 404)
+  if (!app_row.automation_error) return c.json({ error: '재시도할 오류가 없습니다.' }, 400)
+
+  await c.env.DB.prepare('UPDATE class_request_applications SET automation_error = NULL WHERE id = ?').bind(id).run()
+  const result = await runAutomation(c, id, app_row.automation_step)
+  if (result.error) return c.json({ success: false, error: result.error })
+  return c.json({ success: true, classId: result.classId })
+})
+
 // ==================== HTML Pages ====================
 
 const headHTML = `<!DOCTYPE html>
@@ -6509,6 +7251,10 @@ const navHTML = `
         <a href="/categories" class="hidden sm:flex items-center gap-1 px-3 py-2 text-sm font-medium text-dark-600 hover:text-primary-500 rounded-lg hover:bg-gray-50 transition-all">
           <i class="fas fa-th-large text-xs"></i>
           <span>카테고리</span>
+        </a>
+        <a href="/class-requests" class="hidden sm:flex items-center gap-1 px-3 py-2 text-sm font-medium text-dark-600 hover:text-primary-500 rounded-lg hover:bg-gray-50 transition-all">
+          <i class="fas fa-hand-paper text-xs"></i>
+          <span>수업 요청</span>
         </a>
         <button onclick="toggleWishlist()" class="relative p-2 text-dark-500 hover:text-primary-500 rounded-lg hover:bg-gray-50 transition-all">
           <i class="far fa-heart text-lg"></i>
@@ -6800,7 +7546,7 @@ function updateAuthUI() {
   const area = document.getElementById('authArea');
   if (!area) return;
   if (currentUser) {
-    const mypageUrl = currentUser.role === 'instructor' ? '/instructor/mypage' : '/mypage';
+    const mypageUrl = (currentUser.role === 'instructor' || currentUser.is_instructor === 1) ? '/instructor/mypage' : '/mypage';
     area.innerHTML = \`
       <a href="\${mypageUrl}" class="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-gray-50 transition-all">
         <div class="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center">
@@ -7414,7 +8160,7 @@ async function openMyPage(tab) {
   if (!currentUser) { openAuthModal('login'); return; }
   document.getElementById('myPageSidebar').classList.remove('hidden');
   const content = document.getElementById('myPageContent');
-  const isInstructor = currentUser.role === 'instructor';
+  const isInstructor = currentUser.role === 'instructor' || currentUser.is_instructor === 1;
   const activeTab = tab || 'enrollments';
 
   // Check test account status (학생만)
@@ -7605,7 +8351,7 @@ async function testEnroll(classId) {
 }
 
 async function loadMyPageTab(tab) {
-  const isInstructor = currentUser.role === 'instructor';
+  const isInstructor = currentUser.role === 'instructor' || currentUser.is_instructor === 1;
   const tabs = isInstructor ? ['enrollments','completed'] : ['enrollments','completed','subscriptions','orders'];
 
   document.querySelectorAll('.mypage-tab').forEach((b,i) => {
@@ -8398,9 +9144,418 @@ document.addEventListener('DOMContentLoaded', () => {
   return c.html(applyBranding(html, c.env))
 })
 
+// ==================== 수업 요청 게시판 페이지 ====================
+app.get('/class-requests', async (c) => {
+  const html = `${headHTML}
+${navHTML}
+<main class="max-w-4xl mx-auto px-4 py-8">
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">수업 요청 게시판</h1>
+      <p class="text-gray-500 mt-1">이런 수업이 있었으면 좋겠다고 요청해보세요!</p>
+    </div>
+    <button onclick="createRequest()" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium">수업 요청하기</button>
+  </div>
+
+  <div class="flex gap-2 mb-6">
+    <button onclick="filterRequests('open')" id="filterOpen" class="px-3 py-1.5 rounded-full text-sm font-medium bg-primary-100 text-primary-700">모집중</button>
+    <button onclick="filterRequests('matching')" id="filterMatching" class="px-3 py-1.5 rounded-full text-sm font-medium bg-gray-100 text-gray-600">매칭중</button>
+    <button onclick="filterRequests('matched')" id="filterMatched" class="px-3 py-1.5 rounded-full text-sm font-medium bg-gray-100 text-gray-600">매칭완료</button>
+  </div>
+
+  <div id="requestList" class="space-y-4">
+    <div class="text-center py-12 text-gray-400">불러오는 중...</div>
+  </div>
+</main>
+
+<script>
+let currentFilter = 'open';
+
+async function loadRequests(status) {
+  const res = await fetch('/api/class-requests?status=' + status);
+  const data = await res.json();
+  const list = document.getElementById('requestList');
+
+  if (!data.requests || data.requests.length === 0) {
+    list.innerHTML = '<div class="text-center py-12 text-gray-400">아직 요청이 없습니다.</div>';
+    return;
+  }
+
+  list.innerHTML = data.requests.map(r => {
+    const statusColors = { open: 'bg-green-100 text-green-700', matching: 'bg-yellow-100 text-yellow-700', matched: 'bg-blue-100 text-blue-700', closed: 'bg-gray-100 text-gray-500' };
+    const statusLabels = { open: '모집중', matching: '매칭중', matched: '매칭완료', closed: '마감' };
+    const budget = r.budget_min || r.budget_max ? (r.budget_min ? Number(r.budget_min).toLocaleString() + '원' : '') + (r.budget_min && r.budget_max ? ' ~ ' : '') + (r.budget_max ? Number(r.budget_max).toLocaleString() + '원' : '') : '';
+    return '<a href="/class-requests/' + r.id + '" class="block bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition">' +
+      '<div class="flex items-start justify-between">' +
+        '<div class="flex-1">' +
+          '<div class="flex items-center gap-2 mb-2">' +
+            '<span class="px-2 py-0.5 rounded text-xs font-medium ' + (statusColors[r.status] || '') + '">' + (statusLabels[r.status] || r.status) + '</span>' +
+            (r.category_name ? '<span class="text-xs text-gray-400">' + r.category_name + '</span>' : '') +
+          '</div>' +
+          '<h3 class="font-semibold text-gray-900 mb-1">' + r.title + '</h3>' +
+          '<p class="text-sm text-gray-500 line-clamp-2">' + r.description + '</p>' +
+          '<div class="flex items-center gap-4 mt-3 text-xs text-gray-400">' +
+            '<span>' + r.author_name + '</span>' +
+            '<span>관심 ' + (r.interest_count || 0) + '</span>' +
+            '<span>지원 ' + (r.application_count || 0) + '</span>' +
+            (budget ? '<span>' + budget + '</span>' : '') +
+            '<span>' + new Date(r.created_at).toLocaleDateString('ko-KR') + '</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</a>';
+  }).join('');
+}
+
+function filterRequests(status) {
+  currentFilter = status;
+  document.querySelectorAll('[id^="filter"]').forEach(b => {
+    b.className = 'px-3 py-1.5 rounded-full text-sm font-medium ' + (b.id === 'filter' + status.charAt(0).toUpperCase() + status.slice(1) ? 'bg-primary-100 text-primary-700' : 'bg-gray-100 text-gray-600');
+  });
+  loadRequests(status);
+}
+
+function createRequest() {
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  if (!user) { if (typeof openAuthModal === 'function') openAuthModal('login'); else alert('로그인이 필요합니다.'); return; }
+  window.location.href = '/class-requests/new';
+}
+
+loadRequests('open');
+</script>
+${footerHTML}
+</body></html>`
+  return c.html(applyBranding(html, c.env))
+})
+
+// 수업 요청 작성 페이지
+app.get('/class-requests/new', async (c) => {
+  const { results: categories } = await c.env.DB.prepare('SELECT id, name FROM categories ORDER BY name').all()
+  const catOptions = (categories as any[]).map(cat => `<option value="${cat.id}">${cat.name}</option>`).join('')
+
+  const html = `${headHTML}
+${navHTML}
+<main class="max-w-2xl mx-auto px-4 py-8">
+  <h1 class="text-2xl font-bold text-gray-900 mb-6">수업 요청하기</h1>
+  <form id="requestForm" class="space-y-5">
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">수업 제목 <span class="text-red-500">*</span></label>
+      <input type="text" id="reqTitle" required class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="예: 파이썬 기초부터 배우고 싶어요">
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">상세 설명 <span class="text-red-500">*</span></label>
+      <textarea id="reqDesc" required rows="4" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="어떤 내용을 배우고 싶은지 자세히 적어주세요"></textarea>
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">카테고리</label>
+      <select id="reqCategory" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500">
+        <option value="">선택 안함</option>
+        ${catOptions}
+      </select>
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">희망 시간대</label>
+      <input type="text" id="reqSchedule" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="예: 평일 저녁 7시~9시">
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">최소 예산 (원)</label>
+        <input type="number" id="reqBudgetMin" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="예: 100000">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">최대 예산 (원)</label>
+        <input type="number" id="reqBudgetMax" class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="예: 300000">
+      </div>
+    </div>
+    <button type="submit" class="w-full py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium">요청 등록하기</button>
+  </form>
+</main>
+
+<script>
+document.getElementById('requestForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const token = localStorage.getItem('classin_token');
+  if (!token) { alert('로그인이 필요합니다.'); return; }
+
+  const body = {
+    title: document.getElementById('reqTitle').value,
+    description: document.getElementById('reqDesc').value,
+    categoryId: document.getElementById('reqCategory').value || null,
+    preferredSchedule: document.getElementById('reqSchedule').value || null,
+    budgetMin: document.getElementById('reqBudgetMin').value ? parseInt(document.getElementById('reqBudgetMin').value) : null,
+    budgetMax: document.getElementById('reqBudgetMax').value ? parseInt(document.getElementById('reqBudgetMax').value) : null
+  };
+
+  const res = await fetch('/api/class-requests', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (data.success) {
+    alert('수업 요청이 등록되었습니다!');
+    window.location.href = '/class-requests/' + data.id;
+  } else {
+    alert(data.error || '등록에 실패했습니다.');
+  }
+});
+</script>
+${footerHTML}
+</body></html>`
+  return c.html(applyBranding(html, c.env))
+})
+
+// 수업 요청 상세 페이지
+app.get('/class-requests/:id', async (c) => {
+  const id = parseInt(c.req.param('id'))
+
+  const request = await c.env.DB.prepare(`
+    SELECT cr.*, u.name as author_name, cat.name as category_name
+    FROM class_requests cr
+    LEFT JOIN users u ON cr.user_id = u.id
+    LEFT JOIN categories cat ON cr.category_id = cat.id
+    WHERE cr.id = ?
+  `).bind(id).first() as any
+
+  if (!request) return c.html('<h1>요청을 찾을 수 없습니다</h1>', 404)
+
+  const { results: applications } = await c.env.DB.prepare(`
+    SELECT id, applicant_name, bio, proposed_title, proposed_price, status, created_at
+    FROM class_request_applications WHERE request_id = ? AND status != 'draft'
+    ORDER BY created_at ASC
+  `).bind(id).all() as any
+
+  const statusColors: Record<string,string> = { open: 'bg-green-100 text-green-700', matching: 'bg-yellow-100 text-yellow-700', matched: 'bg-blue-100 text-blue-700', closed: 'bg-gray-100 text-gray-500' }
+  const statusLabels: Record<string,string> = { open: '모집중', matching: '매칭중', matched: '매칭완료', closed: '마감' }
+  const budget = request.budget_min || request.budget_max ? `${request.budget_min ? Number(request.budget_min).toLocaleString() + '원' : ''}${request.budget_min && request.budget_max ? ' ~ ' : ''}${request.budget_max ? Number(request.budget_max).toLocaleString() + '원' : ''}` : '미정'
+
+  const applicationsHTML = applications.length > 0
+    ? (applications as any[]).map((a: any) => `
+      <div class="bg-gray-50 rounded-lg p-4">
+        <div class="flex items-center justify-between mb-2">
+          <span class="font-medium">${a.applicant_name}</span>
+          <span class="text-xs px-2 py-0.5 rounded ${a.status === 'approved' ? 'bg-green-100 text-green-700' : a.status === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'}">${a.status === 'approved' ? '승인됨' : a.status === 'rejected' ? '거절됨' : '검토중'}</span>
+        </div>
+        <p class="text-sm text-gray-600 mb-1">${a.bio || ''}</p>
+        ${a.proposed_title ? `<p class="text-sm"><strong>제안 수업:</strong> ${a.proposed_title}</p>` : ''}
+        ${a.proposed_price ? `<p class="text-sm"><strong>제안 가격:</strong> ${Number(a.proposed_price).toLocaleString()}원</p>` : ''}
+      </div>`).join('')
+    : '<p class="text-gray-400 text-sm">아직 지원자가 없습니다.</p>'
+
+  const html = `${headHTML}
+${navHTML}
+<main class="max-w-3xl mx-auto px-4 py-8">
+  <a href="/class-requests" class="text-sm text-gray-500 hover:text-gray-700 mb-4 inline-block">&larr; 게시판으로</a>
+
+  <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+    <div class="flex items-center gap-2 mb-3">
+      <span class="px-2 py-0.5 rounded text-xs font-medium ${statusColors[request.status] || ''}">${statusLabels[request.status] || request.status}</span>
+      ${request.category_name ? `<span class="text-xs text-gray-400">${request.category_name}</span>` : ''}
+    </div>
+    <h1 class="text-xl font-bold text-gray-900 mb-3">${request.title}</h1>
+    <p class="text-gray-600 whitespace-pre-line mb-4">${request.description}</p>
+
+    <div class="grid grid-cols-2 gap-4 text-sm">
+      <div><span class="text-gray-400">요청자:</span> <span class="font-medium">${request.author_name}</span></div>
+      <div><span class="text-gray-400">예산:</span> <span class="font-medium">${budget}</span></div>
+      ${request.preferred_schedule ? `<div><span class="text-gray-400">희망 시간:</span> <span class="font-medium">${request.preferred_schedule}</span></div>` : ''}
+      <div><span class="text-gray-400">관심:</span> <span class="font-medium" id="interestCount">${request.interest_count || 0}</span>명</div>
+    </div>
+
+    <div class="flex gap-3 mt-6">
+      <button id="interestBtn" onclick="toggleInterest(${request.id})" class="flex-1 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 transition text-sm font-medium">
+        ❤️ 나도 듣고 싶어요
+      </button>
+      ${request.status === 'open' ? `<button id="applyBtn" onclick="startApply(${request.id})" class="flex-1 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition text-sm font-medium">🎓 가르쳐보겠습니다</button>` : ''}
+    </div>
+  </div>
+
+  <div class="bg-white rounded-xl border border-gray-200 p-6">
+    <h2 class="font-semibold text-gray-900 mb-4">지원자 (${applications.length}명)</h2>
+    <div class="space-y-3">${applicationsHTML}</div>
+  </div>
+</main>
+
+<script>
+const REQUEST_USER_ID = ${request.user_id};
+
+// 본인 요청이면 지원 버튼 숨김
+(function() {
+  const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  if (user && user.id === REQUEST_USER_ID) {
+    const btn = document.getElementById('applyBtn');
+    if (btn) btn.style.display = 'none';
+  }
+})();
+
+async function toggleInterest(requestId) {
+  const token = localStorage.getItem('classin_token');
+  if (!token) { if (typeof openAuthModal === 'function') openAuthModal('login'); else alert('로그인이 필요합니다.'); return; }
+
+  const res = await fetch('/api/class-requests/' + requestId + '/interest', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token }
+  });
+  const data = await res.json();
+  const count = document.getElementById('interestCount');
+  const current = parseInt(count.textContent);
+  count.textContent = data.interested ? current + 1 : Math.max(0, current - 1);
+  document.getElementById('interestBtn').textContent = data.interested ? '💔 관심 취소' : '❤️ 나도 듣고 싶어요';
+}
+
+function startApply(requestId) {
+  const token = localStorage.getItem('classin_token');
+  if (!token) { if (typeof openAuthModal === 'function') openAuthModal('login'); else alert('로그인이 필요합니다.'); return; }
+  window.location.href = '/class-requests/' + requestId + '/apply';
+}
+</script>
+${footerHTML}
+</body></html>`
+  return c.html(applyBranding(html, c.env))
+})
+
+// ==================== 강사 지원 에이전트 채팅 페이지 ====================
+app.get('/class-requests/:id/apply', async (c) => {
+  const requestId = parseInt(c.req.param('id'))
+  const request = await c.env.DB.prepare('SELECT id, title, description FROM class_requests WHERE id = ?').bind(requestId).first() as any
+  if (!request) return c.html('<h1>요청을 찾을 수 없습니다</h1>', 404)
+
+  const html = `${headHTML}
+${navHTML}
+<main class="max-w-2xl mx-auto px-4 py-8">
+  <a href="/class-requests/${requestId}" class="text-sm text-gray-500 hover:text-gray-700 mb-4 inline-block">&larr; 요청으로 돌아가기</a>
+
+  <div class="bg-primary-50 rounded-lg p-4 mb-6">
+    <p class="text-sm text-primary-600 font-medium">요청: ${request.title}</p>
+    <p class="text-xs text-primary-500 mt-1">${request.description.substring(0, 100)}${request.description.length > 100 ? '...' : ''}</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+    <div class="bg-gray-50 px-5 py-3 border-b">
+      <h2 class="font-semibold text-gray-900">수업 설계 도우미</h2>
+      <p class="text-xs text-gray-500">단계별로 수업 정보를 입력해주세요</p>
+    </div>
+
+    <div id="chatMessages" class="p-5 space-y-4 max-h-96 overflow-y-auto" style="min-height:200px;">
+      <div class="text-center py-8 text-gray-400">로딩 중...</div>
+    </div>
+
+    <div id="chatInputArea" class="border-t p-4">
+      <div class="flex gap-2">
+        <input type="text" id="chatInput" class="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" placeholder="메시지를 입력하세요..." onkeydown="if(event.key==='Enter')sendChat()">
+        <button onclick="sendChat()" class="px-5 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium">전송</button>
+      </div>
+      <div class="flex gap-2 mt-2">
+        <button onclick="sendPrev()" class="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-100">← 이전 단계</button>
+        <span id="stepIndicator" class="text-xs text-gray-400 ml-auto py-1">Step 0/6</span>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+const REQUEST_ID = ${requestId};
+let applicationId = null;
+let conversationStep = 0;
+
+function addMessage(text, isAgent) {
+  const container = document.getElementById('chatMessages');
+  const div = document.createElement('div');
+  div.className = isAgent
+    ? 'flex items-start gap-3'
+    : 'flex items-start gap-3 justify-end';
+
+  const bubble = isAgent
+    ? '<div class="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center flex-shrink-0"><span class="text-sm">🤖</span></div><div class="bg-gray-100 rounded-xl rounded-tl-sm px-4 py-3 max-w-xs"><p class="text-sm text-gray-800 whitespace-pre-line">' + text + '</p></div>'
+    : '<div class="bg-primary-600 text-white rounded-xl rounded-tr-sm px-4 py-3 max-w-xs"><p class="text-sm whitespace-pre-line">' + text + '</p></div>';
+
+  div.innerHTML = bubble;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function updateStep(step) {
+  conversationStep = step;
+  document.getElementById('stepIndicator').textContent = 'Step ' + Math.min(step, 6) + '/6';
+}
+
+async function initChat() {
+  const token = localStorage.getItem('classin_token');
+  if (!token) { alert('로그인이 필요합니다.'); window.location.href = '/class-requests/' + REQUEST_ID; return; }
+
+  // 지원 시작 또는 기존 지원 이어하기
+  const res = await fetch('/api/class-requests/' + REQUEST_ID + '/apply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }
+  });
+  const data = await res.json();
+  if (data.error) { alert(data.error); window.location.href = '/class-requests/' + REQUEST_ID; return; }
+
+  applicationId = data.applicationId;
+  conversationStep = data.conversationStep;
+
+  document.getElementById('chatMessages').innerHTML = '';
+
+  if (data.status === 'submitted') {
+    addMessage('지원이 이미 제출되었습니다. 관리자 검토를 기다려주세요.', true);
+    document.getElementById('chatInputArea').style.display = 'none';
+    return;
+  }
+
+  // 기존 대화 복원을 위해 상태 조회
+  if (conversationStep > 0) {
+    const appRes = await fetch('/api/applications/' + applicationId, {
+      headers: { Authorization: 'Bearer ' + token }
+    });
+    const appData = await appRes.json();
+    addMessage(appData.agentMessage || data.agentMessage, true);
+  } else {
+    addMessage(data.agentMessage, true);
+  }
+  updateStep(conversationStep);
+}
+
+async function sendChat() {
+  const input = document.getElementById('chatInput');
+  const message = input.value.trim();
+  if (!message || !applicationId) return;
+
+  addMessage(message, false);
+  input.value = '';
+
+  const token = localStorage.getItem('classin_token');
+  const res = await fetch('/api/applications/' + applicationId + '/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+    body: JSON.stringify({ message: message })
+  });
+  const data = await res.json();
+
+  if (data.error) { addMessage(data.error, true); return; }
+
+  addMessage(data.agentMessage, true);
+  updateStep(data.conversationStep);
+
+  if (data.status === 'submitted') {
+    document.getElementById('chatInputArea').style.display = 'none';
+  }
+}
+
+function sendPrev() {
+  document.getElementById('chatInput').value = '이전';
+  sendChat();
+}
+
+initChat();
+</script>
+${footerHTML}
+</body></html>`
+  return c.html(applyBranding(html, c.env))
+})
+
 // ==================== Class Detail Page ====================
 app.get('/class/:slug', async (c) => {
-  const slug = c.req.param('slug')
+  const slug = decodeURIComponent(c.req.param('slug'))
   const cls = await c.env.DB.prepare(`
     SELECT c.*, i.id as iid, i.display_name as instructor_name, i.profile_image as instructor_image, i.bio as instructor_bio, i.specialty as instructor_specialty, i.total_students as instructor_total_students, i.total_classes as instructor_total_classes, i.rating as instructor_rating, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug
     FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id WHERE c.slug = ?
@@ -8918,7 +10073,7 @@ function activateLessonButtons() {
   console.log('[Enrollment Check] courseId:', courseId, 'userId:', user.id);
 
   // 강사/관리자는 모든 강의 접근 가능
-  if (user.role === 'instructor' || user.role === 'admin') {
+  if (user.role === 'instructor' || user.role === 'admin' || user.is_instructor === 1) {
     activateLessonButtons();
     return;
   }
@@ -8969,7 +10124,7 @@ async function checkEnrollmentAndWatch(lessonId, courseId) {
   }
 
   // 강사 본인 코스면 바로 시청
-  if (user.role === 'instructor' || user.role === 'admin') {
+  if (user.role === 'instructor' || user.role === 'admin' || user.is_instructor === 1) {
     openWatchWindow(lessonId);
     return;
   }
@@ -9003,7 +10158,7 @@ async function checkEnrollmentAndJoin(lessonId, courseId) {
   }
 
   // 강사/관리자면 바로 입장
-  if (user.role === 'instructor' || user.role === 'admin') {
+  if (user.role === 'instructor' || user.role === 'admin' || user.is_instructor === 1) {
     if (joinUrl) window.open(joinUrl, '_blank');
     else alert('입장 링크가 아직 없습니다.');
     return;
@@ -9159,7 +10314,7 @@ document.getElementById('reviewContent')?.addEventListener('input', checkReviewR
 // 수강생인지 확인하여 리뷰 폼 표시
 (function initReviewForm() {
   const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
-  if (!user || user.role === 'instructor') return;
+  if (!user || user.role === 'instructor' || user.is_instructor === 1) return;
   // 수강 여부 확인
   fetch('/api/user/' + user.id + '/enrollments')
     .then(r => r.json())
@@ -9186,7 +10341,7 @@ document.getElementById('reviewContent')?.addEventListener('input', checkReviewR
 // 강사는 다른 코스 수강 불가
 document.addEventListener('DOMContentLoaded', () => {
   const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
-  if (user && user.role === 'instructor') {
+  if (user && (user.role === 'instructor' || user.is_instructor === 1)) {
     const disableBtn = (btn, text) => {
       if (!btn) return;
       btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); };
@@ -9264,7 +10419,7 @@ if (!currentUser) {
   // 헤더에 사용자 정보 표시
   var authArea = document.getElementById('authArea');
   if (authArea) {
-    var mypageUrl = currentUser.role === 'instructor' ? '/instructor/mypage' : '/mypage';
+    var mypageUrl = (currentUser.role === 'instructor' || currentUser.is_instructor === 1) ? '/instructor/mypage' : '/mypage';
     authArea.innerHTML = '<a href="' + mypageUrl + '" class="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-gray-50 transition-all">' +
       '<div class="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center">' +
         '<span class="text-sm font-bold text-primary-600">' + initial + '</span>' +
@@ -9876,7 +11031,7 @@ function closePlayer() {
     // 로컬스토리지에서 토큰과 사용자 정보 가져오기
     let token = localStorage.getItem('classin_token');
     const user = JSON.parse(localStorage.getItem('classin_user') || 'null');
-    const isAdminOrInstructor = user && (user.role === 'admin' || user.role === 'instructor');
+    const isAdminOrInstructor = user && (user.role === 'admin' || user.role === 'instructor' || user.is_instructor === 1);
 
     // 토큰이 없거나 구 형식이면 재로그인 필요
     if (user && (!token || token.startsWith('demo_token_'))) {
@@ -10805,6 +11960,22 @@ app.get('/admin', async (c) => {
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Class Matching Management Link -->
+    <div class="bg-white rounded-xl p-6 shadow-sm mb-8">
+      <a href="/admin/applications" class="flex items-center justify-between hover:bg-gray-50 -m-6 p-6 rounded-xl transition-all">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
+            <i class="fas fa-handshake text-purple-500 text-xl"></i>
+          </div>
+          <div>
+            <h2 class="text-lg font-bold text-gray-800">수업 매칭 관리</h2>
+            <p class="text-sm text-gray-500">수업 요청 지원 검토 및 승인</p>
+          </div>
+        </div>
+        <i class="fas fa-chevron-right text-gray-400"></i>
+      </a>
     </div>
 
     <!-- Homepage Management Link -->
@@ -13443,8 +14614,9 @@ app.get('/admin/users', async (c) => {
       }
 
       tbody.innerHTML = data.users.map(user => {
-        const roleLabel = user.role === 'admin' ? '관리자' : user.role === 'instructor' ? '강사' : '학생';
-        const roleColor = user.role === 'admin' ? 'bg-red-100 text-red-700' : user.role === 'instructor' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600';
+        const isInstr = user.role === 'instructor' || user.is_instructor === 1;
+        const roleLabel = user.role === 'admin' ? '관리자' : isInstr ? '강사' : '학생';
+        const roleColor = user.role === 'admin' ? 'bg-red-100 text-red-700' : isInstr ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600';
         return \`
           <tr class="hover:bg-gray-50">
             <td class="px-4 py-3 text-sm">\${user.id}</td>
@@ -13861,6 +15033,205 @@ async function processExpiredEnrollments(db: D1Database) {
 
   return { processed: expiredEnrollments.length, returned: returnedCount }
 }
+
+// ==================== 관리자: 수업 매칭 관리 페이지 ====================
+app.get('/admin/applications', async (c) => {
+  const authRedirect = await requireAdminAuth(c)
+  if (authRedirect) return authRedirect
+
+  const html = `${headHTML}
+<body class="bg-gray-50 min-h-screen">
+  <div class="max-w-6xl mx-auto px-4 py-8">
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <a href="/admin" class="text-sm text-gray-500 hover:text-gray-700">&larr; 관리자 대시보드</a>
+        <h1 class="text-2xl font-bold text-gray-900 mt-1">수업 매칭 관리</h1>
+      </div>
+    </div>
+
+    <div class="flex gap-2 mb-6">
+      <button onclick="loadApps('submitted')" id="tabSubmitted" class="px-4 py-2 rounded-lg text-sm font-medium bg-primary-100 text-primary-700">검토 대기</button>
+      <button onclick="loadApps('approved')" id="tabApproved" class="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-600">승인됨</button>
+      <button onclick="loadApps('rejected')" id="tabRejected" class="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-600">거절됨</button>
+      <button onclick="loadApps('draft')" id="tabDraft" class="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-600">작성중</button>
+    </div>
+
+    <div id="appList" class="space-y-4">
+      <div class="text-center py-12 text-gray-400">불러오는 중...</div>
+    </div>
+
+    <!-- 상세 모달 -->
+    <div id="detailModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 hidden flex items-center justify-center p-4">
+      <div class="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-lg font-bold">지원 상세</h2>
+          <button onclick="closeDetail()" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+        </div>
+        <div id="detailContent"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+let currentTab = 'submitted';
+
+async function loadApps(status) {
+  currentTab = status;
+  ['Submitted','Approved','Rejected','Draft'].forEach(s => {
+    const el = document.getElementById('tab' + s);
+    el.className = 'px-4 py-2 rounded-lg text-sm font-medium ' + (s.toLowerCase() === status ? 'bg-primary-100 text-primary-700' : 'bg-gray-100 text-gray-600');
+  });
+
+  const res = await fetch('/api/admin/applications?status=' + status);
+  const data = await res.json();
+  const list = document.getElementById('appList');
+
+  if (!data.applications || data.applications.length === 0) {
+    list.innerHTML = '<div class="text-center py-12 text-gray-400">지원이 없습니다.</div>';
+    return;
+  }
+
+  list.innerHTML = data.applications.map(function(a) {
+    var stepLabel = a.automation_step > 0 ? ' (자동화: ' + a.automation_step + '/7)' : '';
+    var errorBadge = a.automation_error ? '<span class="text-xs text-red-500 ml-2">오류</span>' : '';
+    return '<div class="bg-white rounded-xl border p-5 hover:shadow-md transition cursor-pointer" onclick="showDetail(' + a.id + ')">' +
+      '<div class="flex items-center justify-between mb-2">' +
+        '<span class="font-semibold text-gray-900">' + escHtml(a.applicant_name) + '</span>' +
+        '<span class="text-xs text-gray-400">' + new Date(a.created_at).toLocaleDateString('ko-KR') + '</span>' +
+      '</div>' +
+      '<p class="text-sm text-gray-500 mb-1">요청: ' + escHtml(a.request_title) + '</p>' +
+      (a.proposed_title ? '<p class="text-sm">제안: <strong>' + escHtml(a.proposed_title) + '</strong>' + (a.proposed_price ? ' (' + Number(a.proposed_price).toLocaleString() + '원)' : '') + '</p>' : '') +
+      '<div class="flex items-center gap-2 mt-2">' +
+        '<span class="text-xs px-2 py-0.5 rounded bg-gray-100">' + a.status + stepLabel + '</span>' +
+        errorBadge +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function escHtml(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function showDetail(id) {
+  var res = await fetch('/api/admin/applications/' + id);
+  var data = await res.json();
+  var a = data.application;
+  var days = a.proposed_schedule_days ? JSON.parse(a.proposed_schedule_days) : [];
+  var dayNames = { mon: '월', tue: '화', wed: '수', thu: '목', fri: '금', sat: '토', sun: '일' };
+  var dayStr = days.map(function(d) { return dayNames[d] || d; }).join(', ');
+  var levelNames = { beginner: '초급', intermediate: '중급', advanced: '고급', all: '전체' };
+
+  var html = '<div class="space-y-4">' +
+    '<div class="bg-gray-50 rounded-lg p-4">' +
+      '<h3 class="font-medium text-sm text-gray-500 mb-2">원래 요청</h3>' +
+      '<p class="font-semibold">' + escHtml(a.request_title) + '</p>' +
+      '<p class="text-sm text-gray-600">' + escHtml(a.request_description) + '</p>' +
+      '<p class="text-xs text-gray-400 mt-1">요청자: ' + escHtml(a.requester_name) + ' (' + escHtml(a.requester_email) + ')</p>' +
+    '</div>' +
+    '<div class="bg-blue-50 rounded-lg p-4">' +
+      '<h3 class="font-medium text-sm text-blue-600 mb-2">지원자 정보</h3>' +
+      '<p><strong>' + escHtml(a.applicant_name) + '</strong> (' + escHtml(a.applicant_user_email) + ')</p>' +
+      '<p class="text-sm text-gray-600 mt-1">' + escHtml(a.bio) + '</p>' +
+    '</div>' +
+    '<div class="grid grid-cols-2 gap-3 text-sm">' +
+      '<div><span class="text-gray-400">수업 제목:</span> <strong>' + escHtml(a.proposed_title || '-') + '</strong></div>' +
+      '<div><span class="text-gray-400">난이도:</span> ' + escHtml(levelNames[a.proposed_level] || a.proposed_level || '-') + '</div>' +
+      '<div><span class="text-gray-400">구성:</span> ' + (a.proposed_lessons_count || '-') + '회 x ' + (a.proposed_duration_minutes || '-') + '분</div>' +
+      '<div><span class="text-gray-400">수강료:</span> ' + (a.proposed_price ? Number(a.proposed_price).toLocaleString() + '원' : '-') + '</div>' +
+      '<div><span class="text-gray-400">시작일:</span> ' + escHtml(a.proposed_schedule_start || '-') + '</div>' +
+      '<div><span class="text-gray-400">스케줄:</span> ' + escHtml(dayStr || '-') + ' ' + escHtml(a.proposed_schedule_time || '') + '</div>' +
+    '</div>';
+
+  if (a.automation_step > 0) {
+    var steps = ['', '강사 등록', '코스 생성', 'ClassIn 코스', '세션 생성', 'ID 저장', '매칭 완료', '알림'];
+    html += '<div class="bg-yellow-50 rounded-lg p-4">' +
+      '<h3 class="font-medium text-sm text-yellow-700 mb-2">자동화 진행 상태</h3>' +
+      '<div class="flex gap-1">';
+    for (var i = 1; i <= 7; i++) {
+      var color = i < a.automation_step ? 'bg-green-500' : i === a.automation_step ? (a.automation_error ? 'bg-red-500' : 'bg-yellow-500') : 'bg-gray-300';
+      html += '<div class="flex-1 h-2 rounded ' + color + '" title="Step ' + i + ': ' + steps[i] + '"></div>';
+    }
+    html += '</div><p class="text-xs text-gray-500 mt-2">현재: Step ' + a.automation_step + ' - ' + steps[a.automation_step] + '</p>';
+    if (a.automation_error) {
+      html += '<p class="text-xs text-red-500 mt-1">' + escHtml(a.automation_error) + '</p>';
+    }
+    html += '</div>';
+  }
+
+  // 액션 버튼
+  if (a.status === 'submitted') {
+    html += '<div class="flex gap-3 pt-2">' +
+      '<button onclick="approveApp(' + a.id + ')" class="flex-1 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium">승인</button>' +
+      '<button onclick="rejectApp(' + a.id + ')" class="flex-1 py-2.5 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 font-medium">거절</button>' +
+    '</div>';
+  }
+  if (a.automation_error) {
+    html += '<button onclick="retryApp(' + a.id + ')" class="w-full py-2.5 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 font-medium mt-2">재시도 (Step ' + a.automation_step + '부터)</button>';
+  }
+  if (a.created_class_id) {
+    html += '<p class="text-xs text-green-600 mt-2">생성된 코스 ID: ' + a.created_class_id + '</p>';
+  }
+
+  html += '</div>';
+  document.getElementById('detailContent').innerHTML = html;
+  document.getElementById('detailModal').classList.remove('hidden');
+}
+
+function closeDetail() {
+  document.getElementById('detailModal').classList.add('hidden');
+}
+
+async function approveApp(id) {
+  if (!confirm('이 지원을 승인하시겠습니까? 자동으로 수업이 생성됩니다.')) return;
+  var res = await fetch('/api/admin/applications/' + id + '/approve', { method: 'POST' });
+  var data = await res.json();
+  if (data.success) {
+    alert('승인 완료! 코스 ID: ' + data.classId);
+    closeDetail();
+    loadApps(currentTab);
+  } else {
+    alert('오류: ' + (data.error || '알 수 없는 오류'));
+    closeDetail();
+    loadApps(currentTab);
+  }
+}
+
+async function rejectApp(id) {
+  var note = prompt('거절 사유를 입력해주세요:');
+  if (note === null) return;
+  var res = await fetch('/api/admin/applications/' + id + '/reject', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note: note })
+  });
+  var data = await res.json();
+  if (data.success) {
+    alert('거절되었습니다.');
+    closeDetail();
+    loadApps(currentTab);
+  } else {
+    alert('오류: ' + data.error);
+  }
+}
+
+async function retryApp(id) {
+  if (!confirm('실패한 단계부터 재시도하시겠습니까?')) return;
+  var res = await fetch('/api/admin/applications/' + id + '/retry', { method: 'POST' });
+  var data = await res.json();
+  if (data.success) {
+    alert('재시도 성공!');
+    closeDetail();
+    loadApps(currentTab);
+  } else {
+    alert('오류: ' + data.error);
+    showDetail(id);
+  }
+}
+
+loadApps('submitted');
+</script>
+</body></html>`
+  return c.html(html)
+})
 
 // ==================== 홈페이지 관리 페이지 ====================
 app.get('/admin/homepage', async (c) => {

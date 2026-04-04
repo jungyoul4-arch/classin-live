@@ -87,8 +87,8 @@ beforeAll(async () => {
 // 1. MIGRATION APPLICATION TESTS
 // ═══════════════════════════════════════════════════════════════════
 describe("Migration Application", () => {
-  it("should have run all 20 migration files", () => {
-    expect(_migrationResults).toHaveLength(20);
+  it("should have run all 22 migration files", () => {
+    expect(_migrationResults).toHaveLength(22);
   });
 
   it.each(MIGRATION_FILES.map((f, i) => [f, i]))(
