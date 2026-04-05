@@ -1,33 +1,28 @@
-# 세션 로그 — 2026-04-05 (세션 7: Q&A 게시판)
+# 세션 로그 — 2026-04-06 (세션 9: 듀얼 롤 수정 + 배포)
 
 ## 완료 작업
 
-### 1. Phase 3: 수업 Q&A 게시판
-- **마이그레이션**: `migrations/0023_class_comments.sql` — `class_comments` 테이블 (parent_id 트리 구조)
-- **API 3개**: GET/POST/DELETE `/api/classes/:id/comments`
-  - 질문(parent_id=null) + 답글(parent_id 지정) 1단계 트리
-  - 강사 자동 판별 (is_instructor 플래그)
-  - JWT 인증, 본인/admin만 삭제 가능
-- **UI**: 수업 상세 페이지(`/class/:slug`) Reviews 섹션 아래 Q&A 섹션 추가
-  - 로그인 시 질문 작성 폼, 비로그인 시 로그인 유도
-  - 인라인 답글 폼, 강사 배지, 삭제 기능
-  - XSS 방지 (escHtml)
-- **DB 적용**: live + teachers 양쪽 D1에 마이그레이션 완료
-- **배포**: live + teachers 양쪽 배포 완료
+### 1. 듀얼 롤 버그 수정 (teachers 사이트)
+- **문제**: 박상혁이 "코칭의 이해" (강사: 이유리) 수강 시 "강사는 수강신청 불가" 표시
+- **원인**: `user.role === 'instructor'`이면 모든 코스에서 수강 차단하는 로직
+- **플랫폼 철학**: 누구든 강사이자 학생. 두 역할을 동시에 가짐
+- **수정 3곳**:
+  1. 11054-11066행: 강사 전체 수강 차단 블록 삭제 (자기 코스만 11040행에서 처리)
+  2. 11012행: 리뷰 폼 — 강사 체크 → 해당 코스 강사 본인만 제외
+  3. 8722행: 마이페이지 탭 — 강사도 모든 탭(수강/완료/구독/주문) 표시
+- **주의**: live 사이트는 강사/학생 구분이 필요하므로 이 수정 미적용
 
-### 참고: 배포 시 한글 커밋 메시지 이슈
-- Cloudflare Pages API가 한글 커밋 메시지에서 UTF-8 에러 발생
-- `npx wrangler pages deploy --commit-message "영문메시지"` 로 우회
+### 2. 모바일 비밀번호 입력 수정 반영
+- `git pull origin claude/fix-mobile-password-input-jOqjF` 병합
+- teachers + live 양쪽 배포 완료
 
-## 커밋
-- 아직 커밋하지 않음 (git push 전 확인 필요)
+## 배포 이력
+- teachers: 2회 배포 (듀얼 롤 수정 / 모바일 비밀번호 수정 반영)
+- live: 1회 배포 (모바일 비밀번호 수정만 반영)
 
-## 프로덕션 상태
-- **live**: classin-live.jung-youl.com — 배포 완료
-- **teachers**: classin-teachers.jung-youl.com — 배포 완료
+## 발견된 이슈
+- Playwright MCP 브라우저 세션이 끊어지면 재연결 불가 → `/clear` 또는 `claude mcp restart playwright` 필요
 
 ## 다음 세션에서 할 일
-- [ ] 자동화 전체 E2E 재테스트 (새 요청 → 지원 → 승인 → 수업생성 → 강사입장)
-- [ ] ClassIn 강사 권한 실제 테스트
-- [ ] Q&A 프로덕션 동작 확인
-- [ ] git commit & push
+- [ ] 사용자가 발견한 추가 오류 확인 (Playwright로 함께 브라우저 보면서)
+- [ ] live와 teachers 사이트 간 역할 로직 차이 정리
