@@ -374,7 +374,7 @@ async function getClassInLoginUrl(
   classId: string,
   deviceType: number = 1,  // 1=PC, 2=iOS, 3=Android
   identity: number = 1  // 1=학생, 2=청강생, 3=강사/조교
-): Promise<{ url?: string; error?: string; rawResponse?: string }> {
+): Promise<{ url?: string; error?: string; rawResponse?: string; requiresManualLogin?: boolean }> {
   const timestamp = Math.floor(Date.now() / 1000)
   const safeKey = await generateSafeKey(config.SECRET, timestamp)
 
@@ -976,6 +976,69 @@ const INSTRUCTOR_DEFAULT_PASSWORD = 'ClassIn2024!'
 
 function generateDefaultPassword(): string {
   return INSTRUCTOR_DEFAULT_PASSWORD
+}
+
+// 모바일 기기 감지 및 ClassIn deviceType 반환
+function detectDeviceType(userAgent: string): number {
+  const ua = userAgent.toLowerCase()
+  if (/iphone|ipad|ipod/.test(ua)) return 2  // iOS
+  if (/android/.test(ua)) return 3  // Android
+  return 1  // PC
+}
+
+function isMobileDevice(userAgent: string): boolean {
+  return /iphone|ipad|ipod|android|mobile/i.test(userAgent)
+}
+
+// 모바일에서 수동 로그인 필요 시 비밀번호를 보여주는 중간 페이지
+function renderMobileLoginPage(classInUrl: string, password: string, telephone?: string): string {
+  return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClassIn 입장</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen flex items-center justify-center p-4">
+  <div class="bg-white rounded-2xl shadow-lg p-6 max-w-sm w-full text-center">
+    <h2 class="text-xl font-bold mb-2">ClassIn 수업 입장</h2>
+    <p class="text-gray-600 text-sm mb-4">ClassIn 로그인 페이지에서 아래 비밀번호를 입력해주세요.</p>
+
+    <div class="bg-gray-100 rounded-xl p-4 mb-4">
+      <p class="text-xs text-gray-500 mb-1">비밀번호</p>
+      <div class="flex items-center justify-center gap-2">
+        <span id="pw" class="text-2xl font-mono font-bold tracking-wider">${password}</span>
+        <button onclick="copyPw()" class="bg-green-500 text-white text-xs px-3 py-1.5 rounded-lg active:bg-green-600">복사</button>
+      </div>
+      <p id="copied" class="text-green-600 text-xs mt-1 hidden">복사됨!</p>
+    </div>
+
+    ${telephone ? `<p class="text-xs text-gray-400 mb-4">전화번호: ${telephone}</p>` : ''}
+
+    <a href="${classInUrl}" class="block bg-green-500 text-white font-bold py-3 px-6 rounded-xl text-lg active:bg-green-600">
+      ClassIn 입장하기
+    </a>
+    <p class="text-xs text-gray-400 mt-3">비밀번호를 복사한 후 입장하기를 눌러주세요.</p>
+  </div>
+  <script>
+    function copyPw() {
+      navigator.clipboard.writeText('${password}').then(function() {
+        document.getElementById('copied').classList.remove('hidden');
+        setTimeout(function() { document.getElementById('copied').classList.add('hidden'); }, 2000);
+      }).catch(function() {
+        var t = document.createElement('textarea');
+        t.value = '${password}';
+        document.body.appendChild(t);
+        t.select();
+        document.execCommand('copy');
+        document.body.removeChild(t);
+        document.getElementById('copied').classList.remove('hidden');
+      });
+    }
+  </script>
+</body>
+</html>`
 }
 
 // Register instructor with ClassIn and get UID (강사 ClassIn 등록)
@@ -5505,12 +5568,15 @@ app.get('/api/classin/enter/:sessionId', async (c) => {
   console.log('addStudentToCourse result:', JSON.stringify(courseResult))
 
   // Step 3: Generate fresh login URL with token
+  const userAgent = c.req.header('user-agent') || ''
+  const deviceType = detectDeviceType(userAgent)
+  const isMobile = isMobileDevice(userAgent)
   const loginUrlResult = await getClassInLoginUrl(
     classInConfig,
     studentUid,
     session.classin_course_id,
     session.classin_class_id,
-    1  // PC
+    deviceType
   )
 
   if (loginUrlResult.url) {
@@ -5519,6 +5585,9 @@ app.get('/api/classin/enter/:sessionId', async (c) => {
       .bind(loginUrlResult.url, sessionId).run()
 
     if (shouldRedirect) {
+      if (isMobile && loginUrlResult.requiresManualLogin) {
+        return c.html(renderMobileLoginPage(loginUrlResult.url, INSTRUCTOR_DEFAULT_PASSWORD, accountUid))
+      }
       return c.redirect(loginUrlResult.url)
     }
     return c.json({ success: true, url: loginUrlResult.url })
@@ -5654,16 +5723,24 @@ app.get('/api/classin/lesson-enter/:lessonId', async (c) => {
   console.log('lesson-enter addStudentToCourse:', JSON.stringify(courseResult))
 
   // 7. 로그인 URL 생성
+  const userAgent = c.req.header('user-agent') || ''
+  const deviceType = detectDeviceType(userAgent)
+  const isMobile = isMobileDevice(userAgent)
   const loginUrlResult = await getClassInLoginUrl(
     classInConfig,
     studentUid,
     lesson.classin_course_id,
     lesson.classin_class_id,
-    1  // PC
+    deviceType
   )
 
   if (loginUrlResult.url) {
-    if (shouldRedirect) return c.redirect(loginUrlResult.url)
+    if (shouldRedirect) {
+      if (isMobile && loginUrlResult.requiresManualLogin) {
+        return c.html(renderMobileLoginPage(loginUrlResult.url, INSTRUCTOR_DEFAULT_PASSWORD, studentUid))
+      }
+      return c.redirect(loginUrlResult.url)
+    }
     return c.json({ success: true, url: loginUrlResult.url })
   }
 
@@ -5820,12 +5897,15 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
   // Generate fresh login URL with token
   // mode=instructor: identity=3 (강사), mode=observer: identity=2 (청강생)
   const identity = mode === 'observer' ? 2 : 3
+  const userAgent = c.req.header('user-agent') || ''
+  const deviceType = detectDeviceType(userAgent)
+  const isMobile = isMobileDevice(userAgent)
   const loginUrlResult = await getClassInLoginUrl(
     classInConfig,
     instructorUid,  // 가상계정 ClassIn UID 사용
     lesson.classin_course_id,
     lesson.classin_class_id,
-    1,  // PC
+    deviceType,
     identity  // 강사(3) 또는 청강생(2)
   )
   console.log('getClassInLoginUrl result:', JSON.stringify(loginUrlResult))
@@ -5840,6 +5920,10 @@ app.get('/api/classin/instructor-enter/:lessonId', async (c) => {
       .bind(loginUrlResult.url, lesson.class_id).run()
 
     if (shouldRedirect) {
+      // 모바일 + 수동 로그인 필요 시 비밀번호를 보여주는 중간 페이지
+      if (isMobile && loginUrlResult.requiresManualLogin) {
+        return c.html(renderMobileLoginPage(loginUrlResult.url, INSTRUCTOR_DEFAULT_PASSWORD, virtualAccount))
+      }
       // authTicket이 있으면 바로 리다이렉트 (자동 로그인)
       return c.redirect(loginUrlResult.url)
     }
