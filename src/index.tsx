@@ -2619,6 +2619,134 @@ app.post('/api/test-account/enroll', async (c) => {
   }
 })
 
+// Free course enrollment (무료 코스 수강신청 - 가격 0원)
+app.post('/api/free-enroll', async (c) => {
+  try {
+    const { userId, classId } = await c.req.json()
+
+    if (!userId || !classId) {
+      return c.json({ error: 'userId와 classId가 필요합니다.' }, 400)
+    }
+
+    // Get user info
+    const user = await c.env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first() as any
+    if (!user) {
+      return c.json({ error: '사용자를 찾을 수 없습니다.' }, 404)
+    }
+
+    // Get class info and verify it's free
+    const classInfo = await c.env.DB.prepare('SELECT * FROM classes WHERE id = ?').bind(classId).first() as any
+    if (!classInfo) {
+      return c.json({ error: '코스를 찾을 수 없습니다.' }, 404)
+    }
+
+    if (classInfo.price && classInfo.price > 0) {
+      return c.json({ error: '유료 코스는 이 API로 수강신청할 수 없습니다.' }, 400)
+    }
+
+    const expiresAt = classInfo.schedule_end || null
+
+    // Check if already enrolled
+    const existingEnrollment = await c.env.DB.prepare(
+      'SELECT id, classin_account_uid FROM enrollments WHERE user_id = ? AND class_id = ?'
+    ).bind(userId, classId).first() as any
+
+    if (existingEnrollment) {
+      // Already enrolled - return success with existing data
+      const classinSession = await c.env.DB.prepare(
+        'SELECT classin_join_url FROM classin_sessions WHERE enrollment_id = ? ORDER BY created_at DESC LIMIT 1'
+      ).bind(existingEnrollment.id).first() as any
+
+      return c.json({
+        success: true,
+        message: '이미 수강 중인 코스입니다.',
+        alreadyEnrolled: true,
+        classinSession: classinSession ? {
+          joinUrl: classinSession.classin_join_url,
+          isDemo: !c.env.CLASSIN_SID
+        } : null
+      })
+    }
+
+    // Create enrollment with expires_at
+    await c.env.DB.prepare(`
+      INSERT INTO enrollments (user_id, class_id, expires_at, status)
+      VALUES (?, ?, ?, 'active')
+    `).bind(userId, classId, expiresAt).run()
+    const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, classId).first() as any
+
+    // Create free order (amount = 0)
+    const txId = `FREE_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    await c.env.DB.prepare(`
+      INSERT INTO orders (user_id, order_type, class_id, amount, payment_method, payment_status, transaction_id)
+      VALUES (?, 'class', ?, 0, 'free', 'completed', ?)
+    `).bind(userId, classId, txId).run()
+
+    // Remove from cart if exists
+    await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, classId).run()
+
+    // Update student count
+    await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(classId).run()
+
+    const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+      ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+      : null
+
+    // Assign virtual account to this enrollment
+    let virtualAccountInfo: { accountUid: string; password: string; isRegistered: boolean } | null = null
+    if (enrollment?.id) {
+      try {
+        const assignResult = await assignVirtualAccountToEnrollment(
+          c.env.DB,
+          enrollment.id,
+          userId,
+          user.name || 'Student',
+          classInConfig
+        )
+        if (assignResult.success) {
+          virtualAccountInfo = {
+            accountUid: assignResult.accountUid || '',
+            password: assignResult.password || '',
+            isRegistered: assignResult.isRegistered || false
+          }
+        }
+      } catch (e) {
+        console.error('Virtual account assignment error:', e)
+      }
+    }
+
+    // Create ClassIn session
+    let classinSession: ClassInSessionResult | null = null
+    try {
+      classinSession = await createClassInSession(
+        c.env.DB,
+        classId,
+        userId,
+        enrollment?.id || 0,
+        classInConfig || undefined
+      )
+    } catch (e) {
+      console.error('ClassIn session creation error:', e)
+    }
+
+    return c.json({
+      success: true,
+      message: '무료 코스 수강신청이 완료되었습니다!',
+      virtualAccount: virtualAccountInfo,
+      classinSession: classinSession ? {
+        joinUrl: classinSession.joinUrl,
+        liveUrl: classinSession.liveUrl,
+        courseId: classinSession.courseId,
+        classId: classinSession.classId,
+        isDemo: !c.env.CLASSIN_SID
+      } : null
+    })
+  } catch (e: any) {
+    console.error('Free enroll error:', e)
+    return c.json({ error: e.message || '수강신청 처리 중 오류가 발생했습니다.' }, 500)
+  }
+})
+
 // Admin API authentication middleware
 app.use('/api/admin/*', async (c, next) => {
   if (c.req.path === '/api/admin/login' && c.req.method === 'POST') {
@@ -8222,6 +8350,12 @@ function openPaymentModal(classData) {
     return;
   }
 
+  // 무료 코스 (가격 0원)는 결제 없이 바로 수강 등록
+  if (classData.id && (!classData.price || classData.price === 0)) {
+    freeEnroll(classData.id);
+    return;
+  }
+
   paymentData = classData;
   document.getElementById('paymentModal').classList.remove('hidden');
   document.getElementById('paymentOrderSummary').innerHTML = \`
@@ -8851,6 +8985,35 @@ async function testEnroll(classId) {
     }
   } catch (e) {
     console.error('testEnroll error:', e);
+    alert('서버 오류가 발생했습니다: ' + (e.message || e));
+  }
+}
+
+// 무료 코스 수강신청 (가격 0원)
+async function freeEnroll(classId) {
+  if (!currentUser) { openAuthModal('login'); return; }
+
+  try {
+    const res = await fetch('/api/free-enroll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: currentUser.id, classId: classId })
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      if (data.classinSession && data.classinSession.joinUrl) {
+        const joinUrl = data.classinSession.joinUrl;
+        showEnrollSuccessModal(data.message, joinUrl, data.classinSession.isDemo);
+      } else {
+        alert(data.message);
+        window.location.reload();
+      }
+    } else {
+      alert(data.error || '수강신청에 실패했습니다.');
+    }
+  } catch (e) {
+    console.error('freeEnroll error:', e);
     alert('서버 오류가 발생했습니다: ' + (e.message || e));
   }
 }
@@ -9756,18 +9919,20 @@ ${navHTML}
               <span class="text-xs text-gray-500 whitespace-nowrap">${cls.current_students}/${cls.max_students}명</span>
             </div>
             
-            <!-- 결제 옵션 탭 -->
+            <!-- 결제 옵션 탭 (유료 코스만) -->
+            ${cls.price > 0 ? `
             <div class="flex gap-1 mb-3 bg-gray-100 rounded-xl p-1">
               <button onclick="switchPayOption('onetime')" id="payOptOnetime" class="pay-opt-tab flex-1 py-2 text-xs font-semibold rounded-lg bg-white text-dark-900 shadow-sm transition-all">1회 결제</button>
               <button onclick="switchPayOption('monthly')" id="payOptMonthly" class="pay-opt-tab flex-1 py-2 text-xs font-semibold rounded-lg text-gray-500 transition-all">
                 <i class="fas fa-sync-alt mr-0.5 text-[10px]"></i>월간 자동결제
               </button>
             </div>
+            ` : ''}
             
             <!-- 1회 결제 -->
             <div id="payOnetime">
-              <button id="btnEnrollOnetime" onclick='openPaymentModal(${JSON.stringify({id:cls.id, slug:cls.slug, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30 mb-2">
-                <i class="fas fa-credit-card mr-2"></i>바로 수강하기 · ${cls.price.toLocaleString()}원
+              <button id="btnEnrollOnetime" onclick='openPaymentModal(${JSON.stringify({id:cls.id, slug:cls.slug, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 ${cls.price > 0 ? 'bg-primary-500 hover:bg-primary-600' : 'bg-green-500 hover:bg-green-600'} text-white font-bold rounded-xl transition-all shadow-lg ${cls.price > 0 ? 'shadow-primary-500/30' : 'shadow-green-500/30'} mb-2">
+                ${cls.price > 0 ? `<i class="fas fa-credit-card mr-2"></i>바로 수강하기 · ${cls.price.toLocaleString()}원` : '<i class="fas fa-gift mr-2"></i>무료 수강하기'}
               </button>
             </div>
 
