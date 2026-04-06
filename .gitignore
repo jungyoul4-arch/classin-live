@@ -13,9 +13,6 @@ dist/
 # Wrangler local state
 .wrangler/
 
-# Wrangler config (use environment-specific files instead)
-wrangler.jsonc
-wrangler.toml
 
 # dotenv environment variables file
 .env

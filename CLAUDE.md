@@ -14,9 +14,8 @@
 
 ## 폴더 구조
 - `src/index.tsx` - 메인 앱 (모든 API + 페이지)
-- `migrations/` - D1 SQL 마이그레이션 파일들 (0001~0021)
-- `wrangler.live.jsonc` - 프로덕션(live) 환경 설정
-- `wrangler.teachers.jsonc` - 강사용 환경 설정
+- `migrations/` - D1 SQL 마이그레이션 파일들
+- `wrangler.jsonc` - Cloudflare Pages 환경 설정
 
 ## 실수 노트 (Mistake Log)
 ### 2026-04-03: 레거시 비밀번호 형식 누락
