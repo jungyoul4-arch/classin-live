@@ -1,4 +1,4 @@
--- Q&A 게시판 (수업별 질문/답변)
+﻿-- Q&A 寃뚯떆??(?섏뾽蹂?吏덈Ц/?듬?)
 CREATE TABLE IF NOT EXISTS class_comments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
@@ -10,5 +10,5 @@ CREATE TABLE IF NOT EXISTS class_comments (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE INDEX idx_class_comments_class ON class_comments(class_id, created_at DESC);
-CREATE INDEX idx_class_comments_parent ON class_comments(parent_id);
+CREATE INDEX IF NOT EXISTS idx_class_comments_class ON class_comments(class_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_class_comments_parent ON class_comments(parent_id);

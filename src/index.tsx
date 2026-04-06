@@ -10397,6 +10397,10 @@ app.get('/class/:slug', async (c) => {
   const whatYouLearn = cls.what_you_learn ? cls.what_you_learn.split('|') : []
   const requirements = cls.requirements ? cls.requirements.split('|') : []
 
+  // 코스 강의 자료 파싱
+  let courseMaterials: any[] = []
+  try { courseMaterials = JSON.parse(cls.materials || '[]') } catch(e) {}
+
   const html = `${headHTML}
 <body class="bg-gray-50 min-h-screen">
 ${navHTML}
@@ -10555,6 +10559,22 @@ ${navHTML}
         <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-info-circle text-blue-500 mr-2"></i>코스 소개</h2>
         <p class="text-sm text-dark-600 leading-relaxed whitespace-pre-line">${cls.description}</p>
       </div>
+
+      <!-- Course Materials (강의 자료) -->
+      ${courseMaterials.length > 0 ? `
+      <div class="bg-white rounded-2xl p-6 border border-gray-100">
+        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-paperclip text-amber-500 mr-2"></i>강의 자료 <span class="text-sm font-normal text-gray-500">(${courseMaterials.length}개)</span></h2>
+        <div class="flex flex-wrap gap-3">
+          ${courseMaterials.map((m: any) => `
+            <a href="${m.url}" target="_blank" download class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded-xl text-sm text-amber-800 transition-all">
+              <i class="fas fa-file-download text-amber-500"></i>
+              <span>${m.filename || '다운로드'}</span>
+            </a>
+          `).join('')}
+        </div>
+        <p class="text-xs text-gray-400 mt-3"><i class="fas fa-info-circle mr-1"></i>수강 등록 후 자료를 다운로드할 수 있습니다</p>
+      </div>
+      ` : ''}
 
       <!-- Scheduled Lessons (강의 목록) -->
       ${scheduledLessons.length > 0 ? `
@@ -13442,6 +13462,43 @@ app.get('/api/materials/*', async (c) => {
   }
 })
 
+// ==================== Course Materials API ====================
+
+// Get course-level materials
+app.get('/api/admin/classes/:classId/materials', async (c) => {
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+  if (!isLoggedIn) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  const classId = parseInt(c.req.param('classId'))
+  const cls = await c.env.DB.prepare('SELECT materials FROM classes WHERE id = ?')
+    .bind(classId).first()
+  if (!cls) return c.json({ error: '코스를 찾을 수 없습니다.' }, 404)
+
+  let materials = []
+  try { materials = JSON.parse(cls.materials || '[]') } catch(e) {}
+  return c.json({ materials })
+})
+
+// Update course-level materials
+app.post('/api/admin/classes/:classId/materials', async (c) => {
+  const sessionToken = getSessionToken(c)
+  const isLoggedIn = await checkAdminSession(c.env.DB, sessionToken)
+  if (!isLoggedIn) return c.json({ error: '로그인이 필요합니다.' }, 401)
+
+  const classId = parseInt(c.req.param('classId'))
+  const { materials } = await c.req.json()
+
+  const cls = await c.env.DB.prepare('SELECT id FROM classes WHERE id = ?')
+    .bind(classId).first()
+  if (!cls) return c.json({ error: '코스를 찾을 수 없습니다.' }, 404)
+
+  await c.env.DB.prepare('UPDATE classes SET materials = ?, updated_at = datetime("now") WHERE id = ?')
+    .bind(JSON.stringify(materials || []), classId).run()
+
+  return c.json({ success: true, materials })
+})
+
 // ==================== Admin Page - Virtual Account Management ====================
 
 // Auth check helper for admin pages
@@ -13880,25 +13937,16 @@ app.get('/admin', async (c) => {
           <div id="recordedCurriculumItems" class="space-y-2"></div>
         </div>
 
-        <!-- 강의 자료 -->
-        <div>
-          <div class="flex items-center justify-between mb-2">
-            <label class="text-xs font-semibold text-gray-600"><i class="fas fa-paperclip mr-1"></i>강의 자료 <span class="text-gray-400 font-normal">(최대 5개)</span></label>
-            <label class="text-xs text-purple-500 hover:text-purple-700 font-medium cursor-pointer">
-              <i class="fas fa-cloud-upload-alt mr-1"></i>파일 추가
-              <input type="file" class="hidden" accept=".pdf,.doc,.docx,.ppt,.pptx,.hwp,.zip,.xls,.xlsx,.txt" onchange="uploadRecordedMaterial(this)">
-            </label>
-          </div>
-          <div id="recordedMaterialsList" class="space-y-1"></div>
-        </div>
-
         <!-- 동영상 업로드 -->
-        <div class="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center" id="uploadArea">
+        <div class="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center cursor-pointer transition-all" id="uploadArea"
+          ondragover="event.preventDefault(); this.classList.add('border-purple-500','bg-purple-50')"
+          ondragleave="this.classList.remove('border-purple-500','bg-purple-50')"
+          ondrop="event.preventDefault(); this.classList.remove('border-purple-500','bg-purple-50'); handleVideoDrop(event)">
           <input type="file" id="recordedVideoFile" accept="video/*" class="hidden" onchange="handleVideoSelect(this)">
           <input type="hidden" id="recordedStreamUid" value="">
           <div id="uploadPlaceholder">
             <i class="fas fa-cloud-upload-alt text-4xl text-gray-400 mb-2"></i>
-            <p class="text-gray-600 mb-2">동영상 파일을 선택하세요</p>
+            <p class="text-gray-600 mb-2">동영상 파일을 선택하거나 드래그하세요</p>
             <button type="button" onclick="document.getElementById('recordedVideoFile').click()" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg transition-all">
               <i class="fas fa-folder-open mr-1"></i>파일 선택
             </button>
@@ -13923,6 +13971,44 @@ app.get('/admin', async (c) => {
       <div class="flex gap-3 mt-6">
         <button onclick="closeRecordedLessonModal()" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg">취소</button>
         <button id="createRecordedLessonBtn" onclick="confirmCreateRecordedLesson()" disabled class="flex-1 py-2 bg-purple-500 hover:bg-purple-600 text-white font-semibold rounded-lg disabled:bg-gray-400 disabled:cursor-not-allowed">생성</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- Course Materials Modal (강의 자료 추가) -->
+  <div id="courseMaterialsModal" class="fixed inset-0 z-50 hidden overflow-y-auto">
+    <div class="absolute inset-0 bg-black/50" onclick="closeCourseMaterialsModal()"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl max-h-[90vh] overflow-y-auto">
+      <h3 class="text-lg font-bold mb-4"><i class="fas fa-paperclip text-amber-500 mr-2"></i>강의 자료 추가</h3>
+      <div class="space-y-4">
+        <div>
+          <p class="text-sm text-gray-500 mb-1">코스</p>
+          <p class="font-medium" id="materialCourseName">-</p>
+        </div>
+        <input type="hidden" id="materialCourseId" value="">
+
+        <!-- 자료 업로드 -->
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <label class="text-sm font-semibold text-gray-700"><i class="fas fa-file-alt mr-1"></i>강의 자료 목록</label>
+            <label class="text-xs text-amber-600 hover:text-amber-700 font-medium cursor-pointer px-3 py-1.5 bg-amber-50 rounded-lg">
+              <i class="fas fa-cloud-upload-alt mr-1"></i>파일 추가
+              <input type="file" class="hidden" accept=".pdf,.doc,.docx,.ppt,.pptx,.hwp,.zip,.xls,.xlsx,.txt" onchange="uploadCourseMaterial(this)">
+            </label>
+          </div>
+          <p class="text-xs text-gray-400 mb-3">PDF, DOCX, PPTX, HWP, ZIP, XLS, TXT (최대 50MB) - 드래그앤드롭 가능</p>
+          <div id="courseMaterialsList" class="space-y-2 min-h-[60px] border border-dashed border-gray-200 rounded-lg p-3 cursor-pointer transition-all"
+            ondragover="event.preventDefault(); this.classList.add('border-amber-500','bg-amber-50')"
+            ondragleave="this.classList.remove('border-amber-500','bg-amber-50')"
+            ondrop="event.preventDefault(); this.classList.remove('border-amber-500','bg-amber-50'); handleMaterialDrop(event)">
+            <p class="text-sm text-gray-400 text-center py-4" id="noMaterialsText">등록된 자료가 없습니다</p>
+          </div>
+        </div>
+      </div>
+      <div class="flex gap-3 mt-6">
+        <button onclick="closeCourseMaterialsModal()" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg">취소</button>
+        <button onclick="saveCourseMaterials()" class="flex-1 py-2 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-lg">저장</button>
       </div>
     </div>
   </div>
@@ -13973,7 +14059,11 @@ app.get('/admin', async (c) => {
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">프로필 이미지</label>
           <div class="flex items-center gap-3">
-            <div id="newInstructorImagePreview" class="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center overflow-hidden border-2 border-dashed border-gray-300">
+            <div id="newInstructorImagePreview" class="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center overflow-hidden border-2 border-dashed border-gray-300 cursor-pointer transition-all"
+              onclick="document.getElementById('newInstructorImageFile').click()"
+              ondragover="event.preventDefault(); this.classList.add('border-indigo-500','bg-indigo-50')"
+              ondragleave="this.classList.remove('border-indigo-500','bg-indigo-50')"
+              ondrop="event.preventDefault(); this.classList.remove('border-indigo-500','bg-indigo-50'); handleInstructorImageDrop(event, 'new')">
               <i class="fas fa-user text-gray-400 text-xl"></i>
             </div>
             <div class="flex-1">
@@ -13982,7 +14072,7 @@ app.get('/admin', async (c) => {
               <button type="button" onclick="document.getElementById('newInstructorImageFile').click()" class="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-lg transition-all">
                 <i class="fas fa-upload mr-1"></i>이미지 업로드
               </button>
-              <p class="text-xs text-gray-400 mt-1">JPG, PNG (최대 5MB)</p>
+              <p class="text-xs text-gray-400 mt-1">JPG, PNG (최대 5MB) - 드래그앤드롭 가능</p>
             </div>
           </div>
         </div>
@@ -14354,6 +14444,25 @@ app.get('/admin', async (c) => {
     }
 
     // 강사 이미지 미리보기
+    // 강사 이미지 드롭 핸들러
+    function handleInstructorImageDrop(event, mode) {
+      const file = event.dataTransfer.files[0];
+      if (!file) return;
+      if (!file.type.startsWith('image/')) {
+        showModal('오류', '이미지 파일만 업로드할 수 있습니다.');
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        showModal('오류', '이미지 크기는 5MB 이하여야 합니다.');
+        return;
+      }
+      const fileInput = document.getElementById(mode + 'InstructorImageFile');
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(file);
+      fileInput.files = dataTransfer.files;
+      previewInstructorImage(mode);
+    }
+
     function previewInstructorImage(mode) {
       const fileInput = document.getElementById(mode + 'InstructorImageFile');
       const preview = document.getElementById(mode + 'InstructorImagePreview');
@@ -14865,7 +14974,9 @@ app.get('/admin', async (c) => {
 
       const recordedBtn = '<button onclick="event.stopPropagation(); openRecordedLessonModal(' + courseId + ', \\'' + safeTitle + '\\', \\'' + safeInstructor + '\\')" class="flex items-center gap-2 px-4 py-2.5 bg-purple-500 hover:bg-purple-600 text-white text-sm font-medium rounded-xl transition-all shadow-sm"><i class="fas fa-cloud-upload-alt"></i>녹화 강의 추가</button>';
 
-      return '<div class="flex items-center justify-center gap-3">' + liveBtn + recordedBtn + '</div>';
+      const materialsBtn = '<button onclick="event.stopPropagation(); openCourseMaterialsModal(' + courseId + ', \\'' + safeTitle + '\\')" class="flex items-center gap-2 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white text-sm font-medium rounded-xl transition-all shadow-sm"><i class="fas fa-paperclip"></i>강의 자료 추가</button>';
+
+      return '<div class="flex items-center justify-center gap-3">' + liveBtn + recordedBtn + materialsBtn + '</div>';
     }
 
     function toggleEnterMenu(lessonId) {
@@ -15269,16 +15380,6 @@ app.get('/admin', async (c) => {
           </div>
           <div id="curriculumItems_\${rowId}" class="space-y-2"></div>
         </div>
-        <div>
-          <div class="flex items-center justify-between mb-2">
-            <label class="text-xs font-semibold text-gray-600"><i class="fas fa-paperclip mr-1"></i>강의 자료 <span class="text-gray-400 font-normal">(최대 5개)</span></label>
-            <label class="text-xs text-purple-500 hover:text-purple-700 font-medium cursor-pointer">
-              <i class="fas fa-cloud-upload-alt mr-1"></i>파일 추가
-              <input type="file" class="hidden" accept=".pdf,.doc,.docx,.ppt,.pptx,.hwp,.zip,.xls,.xlsx,.txt" onchange="uploadMaterial(this, \${rowId})">
-            </label>
-          </div>
-          <div id="materialsList_\${rowId}" class="space-y-1"></div>
-        </div>
       \`;
       container.appendChild(row);
     }
@@ -15399,6 +15500,148 @@ app.get('/admin', async (c) => {
 
     let recordedCurrCounter = 0;
 
+
+    // ==================== Course Materials Functions ====================
+    let courseMaterials = [];
+
+    async function openCourseMaterialsModal(courseId, courseName) {
+      document.getElementById('materialCourseId').value = courseId;
+      document.getElementById('materialCourseName').textContent = courseName;
+      courseMaterials = [];
+
+      // Load existing materials
+      try {
+        const res = await fetch('/api/admin/classes/' + courseId + '/materials');
+        const data = await res.json();
+        if (data.materials) {
+          courseMaterials = data.materials;
+        }
+      } catch (e) {
+        console.error('Failed to load materials:', e);
+      }
+
+      renderCourseMaterialsList();
+      document.getElementById('courseMaterialsModal').classList.remove('hidden');
+    }
+
+    function closeCourseMaterialsModal() {
+      document.getElementById('courseMaterialsModal').classList.add('hidden');
+      courseMaterials = [];
+    }
+
+    function renderCourseMaterialsList() {
+      const container = document.getElementById('courseMaterialsList');
+      const noText = document.getElementById('noMaterialsText');
+
+      if (courseMaterials.length === 0) {
+        container.innerHTML = '<p class="text-sm text-gray-400 text-center py-4" id="noMaterialsText">등록된 자료가 없습니다</p>';
+        return;
+      }
+
+      container.innerHTML = courseMaterials.map(function(m, idx) {
+        return '<div class="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">' +
+          '<div class="flex items-center gap-2 min-w-0">' +
+            '<i class="fas fa-file text-amber-500"></i>' +
+            '<span class="text-sm truncate">' + m.filename + '</span>' +
+          '</div>' +
+          '<button onclick="removeCourseMaterial(' + idx + ')" class="text-red-400 hover:text-red-600 p-1">' +
+            '<i class="fas fa-times"></i>' +
+          '</button>' +
+        '</div>';
+      }).join('');
+    }
+
+    // 강의 자료 드롭 핸들러
+    function handleMaterialDrop(event) {
+      const files = event.dataTransfer.files;
+      if (!files.length) return;
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (file.size > 50 * 1024 * 1024) {
+          showModal('오류', file.name + ': 파일 크기는 50MB 이하여야 합니다.');
+          continue;
+        }
+        uploadCourseMaterialFile(file);
+      }
+    }
+
+    async function uploadCourseMaterialFile(file) {
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const res = await fetch('/api/admin/upload-material', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        if (data.success) {
+          courseMaterials.push({ url: data.url, filename: data.filename });
+          renderCourseMaterialsList();
+        } else {
+          showModal('오류', data.error || '업로드 실패: ' + file.name);
+        }
+      } catch (e) {
+        showModal('오류', '업로드 중 오류가 발생했습니다.');
+      }
+    }
+
+    async function uploadCourseMaterial(input) {
+      if (!input.files[0]) return;
+      const file = input.files[0];
+
+      if (file.size > 50 * 1024 * 1024) {
+        alert('파일 크기는 50MB 이하여야 합니다.');
+        input.value = '';
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        const res = await fetch('/api/admin/upload-material', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        if (data.success) {
+          courseMaterials.push({ url: data.url, filename: data.filename });
+          renderCourseMaterialsList();
+        } else {
+          alert(data.error || '업로드 실패');
+        }
+      } catch (e) {
+        alert('업로드 중 오류가 발생했습니다.');
+      }
+      input.value = '';
+    }
+
+    function removeCourseMaterial(idx) {
+      courseMaterials.splice(idx, 1);
+      renderCourseMaterialsList();
+    }
+
+    async function saveCourseMaterials() {
+      const courseId = document.getElementById('materialCourseId').value;
+      try {
+        const res = await fetch('/api/admin/classes/' + courseId + '/materials', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ materials: courseMaterials })
+        });
+        const data = await res.json();
+        if (data.success) {
+          closeCourseMaterialsModal();
+          alert('강의 자료가 저장되었습니다.');
+        } else {
+          alert(data.error || '저장 실패');
+        }
+      } catch (e) {
+        alert('저장 중 오류가 발생했습니다.');
+      }
+    }
+
+    // ==================== Recorded Lesson Functions ====================
     function openRecordedLessonModal(classId, className, instructorName) {
       document.getElementById('recordedClassName').textContent = className;
       document.getElementById('recordedInstructor').textContent = instructorName;
@@ -15406,7 +15649,7 @@ app.get('/admin', async (c) => {
       document.getElementById('recordedLessonTitle').value = '';
       document.getElementById('recordedLessonDesc').value = '';
       document.getElementById('recordedCurriculumItems').innerHTML = '';
-      document.getElementById('recordedMaterialsList').innerHTML = '';
+      
       recordedCurrCounter = 0;
       resetVideoUpload();
       document.getElementById('recordedLessonModal').classList.remove('hidden');
@@ -15500,6 +15743,21 @@ app.get('/admin', async (c) => {
     // TUS 업로드 설정
     const TUS_CHUNK_SIZE = 50 * 1024 * 1024; // 50MB per TUS chunk
     const TUS_UPLOAD_THRESHOLD = 200 * 1024 * 1024; // 200MB 이상이면 TUS 사용
+
+    // 동영상 드롭 핸들러
+    function handleVideoDrop(event) {
+      const file = event.dataTransfer.files[0];
+      if (!file) return;
+      if (!file.type.startsWith('video/')) {
+        showModal('오류', '동영상 파일만 업로드할 수 있습니다.');
+        return;
+      }
+      const fileInput = document.getElementById('recordedVideoFile');
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(file);
+      fileInput.files = dataTransfer.files;
+      handleVideoSelect(fileInput);
+    }
 
     async function handleVideoSelect(input) {
       const file = input.files[0];
@@ -15762,13 +16020,8 @@ app.get('/admin', async (c) => {
         if (t) curriculumItems.push({ title: t, desc: d });
       });
 
-      // 자료 수집
+      // 자료는 코스 레벨에서 관리
       const materials = [];
-      document.getElementById('recordedMaterialsList').querySelectorAll('.material-item').forEach(function(item) {
-        const url = item.querySelector('.mat-url')?.value;
-        const name = item.querySelector('.mat-name')?.value;
-        if (url && name) materials.push({ url: url, filename: name });
-      });
 
       if (!streamUid) {
         showModal('오류', '동영상을 먼저 업로드해주세요.');
