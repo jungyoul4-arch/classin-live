@@ -3205,7 +3205,7 @@ app.post('/api/admin/stream/tus-upload-url', async (c) => {
           'Authorization': `Bearer ${c.env.CF_STREAM_TOKEN}`,
           'Tus-Resumable': '1.0.0',
           'Upload-Length': uploadLength.toString(),
-          'Upload-Metadata': `name ${btoa(filename)}, requiresignedurls ${btoa('false')}, maxDurationSeconds ${btoa('7200')}`
+          'Upload-Metadata': `name ${btoa(filename)}, requireSignedURLs ${btoa('false')}, maxDurationSeconds ${btoa('7200')}`
         }
       }
     )
@@ -3823,7 +3823,12 @@ app.get('/api/lessons/:lessonId/stream-url', async (c) => {
 
   // 서명 키가 없으면 비디오 설정을 업데이트하여 서명 요구 끄기
   if (!streamConfig.signingKeyId || !streamConfig.signingKeyJwk) {
-    await updateStreamVideoSettings(streamConfig, lesson.stream_uid, { requireSignedURLs: false })
+    const updateResult = await updateStreamVideoSettings(streamConfig, lesson.stream_uid, { requireSignedURLs: false })
+    if (!updateResult.success) {
+      console.error('Failed to disable requireSignedURLs:', updateResult.error)
+    }
+    // 설정 변경이 적용되도록 잠시 대기
+    await new Promise(resolve => setTimeout(resolve, 500))
   }
 
   const signedUrl = await getSignedStreamUrl(streamConfig, lesson.stream_uid, 3600)
