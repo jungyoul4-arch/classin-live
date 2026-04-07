@@ -14077,7 +14077,7 @@ app.get('/admin', async (c) => {
               <img src="\${thumbnail}" alt="" class="w-16 h-10 object-cover rounded bg-gray-200" onerror="this.onerror=null; this.src='data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2760%27 height=%2740%27%3E%3Crect fill=%27%23e5e7eb%27 width=%27100%25%27 height=%27100%25%27/%3E%3C/svg%3E'">
             </td>
             <td class="px-3 py-2">
-              <div class="font-medium text-sm line-clamp-1 max-w-[200px]">\${cls.title}</div>
+              <div class="font-medium text-sm line-clamp-2 max-w-[300px]" title="\${cls.title}">\${cls.title}</div>
               <div class="text-xs text-gray-400">\${cls.category_name || ''}</div>
             </td>
             <td class="px-3 py-2 text-sm">\${cls.instructor_name || '-'}</td>
