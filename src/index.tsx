@@ -11046,7 +11046,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // 강의 목록 항목 반투명 비활성화
     document.querySelectorAll('.lesson-item').forEach(el => {
       el.style.opacity = '0.5';
-      el.style.pointerEvents = 'none';
     });
     // 시청가능 → 시청불가능 텍스트 변경
     document.querySelectorAll('.lesson-status-badge').forEach(el => {
@@ -11056,7 +11055,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // 강의 액션 버튼 비활성화
     document.querySelectorAll('.lesson-action-btn-el').forEach(el => {
       el.disabled = true;
-      el.style.opacity = '0.5';
       el.style.cursor = 'not-allowed';
       el.onclick = function(e) { e.preventDefault(); alert('해당 콘텐츠는 권한이 필요합니다.'); };
       if (el.tagName === 'A') { el.removeAttribute('href'); }
@@ -14491,7 +14489,7 @@ app.get('/admin', async (c) => {
         // 권한 라벨 표시
         const labelColors = { blue: 'bg-blue-100 text-blue-700', green: 'bg-green-100 text-green-700', red: 'bg-red-100 text-red-700', yellow: 'bg-yellow-100 text-yellow-700', purple: 'bg-purple-100 text-purple-700', gray: 'bg-gray-100 text-gray-600', indigo: 'bg-indigo-100 text-indigo-700' };
         const labelsHtml = (cls.labels || []).length > 0
-          ? (cls.labels || []).map(l => '<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ' + (labelColors[l.color] || labelColors.gray) + '">' + l.display_name + '</span>').join(' ')
+          ? (cls.labels || []).map(l => '<span class="px-1.5 py-0.5 rounded text-xs font-medium ' + (labelColors[l.color] || labelColors.gray) + '">' + l.display_name + '</span>').join(' ')
           : '<span class="text-gray-300 text-xs">-</span>';
 
         // 강의 수 표시
