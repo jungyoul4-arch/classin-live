@@ -2097,6 +2097,9 @@ app.get('/api/user/:userId/wishlist', async (c) => {
 // Add to wishlist
 app.post('/api/wishlist', async (c) => {
   const { userId, classId } = await c.req.json()
+  if (userId && classId && !(await checkLabelAccess(c.env.DB, userId, classId))) {
+    return c.json({ error: '해당 콘텐츠에 대한 권한이 없습니다.' }, 403)
+  }
   try {
     await c.env.DB.prepare('INSERT OR IGNORE INTO wishlist (user_id, class_id) VALUES (?, ?)').bind(userId, classId).run()
     return c.json({ success: true })
@@ -2128,6 +2131,9 @@ app.get('/api/user/:userId/cart', async (c) => {
 // Add to cart
 app.post('/api/cart', async (c) => {
   const { userId, classId } = await c.req.json()
+  if (userId && classId && !(await checkLabelAccess(c.env.DB, userId, classId))) {
+    return c.json({ error: '해당 콘텐츠에 대한 권한이 없습니다.' }, 403)
+  }
   try {
     await c.env.DB.prepare('INSERT OR IGNORE INTO cart (user_id, class_id) VALUES (?, ?)').bind(userId, classId).run()
     return c.json({ success: true })
@@ -2642,6 +2648,11 @@ app.post('/api/free-enroll', async (c) => {
 
     if (classInfo.price && classInfo.price > 0) {
       return c.json({ error: '유료 코스는 이 API로 수강신청할 수 없습니다.' }, 400)
+    }
+
+    // 라벨 기반 접근 제어
+    if (!(await checkLabelAccess(c.env.DB, userId, classId))) {
+      return c.json({ error: '해당 콘텐츠에 대한 권한이 없습니다.' }, 403)
     }
 
     const expiresAt = classInfo.schedule_end || null
@@ -3750,6 +3761,11 @@ app.get('/api/lessons/:lessonId/stream-url', async (c) => {
 
   // 무료 코스인 경우 결제 확인 생략
   const isFree = !lesson.course_price
+
+  // 라벨 기반 접근 제어 (관리자/강사 면제)
+  if (!isAdmin && !isInstructor && !(await checkLabelAccess(c.env.DB, userId, lesson.class_id))) {
+    return c.json({ error: '해당 콘텐츠에 대한 권한이 없습니다.', requireLabel: true }, 403)
+  }
 
   // 관리자/강사/무료 코스는 결제 확인 없이 바로 재생
   if (!isAdmin && !isInstructor && !isFree) {
@@ -5272,8 +5288,32 @@ app.get('/api/admin/users', async (c) => {
     FROM users
   `).first() as any
 
+  // 각 사용자의 라벨 조회
+  const userIds = results.map((u: any) => u.id)
+  let userLabels: Record<number, any[]> = {}
+  if (userIds.length > 0) {
+    try {
+      const { results: labelResults } = await c.env.DB.prepare(`
+        SELECT ula.user_id, ul.id as label_id, ul.name, ul.display_name, ul.color
+        FROM user_label_assignments ula
+        JOIN user_labels ul ON ula.label_id = ul.id
+        WHERE ula.user_id IN (${userIds.map(() => '?').join(',')})
+      `).bind(...userIds).all()
+      for (const lr of (labelResults || [])) {
+        const uid = (lr as any).user_id
+        if (!userLabels[uid]) userLabels[uid] = []
+        userLabels[uid].push(lr)
+      }
+    } catch (e) { /* user_labels 테이블 미존재 시 무시 */ }
+  }
+
+  const usersWithLabels = results.map((u: any) => ({
+    ...u,
+    labels: userLabels[u.id] || []
+  }))
+
   return c.json({
-    users: results,
+    users: usersWithLabels,
     total: countResult?.total || 0,
     stats: {
       total: statsResult?.total || 0,
@@ -5346,6 +5386,121 @@ app.delete('/api/admin/users/:id', async (c) => {
 
   return c.json({ success: true, message: '회원이 삭제되었습니다.' })
 })
+
+// ============================================
+// 관리자: 회원 라벨 관리
+// ============================================
+
+// 전체 라벨 목록
+app.get('/api/admin/labels', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM user_labels ORDER BY id').all()
+  return c.json(results)
+})
+
+// 사용자의 라벨 목록
+app.get('/api/admin/users/:id/labels', async (c) => {
+  const userId = parseInt(c.req.param('id'))
+  const { results } = await c.env.DB.prepare(`
+    SELECT ul.id, ul.name, ul.display_name, ul.color, ula.assigned_at
+    FROM user_label_assignments ula
+    JOIN user_labels ul ON ula.label_id = ul.id
+    WHERE ula.user_id = ?
+    ORDER BY ula.assigned_at
+  `).bind(userId).all()
+  return c.json(results)
+})
+
+// 사용자에 라벨 부여
+app.post('/api/admin/users/:id/labels', async (c) => {
+  const userId = parseInt(c.req.param('id'))
+  const { labelId } = await c.req.json()
+
+  const user = await c.env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(userId).first()
+  if (!user) return c.json({ error: '회원을 찾을 수 없습니다.' }, 404)
+
+  const label = await c.env.DB.prepare('SELECT id FROM user_labels WHERE id = ?').bind(labelId).first()
+  if (!label) return c.json({ error: '라벨을 찾을 수 없습니다.' }, 404)
+
+  try {
+    await c.env.DB.prepare('INSERT INTO user_label_assignments (user_id, label_id) VALUES (?, ?)').bind(userId, labelId).run()
+  } catch (e: any) {
+    if (e.message?.includes('UNIQUE') || e.message?.includes('PRIMARY')) {
+      return c.json({ error: '이미 부여된 라벨입니다.' }, 400)
+    }
+    throw e
+  }
+
+  return c.json({ success: true, message: '라벨이 부여되었습니다.' })
+})
+
+// 사용자에서 라벨 제거
+app.delete('/api/admin/users/:id/labels/:labelId', async (c) => {
+  const userId = parseInt(c.req.param('id'))
+  const labelId = parseInt(c.req.param('labelId'))
+
+  await c.env.DB.prepare('DELETE FROM user_label_assignments WHERE user_id = ? AND label_id = ?').bind(userId, labelId).run()
+
+  return c.json({ success: true, message: '라벨이 제거되었습니다.' })
+})
+
+// ============================================
+// 관리자: 코스 라벨 관리
+// ============================================
+
+// 코스의 필수 라벨 목록
+app.get('/api/admin/classes/:id/labels', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const { results } = await c.env.DB.prepare(`
+    SELECT ul.id, ul.name, ul.display_name, ul.color
+    FROM class_label_requirements clr
+    JOIN user_labels ul ON clr.label_id = ul.id
+    WHERE clr.class_id = ?
+  `).bind(classId).all()
+  return c.json(results)
+})
+
+// 코스에 라벨 추가
+app.post('/api/admin/classes/:id/labels', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const { labelId } = await c.req.json()
+
+  try {
+    await c.env.DB.prepare('INSERT INTO class_label_requirements (class_id, label_id) VALUES (?, ?)').bind(classId, labelId).run()
+  } catch (e: any) {
+    if (e.message?.includes('UNIQUE') || e.message?.includes('PRIMARY')) {
+      return c.json({ error: '이미 지정된 라벨입니다.' }, 400)
+    }
+    throw e
+  }
+  return c.json({ success: true, message: '코스에 라벨이 추가되었습니다.' })
+})
+
+// 코스에서 라벨 제거
+app.delete('/api/admin/classes/:id/labels/:labelId', async (c) => {
+  const classId = parseInt(c.req.param('id'))
+  const labelId = parseInt(c.req.param('labelId'))
+  await c.env.DB.prepare('DELETE FROM class_label_requirements WHERE class_id = ? AND label_id = ?').bind(classId, labelId).run()
+  return c.json({ success: true, message: '코스에서 라벨이 제거되었습니다.' })
+})
+
+// ============================================
+// 라벨 기반 접근 제어 헬퍼
+// ============================================
+async function checkLabelAccess(db: any, userId: number, classId: number): Promise<boolean> {
+  try {
+    const { results: required } = await db.prepare(
+      'SELECT label_id FROM class_label_requirements WHERE class_id = ?'
+    ).bind(classId).all()
+    if (!required || required.length === 0) return true
+    const { results: userLabels } = await db.prepare(
+      'SELECT label_id FROM user_label_assignments WHERE user_id = ?'
+    ).bind(userId).all()
+    const userLabelIds = (userLabels || []).map((l: any) => l.label_id)
+    return required.every((r: any) => userLabelIds.includes(r.label_id))
+  } catch (e) {
+    return true // 테이블 미존재 시 접근 허용 (안전 폴백)
+  }
+}
 
 // ============================================
 // 관리자: 코스별 수강신청자 관리
@@ -8307,7 +8462,8 @@ async function loadCart() {
 
 async function addToCart(classId) {
   if (!currentUser) { openAuthModal('login'); return; }
-  await fetch('/api/cart', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({userId: currentUser.id, classId}) });
+  const res = await fetch('/api/cart', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({userId: currentUser.id, classId}) });
+  if (res.status === 403) { alert('해당 콘텐츠에 대한 권한이 없습니다.'); return; }
   showToast('장바구니에 담았습니다');
   updateCartBadge();
 }
@@ -8333,7 +8489,8 @@ async function toggleWishlistItem(classId) {
     if (btn) btn.innerHTML = '<i class="far fa-heart"></i>';
     showToast('찜 목록에서 제거했습니다');
   } else {
-    await fetch('/api/wishlist', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({userId: currentUser.id, classId}) });
+    const wRes = await fetch('/api/wishlist', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({userId: currentUser.id, classId}) });
+    if (wRes.status === 403) { alert('해당 콘텐츠에 대한 권한이 없습니다.'); return; }
     if (btn) btn.innerHTML = '<i class="fas fa-heart text-primary-500"></i>';
     showToast('찜 목록에 추가했습니다');
   }
@@ -9956,6 +10113,13 @@ app.get('/class/:slug', async (c) => {
   
   if (!cls) return c.html('<h1>Class not found</h1>', 404)
 
+  // 코스의 필수 라벨 확인
+  let classRequiresLabel = false
+  try {
+    const { results: clr } = await c.env.DB.prepare('SELECT label_id FROM class_label_requirements WHERE class_id = ?').bind(cls.id).all()
+    classRequiresLabel = clr && clr.length > 0
+  } catch (e) { /* 테이블 미존재 시 무시 */ }
+
   const { results: lessons } = await c.env.DB.prepare('SELECT * FROM lessons WHERE class_id = ? ORDER BY sort_order').bind(cls.id).all()
   const { results: reviews } = await c.env.DB.prepare(`
     SELECT r.*, u.name as user_name FROM reviews r JOIN users u ON r.user_id = u.id WHERE r.class_id = ? ORDER BY r.created_at DESC LIMIT 10
@@ -10109,7 +10273,7 @@ ${navHTML}
               <button id="btnAddToCart" onclick="addToCart(${cls.id})" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
                 <i class="fas fa-shopping-cart mr-1"></i>장바구니
               </button>
-              <button onclick="toggleWishlistItem(${cls.id})" data-wishlist="${cls.id}" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
+              <button id="btnWishlist" onclick="toggleWishlistItem(${cls.id})" data-wishlist="${cls.id}" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
                 <i class="far fa-heart mr-1"></i>찜하기
               </button>
             </div>
@@ -10158,7 +10322,7 @@ ${navHTML}
         <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-paperclip text-amber-500 mr-2"></i>강의 자료 <span class="text-sm font-normal text-gray-500">(${courseMaterials.length}개)</span></h2>
         <div class="flex flex-wrap gap-3">
           ${courseMaterials.map((m: any) => `
-            <a href="${m.url}" target="_blank" download class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded-xl text-sm text-amber-800 transition-all">
+            <a href="${m.url}" target="_blank" download data-material-link class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded-xl text-sm text-amber-800 transition-all">
               <i class="fas fa-file-download text-amber-500"></i>
               <span>${m.filename || '다운로드'}</span>
             </a>
@@ -10806,6 +10970,68 @@ document.addEventListener('DOMContentLoaded', () => {
     return;
   }
   // 듀얼 롤: 자기 코스 강사는 위에서 이미 "수업 관리"로 전환됨. 다른 코스는 수강 가능.
+
+  // 라벨 기반 접근 제어
+  const classRequiresLabel = ${classRequiresLabel};
+  if (classRequiresLabel && user) {
+    fetch('/api/admin/users/' + user.id + '/labels')
+      .then(r => r.ok ? r.json() : [])
+      .then(userLabels => {
+        return fetch('/api/admin/classes/${cls.id}/labels').then(r => r.ok ? r.json() : []).then(reqLabels => {
+          const userLabelIds = userLabels.map(l => l.id || l.label_id);
+          const hasAccess = reqLabels.every(r => userLabelIds.includes(r.id));
+          if (!hasAccess) {
+            disableRestrictedButtons();
+          }
+        });
+      }).catch(() => { disableRestrictedButtons(); });
+  } else if (classRequiresLabel && !user) {
+    disableRestrictedButtons();
+  }
+
+  function disableRestrictedButtons() {
+    // 수강하기 버튼 텍스트 교체
+    const enrollBtn = document.getElementById('btnEnrollOnetime');
+    if (enrollBtn) {
+      enrollBtn.disabled = true;
+      enrollBtn.style.opacity = '0.7';
+      enrollBtn.style.cursor = 'not-allowed';
+      enrollBtn.innerHTML = '<i class="fas fa-lock mr-2"></i>종합반 수강 학생 학부모님만 이용 가능한 컨텐츠입니다';
+      enrollBtn.style.fontSize = '13px';
+      enrollBtn.onclick = function(e) { e.preventDefault(); };
+    }
+    const otherBtns = ['btnEnrollMonthly', 'btnAddToCart', 'btnWishlist'];
+    otherBtns.forEach(id => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.disabled = true;
+        el.style.opacity = '0.5';
+        el.style.cursor = 'not-allowed';
+        el.onclick = function(e) { e.preventDefault(); alert('종합반 수강 학생 학부모님만 이용 가능한 컨텐츠입니다.'); };
+      }
+    });
+    // 시청하기 버튼들 비활성화
+    document.querySelectorAll('[data-watch-btn]').forEach(el => {
+      el.disabled = true;
+      el.style.opacity = '0.5';
+      el.style.cursor = 'not-allowed';
+      el.onclick = function(e) { e.preventDefault(); alert('해당 콘텐츠는 권한이 필요합니다.'); };
+    });
+    // 자료 다운로드 링크 비활성화
+    document.querySelectorAll('[data-material-link]').forEach(el => {
+      el.style.opacity = '0.5';
+      el.style.cursor = 'not-allowed';
+      el.removeAttribute('href');
+      el.removeAttribute('download');
+      el.onclick = function(e) { e.preventDefault(); alert('해당 콘텐츠에 대한 권한이 없습니다.'); };
+    });
+    // 안내 메시지 표시
+    const notice = document.createElement('div');
+    notice.className = 'bg-yellow-50 border border-yellow-200 rounded-xl p-4 mb-4 text-center';
+    notice.innerHTML = '<i class="fas fa-lock text-yellow-500 mr-2"></i><span class="text-sm text-yellow-700 font-medium">이 콘텐츠는 권한이 필요합니다. 관리자에게 문의하세요.</span>';
+    const main = document.querySelector('main') || document.querySelector('.max-w-7xl');
+    if (main) main.prepend(notice);
+  }
 });
 
 // ===== Q&A 게시판 JS =====
@@ -12963,6 +13189,19 @@ app.post('/api/admin/upload-material', async (c) => {
 // Serve material files from R2
 app.get('/api/materials/*', async (c) => {
   const path = c.req.path.replace('/api/materials/', '')
+
+  // 인증 체크 — 로그인한 사용자만 다운로드 가능
+  const authHeader = c.req.header('Authorization') || ''
+  const cookieHeader = c.req.header('Cookie') || ''
+  const token = authHeader.replace('Bearer ', '') || cookieHeader.match(/token=([^;]+)/)?.[1]
+  if (!token) {
+    // 쿼리 파라미터로도 토큰 확인 (다운로드 링크용)
+    const queryToken = c.req.query('token')
+    if (!queryToken) {
+      return c.json({ error: '로그인이 필요합니다.' }, 401)
+    }
+  }
+
   try {
     const object = await c.env.IMAGES.get(path)
     if (!object) return c.json({ error: 'File not found' }, 404)
@@ -14236,6 +14475,7 @@ app.get('/admin', async (c) => {
             <td class="px-3 py-2">\${createBtn}</td>
             <td class="px-3 py-2">
               <div class="flex items-center gap-2">
+                <button onclick="event.stopPropagation(); openClassLabelModal(\${cls.id}, '\${safeTitle}')" class="text-gray-500 hover:text-blue-500 text-sm" title="라벨 편집"><i class="fas fa-tags"></i></button>
                 <button onclick="event.stopPropagation(); openEditClass(\${cls.id})" class="text-gray-500 hover:text-blue-500 text-sm" title="수정"><i class="fas fa-edit"></i></button>
                 <button onclick="event.stopPropagation(); deleteClass(\${cls.id}, '\${cls.title.replace(/'/g, "\\\\'")}')" class="text-gray-500 hover:text-red-500 text-sm" title="삭제"><i class="fas fa-trash-alt"></i></button>
               </div>
@@ -15676,11 +15916,106 @@ app.get('/admin', async (c) => {
       }
     }
 
+    // ===== Class Label Modal =====
+    let classLabelModalId = null;
+    let allClassLabels = [];
+    const clLabelColors = { blue: 'bg-blue-100 text-blue-700 border-blue-200', green: 'bg-green-100 text-green-700 border-green-200', red: 'bg-red-100 text-red-700 border-red-200', yellow: 'bg-yellow-100 text-yellow-700 border-yellow-200', purple: 'bg-purple-100 text-purple-700 border-purple-200', gray: 'bg-gray-100 text-gray-600 border-gray-200', indigo: 'bg-indigo-100 text-indigo-700 border-indigo-200' };
+
+    async function openClassLabelModal(classId, className) {
+      classLabelModalId = classId;
+      document.getElementById('classLabelModalName').textContent = className;
+      document.getElementById('classLabelModal').classList.remove('hidden');
+      const [labelsRes, classLabelsRes] = await Promise.all([
+        fetch('/api/admin/labels'),
+        fetch('/api/admin/classes/' + classId + '/labels')
+      ]);
+      allClassLabels = await labelsRes.json();
+      const classLabels = await classLabelsRes.json();
+      renderClassLabels(classLabels, classLabels.map(l => l.id));
+    }
+
+    function closeClassLabelModal() {
+      document.getElementById('classLabelModal').classList.add('hidden');
+      classLabelModalId = null;
+    }
+
+    function renderClassLabels(classLabels, assignedIds) {
+      const assignedEl = document.getElementById('classAssignedLabels');
+      const availableEl = document.getElementById('classAvailableLabels');
+      assignedEl.innerHTML = '';
+      if (classLabels.length === 0) {
+        assignedEl.innerHTML = '<p class="text-sm text-gray-400 w-full text-center">아래 라벨을 클릭하여 지정하세요</p>';
+      } else {
+        classLabels.forEach(l => {
+          const colors = clLabelColors[l.color] || clLabelColors.gray;
+          assignedEl.innerHTML += '<span class="inline-flex items-center gap-1 px-3 py-1 rounded-lg text-sm font-medium border ' + colors + '">' + l.display_name + ' <button onclick="removeClassLabel(' + l.id + ')" class="ml-1 hover:opacity-70 cursor-pointer"><i class="fas fa-times text-xs"></i></button></span>';
+        });
+      }
+      availableEl.innerHTML = '';
+      const available = allClassLabels.filter(l => !assignedIds.includes(l.id));
+      if (available.length === 0) {
+        availableEl.innerHTML = '<p class="text-sm text-gray-400 w-full text-center">모든 라벨이 지정되었습니다</p>';
+      } else {
+        available.forEach(l => {
+          const colors = clLabelColors[l.color] || clLabelColors.gray;
+          availableEl.innerHTML += '<span class="inline-flex items-center px-3 py-1 rounded-lg text-sm font-medium border cursor-pointer hover:opacity-80 transition-opacity ' + colors + '" onclick="assignClassLabel(' + l.id + ')">' + l.display_name + '</span>';
+        });
+      }
+    }
+
+    async function assignClassLabel(labelId) {
+      if (!classLabelModalId) return;
+      const res = await fetch('/api/admin/classes/' + classLabelModalId + '/labels', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labelId })
+      });
+      const data = await res.json();
+      if (data.success) {
+        const r = await fetch('/api/admin/classes/' + classLabelModalId + '/labels');
+        const cl = await r.json();
+        renderClassLabels(cl, cl.map(l => l.id));
+      } else { showModal('오류', data.error || '라벨 지정 실패'); }
+    }
+
+    async function removeClassLabel(labelId) {
+      if (!classLabelModalId) return;
+      const res = await fetch('/api/admin/classes/' + classLabelModalId + '/labels/' + labelId, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        const r = await fetch('/api/admin/classes/' + classLabelModalId + '/labels');
+        const cl = await r.json();
+        renderClassLabels(cl, cl.map(l => l.id));
+      } else { showModal('오류', data.error || '라벨 제거 실패'); }
+    }
+
     // Initial load
     loadAccounts();
     loadInstructors();
     loadClasses();
   </script>
+
+  <!-- Class Label Edit Modal -->
+  <div id="classLabelModal" class="fixed inset-0 z-50 hidden">
+    <div class="absolute inset-0 bg-black/50" onclick="closeClassLabelModal()"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-bold"><span id="classLabelModalName"></span> 라벨 편집</h3>
+        <button onclick="closeClassLabelModal()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="mb-4">
+        <p class="text-sm font-medium text-gray-500 mb-2">지정된 라벨</p>
+        <div id="classAssignedLabels" class="min-h-[60px] border-2 border-dashed border-gray-200 rounded-xl p-3 flex flex-wrap gap-2">
+          <p class="text-sm text-gray-400 w-full text-center">아래 라벨을 클릭하여 지정하세요</p>
+        </div>
+      </div>
+      <div>
+        <p class="text-sm font-medium text-gray-500 mb-2">사용 가능한 라벨 <span class="font-normal text-gray-400">(클릭하여 지정)</span></p>
+        <div id="classAvailableLabels" class="min-h-[48px] border border-gray-100 rounded-xl p-3 flex flex-wrap gap-2 bg-gray-50">
+        </div>
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>
   `)
@@ -15980,6 +16315,28 @@ app.get('/admin/users', async (c) => {
     </div>
   </div>
 
+  <!-- Label Edit Modal -->
+  <div id="labelModal" class="fixed inset-0 z-50 hidden">
+    <div class="absolute inset-0 bg-black/50" onclick="closeLabelModal()"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-bold"><span id="labelModalUserName"></span> 라벨 편집</h3>
+        <button onclick="closeLabelModal()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="mb-4">
+        <p class="text-sm font-medium text-gray-500 mb-2">부여된 라벨</p>
+        <div id="assignedLabels" class="min-h-[60px] border-2 border-dashed border-gray-200 rounded-xl p-3 flex flex-wrap gap-2">
+          <p class="text-sm text-gray-400 w-full text-center" id="assignedPlaceholder">아래 라벨을 클릭하여 부여하세요</p>
+        </div>
+      </div>
+      <div>
+        <p class="text-sm font-medium text-gray-500 mb-2">사용 가능한 라벨 <span class="font-normal text-gray-400">(클릭하여 부여)</span></p>
+        <div id="availableLabels" class="min-h-[48px] border border-gray-100 rounded-xl p-3 flex flex-wrap gap-2 bg-gray-50">
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Result Modal -->
   <div id="resultModal" class="fixed inset-0 z-50 hidden">
     <div class="absolute inset-0 bg-black/50" onclick="closeModal()"></div>
@@ -16031,17 +16388,23 @@ app.get('/admin/users', async (c) => {
         const isInstr = user.role === 'instructor' || user.is_instructor === 1;
         const roleLabel = user.role === 'admin' ? '관리자' : isInstr ? '강사' : '학생';
         const roleColor = user.role === 'admin' ? 'bg-red-100 text-red-700' : isInstr ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600';
+        const labelColors = { blue: 'bg-blue-100 text-blue-700', green: 'bg-green-100 text-green-700', red: 'bg-red-100 text-red-700', yellow: 'bg-yellow-100 text-yellow-700', purple: 'bg-purple-100 text-purple-700', gray: 'bg-gray-100 text-gray-600', indigo: 'bg-indigo-100 text-indigo-700' };
+        const labelsHtml = (user.labels || []).map(l => '<span class="px-2 py-0.5 rounded text-xs ' + (labelColors[l.color] || labelColors.gray) + '">' + l.display_name + '</span>').join(' ');
         return \`
           <tr class="hover:bg-gray-50">
             <td class="px-4 py-3 text-sm">\${user.id}</td>
             <td class="px-4 py-3 font-medium">\${user.name}</td>
             <td class="px-4 py-3 text-sm text-gray-500">\${user.email}</td>
             <td class="px-4 py-3 text-sm text-gray-500">\${user.phone || '-'}</td>
-            <td class="px-4 py-3"><span class="px-2 py-0.5 rounded text-xs \${roleColor}">\${roleLabel}</span></td>
+            <td class="px-4 py-3">
+              <span class="px-2 py-0.5 rounded text-xs \${roleColor}">\${roleLabel}</span>
+              \${labelsHtml}
+            </td>
             <td class="px-4 py-3">\${user.is_test_account ? '<span class="px-2 py-0.5 rounded text-xs bg-yellow-100 text-yellow-700">테스트</span>' : '-'}</td>
             <td class="px-4 py-3 text-xs text-gray-500">\${new Date(user.created_at).toLocaleDateString('ko-KR')}</td>
             <td class="px-4 py-3">
               <div class="flex items-center gap-2">
+                <button onclick="openLabelModal(\${user.id}, '\${user.name.replace(/'/g, "\\\\'")}')" class="text-gray-400 hover:text-blue-500 text-sm" title="라벨 편집"><i class="fas fa-tags"></i></button>
                 <a href="/admin/enrollments?userId=\${user.id}" class="text-blue-500 hover:text-blue-700 text-sm" title="수강 내역"><i class="fas fa-book"></i></a>
                 <button onclick="deleteUser(\${user.id}, '\${user.name.replace(/'/g, "\\\\'")}')" class="text-gray-400 hover:text-red-500 text-sm" title="삭제"><i class="fas fa-trash-alt"></i></button>
               </div>
@@ -16077,6 +16440,96 @@ app.get('/admin/users', async (c) => {
         loadUsers();
       } else {
         showModal('오류', data.error || '삭제 실패');
+      }
+    }
+
+    // ===== Label Modal =====
+    let labelModalUserId = null;
+    let allLabels = [];
+
+    async function openLabelModal(userId, userName) {
+      labelModalUserId = userId;
+      document.getElementById('labelModalUserName').textContent = userName;
+      document.getElementById('labelModal').classList.remove('hidden');
+
+      // 라벨 데이터 로드
+      const [labelsRes, userLabelsRes] = await Promise.all([
+        fetch('/api/admin/labels'),
+        fetch('/api/admin/users/' + userId + '/labels')
+      ]);
+      allLabels = await labelsRes.json();
+      const userLabels = await userLabelsRes.json();
+      const assignedIds = userLabels.map(l => l.id || l.label_id);
+
+      renderLabels(userLabels, assignedIds);
+    }
+
+    function closeLabelModal() {
+      document.getElementById('labelModal').classList.add('hidden');
+      labelModalUserId = null;
+      loadUsers();
+    }
+
+    const labelColorMap = { blue: 'bg-blue-100 text-blue-700 border-blue-200', green: 'bg-green-100 text-green-700 border-green-200', red: 'bg-red-100 text-red-700 border-red-200', yellow: 'bg-yellow-100 text-yellow-700 border-yellow-200', purple: 'bg-purple-100 text-purple-700 border-purple-200', gray: 'bg-gray-100 text-gray-600 border-gray-200', indigo: 'bg-indigo-100 text-indigo-700 border-indigo-200' };
+
+    function renderLabels(userLabels, assignedIds) {
+      const assignedEl = document.getElementById('assignedLabels');
+      const availableEl = document.getElementById('availableLabels');
+
+      // 부여된 라벨
+      assignedEl.innerHTML = '';
+      if (userLabels.length === 0) {
+        assignedEl.innerHTML = '<p class="text-sm text-gray-400 w-full text-center">아래 라벨을 클릭하여 부여하세요</p>';
+      } else {
+        userLabels.forEach(l => {
+          const lid = l.id || l.label_id;
+          const colors = labelColorMap[l.color] || labelColorMap.gray;
+          assignedEl.innerHTML += '<span class="inline-flex items-center gap-1 px-3 py-1 rounded-lg text-sm font-medium border ' + colors + '">' + l.display_name + ' <button onclick="removeLabel(' + lid + ')" class="ml-1 hover:opacity-70 cursor-pointer"><i class="fas fa-times text-xs"></i></button></span>';
+        });
+      }
+
+      // 사용 가능한 라벨 (미부여만)
+      availableEl.innerHTML = '';
+      const available = allLabels.filter(l => !assignedIds.includes(l.id));
+      if (available.length === 0) {
+        availableEl.innerHTML = '<p class="text-sm text-gray-400 w-full text-center">모든 라벨이 부여되었습니다</p>';
+      } else {
+        available.forEach(l => {
+          const colors = labelColorMap[l.color] || labelColorMap.gray;
+          availableEl.innerHTML += '<span class="inline-flex items-center px-3 py-1 rounded-lg text-sm font-medium border cursor-pointer hover:opacity-80 transition-opacity ' + colors + '" onclick="assignLabel(' + l.id + ')">' + l.display_name + '</span>';
+        });
+      }
+    }
+
+    async function assignLabel(labelId) {
+      if (!labelModalUserId) return;
+      const res = await fetch('/api/admin/users/' + labelModalUserId + '/labels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labelId })
+      });
+      const data = await res.json();
+      if (data.success) {
+        const userLabelsRes = await fetch('/api/admin/users/' + labelModalUserId + '/labels');
+        const userLabels = await userLabelsRes.json();
+        const assignedIds = userLabels.map(l => l.id || l.label_id);
+        renderLabels(userLabels, assignedIds);
+      } else {
+        showModal('오류', data.error || '라벨 부여 실패');
+      }
+    }
+
+    async function removeLabel(labelId) {
+      if (!labelModalUserId) return;
+      const res = await fetch('/api/admin/users/' + labelModalUserId + '/labels/' + labelId, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        const userLabelsRes = await fetch('/api/admin/users/' + labelModalUserId + '/labels');
+        const userLabels = await userLabelsRes.json();
+        const assignedIds = userLabels.map(l => l.id || l.label_id);
+        renderLabels(userLabels, assignedIds);
+      } else {
+        showModal('오류', data.error || '라벨 제거 실패');
       }
     }
 
@@ -16856,7 +17309,7 @@ function renderSection(type, courses, listId, countId) {
         <p class="text-sm font-semibold text-gray-800 truncate">\${cls.title}</p>
         <p class="text-xs text-gray-500">\${cls.instructor_name} · \${cls.price ? cls.price.toLocaleString() + '원' : '무료'}</p>
       </div>
-      <div class="flex items-center gap-1">
+      <div class="flex items-center gap-1" id="classLabels\${cls.id}">
         \${cls.is_bestseller ? '<span class="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded font-semibold">BEST</span>' : ''}
         \${cls.is_new ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-semibold">NEW</span>' : ''}
         \${cls.class_type === 'live' ? '<span class="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded font-semibold">LIVE</span>' : ''}
