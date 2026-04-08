@@ -4450,7 +4450,25 @@ app.get('/api/admin/classes', async (c) => {
     ORDER BY c.id DESC
   `).all()
 
-  return c.json({ classes: results })
+  // 각 코스의 라벨 요구사항 조회
+  const { results: allLabelReqs } = await c.env.DB.prepare(`
+    SELECT clr.class_id, ul.id as label_id, ul.name, ul.display_name, ul.color
+    FROM class_label_requirements clr
+    JOIN user_labels ul ON clr.label_id = ul.id
+  `).all()
+
+  const labelsByClass: Record<number, any[]> = {}
+  for (const lr of allLabelReqs || []) {
+    if (!labelsByClass[lr.class_id]) labelsByClass[lr.class_id] = []
+    labelsByClass[lr.class_id].push({ id: lr.label_id, name: lr.name, display_name: lr.display_name, color: lr.color })
+  }
+
+  const classesWithLabels = (results || []).map((cls: any) => ({
+    ...cls,
+    labels: labelsByClass[cls.id] || []
+  }))
+
+  return c.json({ classes: classesWithLabels })
 })
 
 // 관리자: 코스 생성
@@ -10359,14 +10377,14 @@ ${navHTML}
 
             if (isRecorded) {
               // 녹화 강의
-              statusBadge = '<span class="px-2 py-0.5 bg-green-100 text-green-700 text-xs font-medium rounded-full">시청가능</span>'
+              statusBadge = '<span class="lesson-status-badge px-2 py-0.5 bg-green-100 text-green-700 text-xs font-medium rounded-full">시청가능</span>'
               // 코스 가격 확인 (강의별 가격 없음)
               if (cls.price > 0) {
                 // 유료 코스 - 미결제 상태로 기본 표시, 수강 여부 확인 후 시청하기로 변경
                 actionButton = "<span class=\"lesson-action-btn\" data-lesson-id=\"" + sl.id + "\" data-course-id=\"" + cls.id + "\" data-state=\"recorded\"><span class=\"unpaid-btn px-4 py-2 bg-gray-300 text-gray-500 text-sm font-medium rounded-xl inline-block\"><i class=\"fas fa-lock mr-1\"></i>미결제</span></span>"
               } else {
                 // 무료 코스 - 바로 시청
-                actionButton = '<button onclick="openWatchWindow(' + sl.id + ')" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>'
+                actionButton = '<button onclick="openWatchWindow(' + sl.id + ')" class="lesson-action-btn-el px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>'
               }
               bgClass = 'bg-purple-50 border-purple-200'
               circleClass = 'bg-purple-500'
@@ -10377,7 +10395,7 @@ ${navHTML}
                 actionButton = "<span class=\"lesson-action-btn\" data-lesson-id=\"" + sl.id + "\" data-course-id=\"" + cls.id + "\" data-replay-url=\"" + (sl.replay_url || '') + "\" data-state=\"ended\"><span class=\"unpaid-btn px-4 py-2 bg-gray-300 text-gray-500 text-sm font-medium rounded-xl inline-block\"><i class=\"fas fa-lock mr-1\"></i>미결제</span></span>"
               } else {
                 actionButton = sl.replay_url
-                  ? '<a href="' + sl.replay_url + '" target="_blank" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>다시보기</a>'
+                  ? '<a href="' + sl.replay_url + '" target="_blank" class="lesson-action-btn-el px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>다시보기</a>'
                   : '<span class="text-gray-400 text-sm">다시보기 없음</span>'
               }
               bgClass = 'bg-gray-50'
@@ -10388,7 +10406,7 @@ ${navHTML}
                 // 미결제 상태로 기본 표시, 수강 여부 확인 후 입장하기로 변경
                 actionButton = "<span class=\"lesson-action-btn\" data-lesson-id=\"" + sl.id + "\" data-course-id=\"" + cls.id + "\" data-join-url=\"" + (sl.join_url || '') + "\" data-state=\"live\"><span class=\"unpaid-btn px-4 py-2 bg-gray-300 text-gray-500 text-sm font-medium rounded-xl inline-block\"><i class=\"fas fa-lock mr-1\"></i>미결제</span></span>"
               } else {
-                actionButton = sl.join_url ? '<a href="' + sl.join_url + '" target="_blank" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-video mr-1"></i>입장하기</a>' : '<span class="text-gray-400 text-sm">입장 링크 없음</span>'
+                actionButton = sl.join_url ? '<a href="' + sl.join_url + '" target="_blank" class="lesson-action-btn-el px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-video mr-1"></i>입장하기</a>' : '<span class="text-gray-400 text-sm">입장 링크 없음</span>'
               }
               bgClass = 'bg-red-50 border-red-200'
               circleClass = 'bg-red-500'
@@ -10442,7 +10460,7 @@ ${navHTML}
             const slCurrBadge = slCurrItems.length > 0 ? '<span class="px-1.5 py-0.5 bg-indigo-100 text-indigo-600 text-[10px] font-medium rounded"><i class="fas fa-list-ol mr-0.5"></i>' + slCurrItems.length + '</span>' : ''
             const slMatBadge = slMatItems.length > 0 ? '<span class="text-amber-500 text-xs"><i class="fas fa-paperclip"></i></span>' : ''
 
-            return '<div class="p-4 border border-gray-100 rounded-xl ' + bgClass + ' hover:shadow-sm transition-all">' +
+            return '<div class="lesson-item p-4 border border-gray-100 rounded-xl ' + bgClass + ' hover:shadow-sm transition-all">' +
               '<div class="flex flex-col sm:flex-row sm:items-center gap-4">' +
                 '<div class="flex items-center gap-3 flex-1">' +
                   '<div class="w-10 h-10 rounded-full ' + circleClass + ' flex items-center justify-center text-white font-bold text-sm">' + (idx + 1) + '</div>' +
@@ -11024,6 +11042,24 @@ document.addEventListener('DOMContentLoaded', () => {
       el.removeAttribute('href');
       el.removeAttribute('download');
       el.onclick = function(e) { e.preventDefault(); alert('해당 콘텐츠에 대한 권한이 없습니다.'); };
+    });
+    // 강의 목록 항목 반투명 비활성화
+    document.querySelectorAll('.lesson-item').forEach(el => {
+      el.style.opacity = '0.5';
+      el.style.pointerEvents = 'none';
+    });
+    // 시청가능 → 시청불가능 텍스트 변경
+    document.querySelectorAll('.lesson-status-badge').forEach(el => {
+      el.className = 'lesson-status-badge px-2 py-0.5 bg-red-100 text-red-700 text-xs font-medium rounded-full';
+      el.textContent = '시청불가능';
+    });
+    // 강의 액션 버튼 비활성화
+    document.querySelectorAll('.lesson-action-btn-el').forEach(el => {
+      el.disabled = true;
+      el.style.opacity = '0.5';
+      el.style.cursor = 'not-allowed';
+      el.onclick = function(e) { e.preventDefault(); alert('해당 콘텐츠는 권한이 필요합니다.'); };
+      if (el.tagName === 'A') { el.removeAttribute('href'); }
     });
     // 안내 메시지 표시
     const notice = document.createElement('div');
@@ -13571,11 +13607,12 @@ app.get('/admin', async (c) => {
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">가격</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">강의</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">강의생성</th>
+              <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">권한</th>
               <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase">작업</th>
             </tr>
           </thead>
           <tbody id="classesTable" class="divide-y divide-gray-100">
-            <tr><td colspan="8" class="px-6 py-8 text-center text-gray-400">로딩 중...</td></tr>
+            <tr><td colspan="9" class="px-6 py-8 text-center text-gray-400">로딩 중...</td></tr>
           </tbody>
         </table>
       </div>
@@ -14429,7 +14466,7 @@ app.get('/admin', async (c) => {
 
       const tbody = document.getElementById('classesTable');
       if (!data.classes || data.classes.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="px-6 py-8 text-center text-gray-400">코스가 없습니다.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="px-6 py-8 text-center text-gray-400">코스가 없습니다.</td></tr>';
         return;
       }
 
@@ -14450,6 +14487,12 @@ app.get('/admin', async (c) => {
         }
         recordedBtn = \`<button onclick="event.stopPropagation(); openRecordedLessonModal(\${cls.id}, '\${safeTitle}', '\${safeInstructor}')" class="text-purple-500 hover:text-purple-700 text-sm ml-2" title="녹화 강의"><i class="fas fa-cloud-upload-alt"></i></button>\`;
         const createBtn = liveBtn + recordedBtn;
+
+        // 권한 라벨 표시
+        const labelColors = { blue: 'bg-blue-100 text-blue-700', green: 'bg-green-100 text-green-700', red: 'bg-red-100 text-red-700', yellow: 'bg-yellow-100 text-yellow-700', purple: 'bg-purple-100 text-purple-700', gray: 'bg-gray-100 text-gray-600', indigo: 'bg-indigo-100 text-indigo-700' };
+        const labelsHtml = (cls.labels || []).length > 0
+          ? (cls.labels || []).map(l => '<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ' + (labelColors[l.color] || labelColors.gray) + '">' + l.display_name + '</span>').join(' ')
+          : '<span class="text-gray-300 text-xs">-</span>';
 
         // 강의 수 표시
         const lessonCount = cls.lesson_count || 0;
@@ -14473,6 +14516,7 @@ app.get('/admin', async (c) => {
             <td class="px-3 py-2 text-sm">\${(cls.price || 0).toLocaleString()}원</td>
             <td class="px-3 py-2">\${lessonBadge}</td>
             <td class="px-3 py-2">\${createBtn}</td>
+            <td class="px-3 py-2"><div class="flex flex-wrap gap-1">\${labelsHtml}</div></td>
             <td class="px-3 py-2">
               <div class="flex items-center gap-2">
                 <button onclick="event.stopPropagation(); openClassLabelModal(\${cls.id}, '\${safeTitle}')" class="text-gray-500 hover:text-blue-500 text-sm" title="라벨 편집"><i class="fas fa-tags"></i></button>
@@ -14482,7 +14526,7 @@ app.get('/admin', async (c) => {
             </td>
           </tr>
           <tr id="lessons-row-\${cls.id}" class="\${isExpanded ? '' : 'hidden'}">
-            <td colspan="8" class="p-0">
+            <td colspan="9" class="p-0">
               <div id="lessons-content-\${cls.id}" class="bg-gray-50 border-l-4 border-l-blue-300 border-t border-b border-gray-200 ml-8">
                 <div class="p-4 text-gray-500 text-center text-sm">강의 목록 로딩 중...</div>
               </div>
@@ -15937,6 +15981,7 @@ app.get('/admin', async (c) => {
     function closeClassLabelModal() {
       document.getElementById('classLabelModal').classList.add('hidden');
       classLabelModalId = null;
+      loadClasses();
     }
 
     function renderClassLabels(classLabels, assignedIds) {
