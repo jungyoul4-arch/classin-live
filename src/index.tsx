@@ -9464,49 +9464,199 @@ app.get('/', async (c) => {
 <body class="bg-gray-50 min-h-screen">
 ${navHTML}
 
-<!-- Hero Banner -->
-<section class="hero-gradient text-white">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-16 md:py-24">
-    <div class="grid md:grid-cols-2 gap-10 items-center">
-      <div>
-        <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-6">
-          <span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>
-          <span class="text-sm font-medium">실시간 라이브 양방향 코스</span>
+<!-- Hero Carousel -->
+<section class="relative bg-gray-900 pt-6 pb-2">
+  <div class="relative max-w-[1420px] mx-auto">
+    <div class="relative overflow-hidden" style="aspect-ratio:100/37; min-height:280px;">
+      <div class="absolute inset-0 flex items-center justify-center" id="heroSlides">
+
+        <!-- Slide 1: 메인 Hero -->
+        <div class="hero-slide absolute rounded-xl overflow-hidden" style="width:76%; height:100%;" data-index="0">
+          <div class="absolute inset-0 hero-gradient"></div>
+          <div class="absolute inset-0 flex items-center">
+            <div class="w-full max-w-7xl mx-auto px-6 md:px-10 grid md:grid-cols-2 gap-8 items-center">
+              <div>
+                <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-4">
+                  <span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>
+                  <span class="text-sm font-medium text-white">실시간 라이브 양방향 코스</span>
+                </div>
+                <h2 class="text-2xl md:text-4xl lg:text-5xl font-extrabold leading-tight mb-3 text-white">
+                  당신의 성장을 위한<br>
+                  <span class="text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-pink-400">라이브 양방향 코스</span>가 시작됩니다
+                </h2>
+                <p class="text-gray-300 text-sm md:text-base mb-6 leading-relaxed">
+                  검증된 전문 강사의 실시간 양방향 강의로 배우고,<br class="hidden md:block">
+                  직접 질문하고 소통하며 빠르게 성장하세요.
+                </p>
+                <a href="/categories" class="inline-block px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30">
+                  <i class="fas fa-play mr-2"></i>코스 둘러보기
+                </a>
+              </div>
+              <div class="hidden md:grid grid-cols-2 gap-3">
+                <div class="space-y-3">
+                  <img src="/static/instructors/park-sw.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="박서욱 선생님">
+                  <img src="/static/instructors/cho-wj.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="조우제 선생님">
+                </div>
+                <div class="space-y-3 mt-6">
+                  <img src="/static/instructors/lee-jh.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="이지후 선생님">
+                  <img src="/static/instructors/park-jy.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="박지영 선생님">
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-        <h1 class="text-3xl md:text-5xl font-extrabold leading-tight mb-4">
-          당신의 성장을 위한<br>
-          <span class="text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-pink-400">라이브 양방향 코스</span>가 시작됩니다
-        </h1>
-        <p class="text-gray-300 text-base md:text-lg mb-8 leading-relaxed">
-          검증된 전문 강사의 실시간 양방향 강의으로 배우고,<br>
-          직접 질문하고 소통하며 빠르게 성장하세요.
-        </p>
-        <div class="flex flex-wrap gap-3">
-          <a href="/categories" class="px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30">
-            <i class="fas fa-play mr-2"></i>코스 둘러보기
-          </a>
+
+        <!-- Slide 2: 전문 강사진 소개 -->
+        <div class="hero-slide absolute rounded-xl overflow-hidden" style="width:76%; height:100%;" data-index="1">
+          <div class="absolute inset-0" style="background:linear-gradient(135deg, hsl(235,55%,35%) 0%, hsl(255,45%,20%) 100%);"></div>
+          <div class="absolute inset-0 flex items-center">
+            <div class="w-full max-w-7xl mx-auto px-6 md:px-10">
+              <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-4">
+                <i class="fas fa-chalkboard-teacher text-yellow-400 text-sm"></i>
+                <span class="text-sm font-medium text-white">검증된 전문 강사진</span>
+              </div>
+              <h2 class="text-2xl md:text-4xl lg:text-5xl font-extrabold leading-tight mb-3 text-white">
+                각 분야 최고의 전문가와<br>
+                <span class="text-transparent bg-clip-text bg-gradient-to-r from-yellow-300 to-orange-400">함께 성장</span>하세요
+              </h2>
+              <p class="text-gray-300 text-sm md:text-base mb-6 leading-relaxed">
+                현직 전문가들의 실무 노하우를 라이브로 직접 배우고,<br class="hidden md:block">
+                실시간 Q&A로 궁금한 점을 바로 해결하세요.
+              </p>
+              <a href="/categories" class="inline-block px-6 py-3 bg-yellow-500 hover:bg-yellow-600 text-gray-900 font-bold rounded-xl transition-all shadow-lg shadow-yellow-500/30">
+                <i class="fas fa-users mr-2"></i>강사진 보기
+              </a>
+            </div>
+          </div>
         </div>
-        <div class="flex items-center gap-6 mt-8">
-          <div class="text-center"><p class="text-2xl font-bold">6,200+</p><p class="text-xs text-gray-400">전체 코스</p></div>
-          <div class="w-px h-8 bg-white/20"></div>
-          <div class="text-center"><p class="text-2xl font-bold">120K+</p><p class="text-xs text-gray-400">수강생</p></div>
-          <div class="w-px h-8 bg-white/20"></div>
-          <div class="text-center"><p class="text-2xl font-bold">4.8</p><p class="text-xs text-gray-400">평균 평점</p></div>
+
+        <!-- Slide 3: 소통 강조 -->
+        <div class="hero-slide absolute rounded-xl overflow-hidden" style="width:76%; height:100%;" data-index="2">
+          <div class="absolute inset-0" style="background:linear-gradient(135deg, hsl(160,50%,30%) 0%, hsl(180,45%,18%) 100%);"></div>
+          <div class="absolute inset-0 flex items-center">
+            <div class="w-full max-w-7xl mx-auto px-6 md:px-10">
+              <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-4">
+                <i class="fas fa-comments text-emerald-400 text-sm"></i>
+                <span class="text-sm font-medium text-white">실시간 양방향 소통</span>
+              </div>
+              <h2 class="text-2xl md:text-4xl lg:text-5xl font-extrabold leading-tight mb-3 text-white">
+                일방적인 강의는 그만!<br>
+                <span class="text-transparent bg-clip-text bg-gradient-to-r from-emerald-300 to-teal-400">실시간 소통</span>으로 배우세요
+              </h2>
+              <p class="text-gray-300 text-sm md:text-base mb-6 leading-relaxed">
+                라이브 수업 중 직접 질문하고, 강사와 즉시 소통하며<br class="hidden md:block">
+                나만의 맞춤 학습을 경험하세요.
+              </p>
+              <a href="/categories?type=live" class="inline-block px-6 py-3 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/30">
+                <i class="fas fa-video mr-2"></i>라이브 수업 보기
+              </a>
+            </div>
+          </div>
         </div>
+
       </div>
-      <div class="hidden md:grid grid-cols-2 gap-3">
-        <div class="space-y-3">
-          <img src="/static/instructors/park-sw.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="박서욱 선생님">
-          <img src="/static/instructors/cho-wj.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="조우제 선생님">
-        </div>
-        <div class="space-y-3 mt-6">
-          <img src="/static/instructors/lee-jh.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="이지후 선생님">
-          <img src="/static/instructors/park-jy.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="박지영 선생님">
-        </div>
+    </div>
+
+    <!-- Controls Bar -->
+    <div class="flex items-center gap-3 mt-3 px-4 md:px-8">
+      <div class="flex items-center gap-1.5 text-sm font-medium select-none">
+        <span class="text-white font-bold" id="heroCurrent">01</span>
+        <span class="text-gray-500 text-xs" id="heroTotal">03</span>
       </div>
+      <div class="flex-1 h-0.5 bg-gray-700 rounded-full max-w-[300px]">
+        <div class="h-full bg-white rounded-full" id="heroProgress" style="width:0%; transition:none;"></div>
+      </div>
+      <button onclick="heroPrev()" class="text-gray-400 hover:text-white transition-colors p-1" aria-label="이전 슬라이드">
+        <i class="fas fa-chevron-left text-sm"></i>
+      </button>
+      <button onclick="heroNext()" class="text-gray-400 hover:text-white transition-colors p-1" aria-label="다음 슬라이드">
+        <i class="fas fa-chevron-right text-sm"></i>
+      </button>
+      <button onclick="heroTogglePause()" id="heroPauseBtn" class="text-gray-400 hover:text-white transition-colors p-1" aria-label="슬라이드 일시정지">
+        <i class="fas fa-pause text-sm"></i>
+      </button>
     </div>
   </div>
 </section>
+
+<script>
+(function() {
+  const slides = document.querySelectorAll('.hero-slide');
+  const total = slides.length;
+  let current = 0, isPaused = false, isTransitioning = false, progress = 0;
+  let rafId = null;
+  const duration = 5000;
+
+  function getSlideStyle(index) {
+    let offset = index - current;
+    if (offset > total / 2) offset -= total;
+    if (offset < -total / 2) offset += total;
+    const isActive = offset === 0;
+    const isAdj = Math.abs(offset) === 1;
+    const isVisible = Math.abs(offset) <= 2;
+    return {
+      transform: 'translateX(' + (offset * 78) + '%) scale(' + (isActive ? 1 : 0.85) + ')',
+      opacity: isActive ? 1 : (isAdj ? 0.7 : 0),
+      zIndex: isActive ? 10 : (isAdj ? 5 : 1),
+      pointerEvents: isActive ? 'auto' : 'none',
+      transition: 'all 0.6s cubic-bezier(0.25, 0.1, 0.25, 1)'
+    };
+  }
+
+  function updateSlides() {
+    slides.forEach(function(slide, i) {
+      var s = getSlideStyle(i);
+      slide.style.transform = s.transform;
+      slide.style.opacity = s.opacity;
+      slide.style.zIndex = s.zIndex;
+      slide.style.pointerEvents = s.pointerEvents;
+      slide.style.transition = s.transition;
+    });
+    document.getElementById('heroCurrent').textContent = String(current + 1).padStart(2, '0');
+  }
+
+  function goTo(index) {
+    if (isTransitioning) return;
+    isTransitioning = true;
+    current = index;
+    progress = 0;
+    updateSlides();
+    setTimeout(function() { isTransitioning = false; }, 600);
+  }
+
+  window.heroNext = function() { goTo((current + 1) % total); };
+  window.heroPrev = function() { goTo((current - 1 + total) % total); };
+  window.heroTogglePause = function() {
+    isPaused = !isPaused;
+    var btn = document.getElementById('heroPauseBtn');
+    btn.innerHTML = isPaused ? '<i class="fas fa-play text-sm"></i>' : '<i class="fas fa-pause text-sm"></i>';
+    btn.setAttribute('aria-label', isPaused ? '슬라이드 재생' : '슬라이드 일시정지');
+    if (!isPaused) startAnimation();
+  };
+
+  function startAnimation() {
+    var start = null;
+    function animate(ts) {
+      if (isPaused) return;
+      if (!start) start = ts;
+      var elapsed = ts - start;
+      progress = Math.min((elapsed / duration) * 100, 100);
+      document.getElementById('heroProgress').style.width = progress + '%';
+      if (progress >= 100) {
+        window.heroNext();
+        startAnimation();
+        return;
+      }
+      rafId = requestAnimationFrame(animate);
+    }
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(animate);
+  }
+
+  updateSlides();
+  startAnimation();
+})();
+</script>
 
 <!-- Categories -->
 <section class="max-w-7xl mx-auto px-4 sm:px-6 py-10">
