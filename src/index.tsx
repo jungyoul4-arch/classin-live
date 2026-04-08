@@ -9427,7 +9427,7 @@ app.get('/', async (c) => {
     c.env.DB.prepare(`
       SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
       FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
-      WHERE c.status = 'active' AND c.is_bestseller = 1 ORDER BY c.homepage_sort_order ASC, c.rating DESC LIMIT 8
+      WHERE c.status = 'active' ORDER BY c.current_students DESC, c.rating DESC LIMIT 8
     `),
     c.env.DB.prepare(`
       SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
