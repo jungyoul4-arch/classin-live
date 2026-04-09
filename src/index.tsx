@@ -9814,6 +9814,34 @@ ${heroSlides.length > 0 ? `
           return `
         <div class="hero-slide absolute rounded-xl overflow-hidden" style="width:76%; height:100%;" data-index="${i}">
           <div class="absolute inset-0" style="background:${slide.background_image ? `url(${escapeAttr(slide.background_image)}) center/cover no-repeat, ${escapeAttr(slide.background_gradient)}` : escapeAttr(slide.background_gradient)};"></div>
+          ${slide.show_instructor_images ? `
+          <div class="absolute inset-0 flex items-center">
+            <div class="w-full max-w-7xl mx-auto px-6 md:px-10 grid md:grid-cols-2 gap-8 items-center">
+              <div>
+                <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-4">
+                  ${slide.badge_icon ? `<i class="${escapeAttr(slide.badge_icon)} text-sm"></i>` : '<span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>'}
+                  <span class="text-sm font-medium text-white">${escapeHtml(slide.badge_text)}</span>
+                </div>
+                <h2 class="text-2xl md:text-4xl lg:text-5xl font-extrabold leading-tight mb-3 text-white">
+                  ${escapeHtml(slide.title_line1)}${slide.title_line2 ? `<br><span class="text-transparent bg-clip-text bg-gradient-to-r ${escapeAttr(slide.title_gradient)}">${escapeHtml(slide.title_line2)}</span>${escapeHtml(slide.title_suffix)}` : ''}
+                </h2>
+                <p class="text-gray-300 text-sm md:text-base mb-6 leading-relaxed">${escapeHtml(slide.description)}</p>
+                <a href="${escapeAttr(slide.button_link)}" class="inline-block px-6 py-3 ${escapeAttr(slide.button_color)} ${escapeAttr(slide.button_text_color)} font-bold rounded-xl transition-all shadow-lg">
+                  <i class="${escapeAttr(slide.button_icon)} mr-2"></i>${escapeHtml(slide.button_text)}
+                </a>
+              </div>
+              <div class="hidden md:grid grid-cols-2 gap-3">
+                <div class="space-y-3">
+                  <img src="/static/instructors/park-sw.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
+                  <img src="/static/instructors/cho-wj.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
+                </div>
+                <div class="space-y-3 mt-6">
+                  <img src="/static/instructors/lee-jh.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
+                  <img src="/static/instructors/park-jy.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
+                </div>
+              </div>
+            </div>
+          </div>` : `
           <div class="absolute inset-0">
             <div class="absolute max-w-[55%]" style="left:${cl.text.x}%;top:${cl.text.y}%;transform:translateY(-50%);">
               ${slide.badge_text ? `<div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-4">
@@ -9828,7 +9856,7 @@ ${heroSlides.length > 0 ? `
             <a href="${escapeAttr(slide.button_link)}" class="absolute inline-block px-6 py-3 ${escapeAttr(slide.button_color)} ${escapeAttr(slide.button_text_color)} font-bold rounded-xl transition-all shadow-lg" style="left:${cl.btn.x}%;top:${cl.btn.y}%;transform:translateY(-50%);">
               <i class="${escapeAttr(slide.button_icon)} mr-2"></i>${escapeHtml(slide.button_text)}
             </a>
-          </div>
+          </div>`}
         </div>`}).join('')}
       </div>
     </div>
