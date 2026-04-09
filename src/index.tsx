@@ -10340,7 +10340,7 @@ ${navHTML}
         <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-paperclip text-amber-500 mr-2"></i>강의 자료 <span class="text-sm font-normal text-gray-500">(${courseMaterials.length}개)</span></h2>
         <div class="flex flex-wrap gap-3">
           ${courseMaterials.map((m: any) => `
-            <a href="${m.url}" target="_blank" download data-material-link class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded-xl text-sm text-amber-800 transition-all">
+            <a href="javascript:void(0)" onclick="downloadMaterial('${m.url}', '${(m.filename || '자료').replace(/'/g, "\\'")}')" data-material-link class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded-xl text-sm text-amber-800 transition-all cursor-pointer">
               <i class="fas fa-file-download text-amber-500"></i>
               <span>${m.filename || '다운로드'}</span>
             </a>
@@ -10384,7 +10384,7 @@ ${navHTML}
                 actionButton = "<span class=\"lesson-action-btn\" data-lesson-id=\"" + sl.id + "\" data-course-id=\"" + cls.id + "\" data-state=\"recorded\"><span class=\"unpaid-btn px-4 py-2 bg-gray-300 text-gray-500 text-sm font-medium rounded-xl inline-block\"><i class=\"fas fa-lock mr-1\"></i>미결제</span></span>"
               } else {
                 // 무료 코스 - 바로 시청
-                actionButton = '<button onclick="openWatchWindow(' + sl.id + ')" class="lesson-action-btn-el px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>'
+                actionButton = '<button onclick="watchLesson(' + sl.id + ')" class="lesson-action-btn-el px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>시청하기</button>'
               }
               bgClass = 'bg-purple-50 border-purple-200'
               circleClass = 'bg-purple-500'
@@ -10395,7 +10395,7 @@ ${navHTML}
                 actionButton = "<span class=\"lesson-action-btn\" data-lesson-id=\"" + sl.id + "\" data-course-id=\"" + cls.id + "\" data-replay-url=\"" + (sl.replay_url || '') + "\" data-state=\"ended\"><span class=\"unpaid-btn px-4 py-2 bg-gray-300 text-gray-500 text-sm font-medium rounded-xl inline-block\"><i class=\"fas fa-lock mr-1\"></i>미결제</span></span>"
               } else {
                 actionButton = sl.replay_url
-                  ? '<a href="' + sl.replay_url + '" target="_blank" class="lesson-action-btn-el px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold rounded-xl transition-all"><i class="fas fa-play mr-1"></i>다시보기</a>'
+                  ? '<a href="javascript:void(0)" onclick="checkAccessAndRun(function(){ window.open(\'' + sl.replay_url + '\', \'_blank\') })" class="lesson-action-btn-el px-4 py-2 bg-green-500 hover:bg-green-600 text-white text-sm font-semibold rounded-xl transition-all cursor-pointer"><i class="fas fa-play mr-1"></i>다시보기</a>'
                   : '<span class="text-gray-400 text-sm">다시보기 없음</span>'
               }
               bgClass = 'bg-gray-50'
@@ -10406,7 +10406,7 @@ ${navHTML}
                 // 미결제 상태로 기본 표시, 수강 여부 확인 후 입장하기로 변경
                 actionButton = "<span class=\"lesson-action-btn\" data-lesson-id=\"" + sl.id + "\" data-course-id=\"" + cls.id + "\" data-join-url=\"" + (sl.join_url || '') + "\" data-state=\"live\"><span class=\"unpaid-btn px-4 py-2 bg-gray-300 text-gray-500 text-sm font-medium rounded-xl inline-block\"><i class=\"fas fa-lock mr-1\"></i>미결제</span></span>"
               } else {
-                actionButton = sl.join_url ? '<a href="' + sl.join_url + '" target="_blank" class="lesson-action-btn-el px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30"><i class="fas fa-video mr-1"></i>입장하기</a>' : '<span class="text-gray-400 text-sm">입장 링크 없음</span>'
+                actionButton = sl.join_url ? '<a href="javascript:void(0)" onclick="checkAccessAndRun(function(){ window.open(\'' + sl.join_url + '\', \'_blank\') })" class="lesson-action-btn-el px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-red-500/30 cursor-pointer"><i class="fas fa-video mr-1"></i>입장하기</a>' : '<span class="text-gray-400 text-sm">입장 링크 없음</span>'
               }
               bgClass = 'bg-red-50 border-red-200'
               circleClass = 'bg-red-500'
@@ -10449,7 +10449,7 @@ ${navHTML}
               if (slMatItems.length > 0) {
                 slDetailSection += '<div><p class="text-xs font-semibold text-gray-500 mb-1"><i class="fas fa-paperclip mr-1"></i>강의 자료</p><div class="flex flex-wrap gap-2">'
                 slMatItems.forEach(function(m: any) {
-                  slDetailSection += '<a href="' + m.url + '" target="_blank" download class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 hover:border-purple-300 hover:bg-purple-50 rounded-lg text-xs text-gray-700 transition-all shadow-sm"><i class="fas fa-file-download text-purple-500"></i>' + (m.filename || '파일') + '</a>'
+                  slDetailSection += '<a href="javascript:void(0)" onclick="downloadMaterial(\'' + m.url + '\', \'' + (m.filename || '파일').replace(/'/g, "\\'") + '\')" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 hover:border-purple-300 hover:bg-purple-50 rounded-lg text-xs text-gray-700 transition-all shadow-sm cursor-pointer"><i class="fas fa-file-download text-purple-500"></i>' + (m.filename || '파일') + '</a>'
                 })
                 slDetailSection += '</div></div>'
               }
@@ -10740,7 +10740,56 @@ function activateLessonButtons(isInstructor) {
 
 // 녹화 강의 새 창에서 열기
 function openWatchWindow(lessonId) {
-  window.open('/watch/' + lessonId, 'watchLesson', 'width=1200,height=800');
+  var token = localStorage.getItem('classin_token') || '';
+  window.open('/watch/' + lessonId + '?token=' + encodeURIComponent(token), 'watchLesson', 'width=1200,height=800');
+}
+
+// 공통 권한 체크: 비로그인 → 로그인 모달, 미수강 → alert, 수강중 → action 실행
+var COURSE_ID = ${cls.id};
+async function checkAccessAndRun(action) {
+  var user = JSON.parse(localStorage.getItem('classin_user') || 'null');
+  var token = localStorage.getItem('classin_token');
+  if (!user || !token) {
+    if (typeof openAuthModal === 'function') openAuthModal('login');
+    else window.location.href = '/login';
+    return;
+  }
+  if (user.role === 'instructor' || user.role === 'admin' || user.is_instructor === 1) {
+    action(token);
+    return;
+  }
+  try {
+    var res = await fetch('/api/enrollments/check?userId=' + user.id + '&classId=' + COURSE_ID);
+    var data = await res.json();
+    if (data.enrolled) {
+      action(token);
+    } else {
+      alert('수강 신청 후 이용 가능합니다.');
+    }
+  } catch (e) {
+    alert('수강 확인 중 오류가 발생했습니다.');
+  }
+}
+
+function downloadMaterial(url, filename) {
+  checkAccessAndRun(function(token) {
+    fetch(url, { headers: { 'Authorization': 'Bearer ' + token } })
+      .then(function(r) { if (!r.ok) throw new Error(); return r.blob(); })
+      .then(function(blob) {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename || '자료';
+        a.click();
+        URL.revokeObjectURL(a.href);
+      })
+      .catch(function() { alert('다운로드에 실패했습니다.'); });
+  });
+}
+
+function watchLesson(lessonId) {
+  checkAccessAndRun(function() {
+    openWatchWindow(lessonId);
+  });
 }
 
 // 코스 수강 여부 확인 후 녹화 강의 시청
@@ -12296,7 +12345,7 @@ app.get('/watch/:lessonId', async (c) => {
     SELECT cl.*, c.title as class_title, c.slug as class_slug, c.thumbnail as class_thumbnail,
            c.description as class_description, c.price as course_price,
            i.display_name as instructor_name, i.profile_image as instructor_image,
-           i.bio as instructor_bio
+           i.bio as instructor_bio, i.user_id as instructor_user_id
     FROM class_lessons cl
     JOIN classes c ON cl.class_id = c.id
     JOIN instructors i ON c.instructor_id = i.id
@@ -12310,6 +12359,40 @@ app.get('/watch/:lessonId', async (c) => {
   // lesson_type이 'recorded'이거나 stream_uid가 있으면 녹화 강의로 처리
   if (lesson.lesson_type !== 'recorded' && !lesson.stream_uid) {
     return c.html('<html><body><h2>녹화 강의가 아닙니다.</h2><p><a href="/class/' + lesson.class_slug + '">코스로 이동</a></p></body></html>')
+  }
+
+  // 서버사이드 인증/수강 체크
+  const cookieHeader = c.req.header('Cookie') || ''
+  const watchToken = c.req.query('token') || cookieHeader.match(/token=([^;]+)/)?.[1] || c.req.header('Authorization')?.replace('Bearer ', '')
+  const adminSession = cookieHeader.match(/admin_session=([^;]+)/)?.[1]
+  const isAdminSession = adminSession ? await checkAdminSession(c.env.DB, adminSession) : false
+
+  if (!isAdminSession) {
+    if (!watchToken) {
+      return c.redirect('/class/' + lesson.class_slug)
+    }
+    const jwtPayload = await verifyJWT(watchToken, c.env.JWT_SECRET)
+    if (!jwtPayload) {
+      return c.redirect('/class/' + lesson.class_slug)
+    }
+    const watchUserId: number = jwtPayload.sub
+    const watchUserRole: string = jwtPayload.role || 'user'
+    const isAdmin = watchUserRole === 'admin'
+    const isInstructor = watchUserRole === 'instructor' || (lesson.instructor_user_id && watchUserId === lesson.instructor_user_id)
+
+    if (!isAdmin && !isInstructor) {
+      // 라벨 접근 제어
+      if (!(await checkLabelAccess(c.env.DB, watchUserId, lesson.class_id))) {
+        return c.redirect('/class/' + lesson.class_slug)
+      }
+      // 수강 여부 확인
+      const enrollment = await c.env.DB.prepare(
+        "SELECT id FROM enrollments WHERE user_id = ? AND class_id = ? AND status = 'active'"
+      ).bind(watchUserId, lesson.class_id).first()
+      if (!enrollment) {
+        return c.redirect('/class/' + lesson.class_slug)
+      }
+    }
   }
 
   const isFree = !lesson.course_price
@@ -13229,10 +13312,16 @@ app.get('/api/materials/*', async (c) => {
   const cookieHeader = c.req.header('Cookie') || ''
   const token = authHeader.replace('Bearer ', '') || cookieHeader.match(/token=([^;]+)/)?.[1]
   if (!token) {
-    // 쿼리 파라미터로도 토큰 확인 (다운로드 링크용)
     const queryToken = c.req.query('token')
     if (!queryToken) {
-      return c.json({ error: '로그인이 필요합니다.' }, 401)
+      // 관리자 세션 쿠키로도 확인
+      const adminSession = cookieHeader.match(/admin_session=([^;]+)/)?.[1]
+      if (adminSession) {
+        const isAdmin = await checkAdminSession(c.env.DB, adminSession)
+        if (!isAdmin) return c.json({ error: '로그인이 필요합니다.' }, 401)
+      } else {
+        return c.json({ error: '로그인이 필요합니다.' }, 401)
+      }
     }
   }
 
