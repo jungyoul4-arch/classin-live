@@ -23,6 +23,14 @@ type Bindings = {
   JWT_SECRET: string
 }
 
+// Helper: XSS 방어용 이스케이프
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+function escapeAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
 // Helper: 브랜드명을 환경변수로 치환
 function applyBranding(html: string, env: Bindings): string {
   const appName = env.APP_NAME || 'ClassIn Live'
@@ -4837,6 +4845,146 @@ app.put('/api/admin/homepage/reorder', async (c) => {
   return c.json({ success: true })
 })
 
+// ==================== 히어로 캐러셀 관리 API ====================
+
+// 관리자: 히어로 슬라이드 목록 조회
+app.get('/api/admin/hero-slides', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM hero_slides ORDER BY sort_order ASC').all()
+  return c.json({ slides: results })
+})
+
+// 관리자: 히어로 슬라이드 생성
+app.post('/api/admin/hero-slides', async (c) => {
+  const body = await c.req.json()
+  const maxOrder = await c.env.DB.prepare('SELECT MAX(sort_order) as max_order FROM hero_slides').first() as any
+  const sortOrder = (maxOrder?.max_order || 0) + 1
+
+  const result = await c.env.DB.prepare(`
+    INSERT INTO hero_slides (sort_order, badge_icon, badge_text, title_line1, title_line2, title_suffix, title_gradient, description, button_text, button_link, button_icon, button_color, button_text_color, background_gradient, show_instructor_images, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    sortOrder,
+    body.badge_icon || '',
+    body.badge_text || '',
+    body.title_line1 || '',
+    body.title_line2 || '',
+    body.title_suffix || '',
+    body.title_gradient || 'from-primary-400 to-pink-400',
+    body.description || '',
+    body.button_text || '',
+    body.button_link || '/categories',
+    body.button_icon || 'fas fa-play',
+    body.button_color || 'bg-primary-500 hover:bg-primary-600',
+    body.button_text_color || 'text-white',
+    body.background_gradient || 'linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%)',
+    body.show_instructor_images ? 1 : 0,
+    body.is_active !== undefined ? (body.is_active ? 1 : 0) : 1
+  ).run()
+
+  return c.json({ success: true, id: result.meta.last_row_id })
+})
+
+// 관리자: 히어로 슬라이드 순서 일괄 변경 (반드시 :id 라우트보다 먼저 등록)
+app.put('/api/admin/hero-slides/reorder', async (c) => {
+  const { items } = await c.req.json() as { items: { id: number, sortOrder: number }[] }
+  if (!items || !Array.isArray(items)) return c.json({ error: 'items 배열이 필요합니다.' }, 400)
+
+  const stmts = items.map(item =>
+    c.env.DB.prepare('UPDATE hero_slides SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(item.sortOrder, item.id)
+  )
+  await c.env.DB.batch(stmts)
+  return c.json({ success: true })
+})
+
+// 관리자: 히어로 슬라이드 수정
+app.put('/api/admin/hero-slides/:id', async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const body = await c.req.json()
+
+  const existing = await c.env.DB.prepare('SELECT id FROM hero_slides WHERE id = ?').bind(id).first()
+  if (!existing) return c.json({ error: '슬라이드를 찾을 수 없습니다.' }, 404)
+
+  await c.env.DB.prepare(`
+    UPDATE hero_slides SET
+      badge_icon = ?, badge_text = ?, title_line1 = ?, title_line2 = ?, title_suffix = ?,
+      title_gradient = ?, description = ?, button_text = ?, button_link = ?, button_icon = ?,
+      button_color = ?, button_text_color = ?, background_gradient = ?,
+      show_instructor_images = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(
+    body.badge_icon ?? '',
+    body.badge_text ?? '',
+    body.title_line1 ?? '',
+    body.title_line2 ?? '',
+    body.title_suffix ?? '',
+    body.title_gradient ?? 'from-primary-400 to-pink-400',
+    body.description ?? '',
+    body.button_text ?? '',
+    body.button_link ?? '/categories',
+    body.button_icon ?? 'fas fa-play',
+    body.button_color ?? 'bg-primary-500 hover:bg-primary-600',
+    body.button_text_color ?? 'text-white',
+    body.background_gradient ?? 'linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%)',
+    body.show_instructor_images ? 1 : 0,
+    body.is_active ? 1 : 0,
+    id
+  ).run()
+
+  return c.json({ success: true })
+})
+
+// 관리자: 히어로 슬라이드 삭제
+app.delete('/api/admin/hero-slides/:id', async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const existing = await c.env.DB.prepare('SELECT id FROM hero_slides WHERE id = ?').bind(id).first()
+  if (!existing) return c.json({ error: '슬라이드를 찾을 수 없습니다.' }, 404)
+
+  await c.env.DB.prepare('DELETE FROM hero_slides WHERE id = ?').bind(id).run()
+  return c.json({ success: true })
+})
+
+// 관리자: 히어로 슬라이드 배경 이미지 업로드
+app.post('/api/admin/hero-slides/:id/image', async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const existing = await c.env.DB.prepare('SELECT id FROM hero_slides WHERE id = ?').bind(id).first()
+  if (!existing) return c.json({ error: '슬라이드를 찾을 수 없습니다.' }, 404)
+
+  const formData = await c.req.formData()
+  const file = formData.get('file') as File
+  if (!file) return c.json({ error: '파일이 없습니다.' }, 400)
+
+  const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+  if (!allowedTypes.includes(file.type)) return c.json({ error: '지원하지 않는 이미지 형식입니다.' }, 400)
+  if (file.size > 5 * 1024 * 1024) return c.json({ error: '파일 크기는 5MB 이하여야 합니다.' }, 400)
+
+  const ext = file.name.split('.').pop() || 'jpg'
+  const filename = `hero-slides/slide-${id}-${Date.now()}.${ext}`
+  const arrayBuffer = await file.arrayBuffer()
+
+  await c.env.IMAGES.put(filename, arrayBuffer, { httpMetadata: { contentType: file.type } })
+
+  const imageUrl = `/api/images/${filename}`
+  await c.env.DB.prepare('UPDATE hero_slides SET background_image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(imageUrl, id).run()
+
+  return c.json({ success: true, url: imageUrl })
+})
+
+// 관리자: 히어로 슬라이드 배경 이미지 삭제
+app.delete('/api/admin/hero-slides/:id/image', async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const existing = await c.env.DB.prepare('SELECT id, background_image FROM hero_slides WHERE id = ?').bind(id).first() as any
+  if (!existing) return c.json({ error: '슬라이드를 찾을 수 없습니다.' }, 404)
+
+  if (existing.background_image) {
+    const r2Key = existing.background_image.replace('/api/images/', '')
+    try { await c.env.IMAGES.delete(r2Key) } catch (e) { /* R2 삭제 실패해도 DB는 정리 */ }
+  }
+
+  await c.env.DB.prepare('UPDATE hero_slides SET background_image = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?').bind(id).run()
+  return c.json({ success: true })
+})
+
 // 관리자: 카테고리 목록
 app.get('/api/admin/categories', async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM categories ORDER BY sort_order, name').all()
@@ -9597,6 +9745,13 @@ app.get('/', async (c) => {
     `).bind(cutoff).run()
   } catch (e) { /* 자동 완료 실패해도 메인 페이지는 정상 로드 */ }
 
+  // 히어로 슬라이드 조회 (마이그레이션 미적용 시 빈 배열 폴백)
+  let heroSlides: any[] = []
+  try {
+    const heroResult = await c.env.DB.prepare('SELECT * FROM hero_slides WHERE is_active = 1 ORDER BY sort_order ASC').all()
+    heroSlides = heroResult.results || []
+  } catch (e) { /* hero_slides 테이블 미존재 시 폴백 */ }
+
   const [categories, featured, newClasses, liveClasses, specialClasses, requestClasses] = await c.env.DB.batch([
     c.env.DB.prepare('SELECT * FROM categories ORDER BY sort_order'),
     c.env.DB.prepare(`
@@ -9639,96 +9794,46 @@ app.get('/', async (c) => {
 <body class="bg-gray-50 min-h-screen">
 ${navHTML}
 
-<!-- Hero Carousel -->
+${heroSlides.length > 0 ? `
+<!-- Hero Carousel (동적) -->
 <section class="relative bg-gray-900 pt-6 pb-2">
   <div class="relative max-w-[1420px] mx-auto">
     <div class="relative overflow-hidden" style="aspect-ratio:100/37; min-height:280px;">
       <div class="absolute inset-0 flex items-center justify-center" id="heroSlides">
-
-        <!-- Slide 1: 메인 Hero -->
-        <div class="hero-slide absolute rounded-xl overflow-hidden" style="width:76%; height:100%;" data-index="0">
-          <div class="absolute inset-0 hero-gradient"></div>
+        ${heroSlides.map((slide: any, i: number) => `
+        <div class="hero-slide absolute rounded-xl overflow-hidden" style="width:76%; height:100%;" data-index="${i}">
+          <div class="absolute inset-0" style="background:${slide.background_image ? `url(${escapeAttr(slide.background_image)}) center/cover no-repeat, ${escapeAttr(slide.background_gradient)}` : escapeAttr(slide.background_gradient)};"></div>
           <div class="absolute inset-0 flex items-center">
-            <div class="w-full max-w-7xl mx-auto px-6 md:px-10 grid md:grid-cols-2 gap-8 items-center">
+            <div class="w-full max-w-7xl mx-auto px-6 md:px-10 ${slide.show_instructor_images ? 'grid md:grid-cols-2 gap-8 items-center' : ''}">
               <div>
                 <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-4">
-                  <span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>
-                  <span class="text-sm font-medium text-white">실시간 라이브 양방향 코스</span>
+                  ${slide.badge_icon ? `<i class="${escapeAttr(slide.badge_icon)} text-sm"></i>` : '<span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>'}
+                  <span class="text-sm font-medium text-white">${escapeHtml(slide.badge_text)}</span>
                 </div>
                 <h2 class="text-2xl md:text-4xl lg:text-5xl font-extrabold leading-tight mb-3 text-white">
-                  당신의 성장을 위한<br>
-                  <span class="text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-pink-400">라이브 양방향 코스</span>가 시작됩니다
+                  ${escapeHtml(slide.title_line1)}<br>
+                  <span class="text-transparent bg-clip-text bg-gradient-to-r ${escapeAttr(slide.title_gradient)}">${escapeHtml(slide.title_line2)}</span>${escapeHtml(slide.title_suffix)}
                 </h2>
-                <p class="text-gray-300 text-sm md:text-base mb-6 leading-relaxed">
-                  검증된 전문 강사의 실시간 양방향 강의로 배우고,<br class="hidden md:block">
-                  직접 질문하고 소통하며 빠르게 성장하세요.
-                </p>
-                <a href="/categories" class="inline-block px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-primary-500/30">
-                  <i class="fas fa-play mr-2"></i>코스 둘러보기
+                <p class="text-gray-300 text-sm md:text-base mb-6 leading-relaxed">${escapeHtml(slide.description)}</p>
+                <a href="${escapeAttr(slide.button_link)}" class="inline-block px-6 py-3 ${escapeAttr(slide.button_color)} ${escapeAttr(slide.button_text_color)} font-bold rounded-xl transition-all shadow-lg">
+                  <i class="${escapeAttr(slide.button_icon)} mr-2"></i>${escapeHtml(slide.button_text)}
                 </a>
               </div>
+              ${slide.show_instructor_images ? `
               <div class="hidden md:grid grid-cols-2 gap-3">
                 <div class="space-y-3">
-                  <img src="/static/instructors/park-sw.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="박서욱 선생님">
-                  <img src="/static/instructors/cho-wj.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="조우제 선생님">
+                  <img src="/static/instructors/park-sw.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
+                  <img src="/static/instructors/cho-wj.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
                 </div>
                 <div class="space-y-3 mt-6">
-                  <img src="/static/instructors/lee-jh.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="이지후 선생님">
-                  <img src="/static/instructors/park-jy.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="박지영 선생님">
+                  <img src="/static/instructors/lee-jh.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
+                  <img src="/static/instructors/park-jy.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
                 </div>
-              </div>
+              </div>` : ''}
             </div>
           </div>
         </div>
-
-        <!-- Slide 2: 전문 강사진 소개 -->
-        <div class="hero-slide absolute rounded-xl overflow-hidden" style="width:76%; height:100%;" data-index="1">
-          <div class="absolute inset-0" style="background:linear-gradient(135deg, hsl(235,55%,35%) 0%, hsl(255,45%,20%) 100%);"></div>
-          <div class="absolute inset-0 flex items-center">
-            <div class="w-full max-w-7xl mx-auto px-6 md:px-10">
-              <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-4">
-                <i class="fas fa-chalkboard-teacher text-yellow-400 text-sm"></i>
-                <span class="text-sm font-medium text-white">검증된 전문 강사진</span>
-              </div>
-              <h2 class="text-2xl md:text-4xl lg:text-5xl font-extrabold leading-tight mb-3 text-white">
-                각 분야 최고의 전문가와<br>
-                <span class="text-transparent bg-clip-text bg-gradient-to-r from-yellow-300 to-orange-400">함께 성장</span>하세요
-              </h2>
-              <p class="text-gray-300 text-sm md:text-base mb-6 leading-relaxed">
-                현직 전문가들의 실무 노하우를 라이브로 직접 배우고,<br class="hidden md:block">
-                실시간 Q&A로 궁금한 점을 바로 해결하세요.
-              </p>
-              <a href="/categories" class="inline-block px-6 py-3 bg-yellow-500 hover:bg-yellow-600 text-gray-900 font-bold rounded-xl transition-all shadow-lg shadow-yellow-500/30">
-                <i class="fas fa-users mr-2"></i>강사진 보기
-              </a>
-            </div>
-          </div>
-        </div>
-
-        <!-- Slide 3: 소통 강조 -->
-        <div class="hero-slide absolute rounded-xl overflow-hidden" style="width:76%; height:100%;" data-index="2">
-          <div class="absolute inset-0" style="background:linear-gradient(135deg, hsl(160,50%,30%) 0%, hsl(180,45%,18%) 100%);"></div>
-          <div class="absolute inset-0 flex items-center">
-            <div class="w-full max-w-7xl mx-auto px-6 md:px-10">
-              <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-4">
-                <i class="fas fa-comments text-emerald-400 text-sm"></i>
-                <span class="text-sm font-medium text-white">실시간 양방향 소통</span>
-              </div>
-              <h2 class="text-2xl md:text-4xl lg:text-5xl font-extrabold leading-tight mb-3 text-white">
-                일방적인 강의는 그만!<br>
-                <span class="text-transparent bg-clip-text bg-gradient-to-r from-emerald-300 to-teal-400">실시간 소통</span>으로 배우세요
-              </h2>
-              <p class="text-gray-300 text-sm md:text-base mb-6 leading-relaxed">
-                라이브 수업 중 직접 질문하고, 강사와 즉시 소통하며<br class="hidden md:block">
-                나만의 맞춤 학습을 경험하세요.
-              </p>
-              <a href="/categories?type=live" class="inline-block px-6 py-3 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/30">
-                <i class="fas fa-video mr-2"></i>라이브 수업 보기
-              </a>
-            </div>
-          </div>
-        </div>
-
+        `).join('')}
       </div>
     </div>
 
@@ -9736,7 +9841,7 @@ ${navHTML}
     <div class="flex items-center gap-3 mt-3 px-4 md:px-8">
       <div class="flex items-center gap-1.5 text-sm font-medium select-none">
         <span class="text-white font-bold" id="heroCurrent">01</span>
-        <span class="text-gray-500 text-xs" id="heroTotal">03</span>
+        <span class="text-gray-500 text-xs" id="heroTotal">${String(heroSlides.length).padStart(2, '0')}</span>
       </div>
       <div class="flex-1 h-0.5 bg-gray-700 rounded-full max-w-[300px]">
         <div class="h-full bg-white rounded-full" id="heroProgress" style="width:0%; transition:none;"></div>
@@ -9753,6 +9858,7 @@ ${navHTML}
     </div>
   </div>
 </section>
+` : ''}
 
 <script>
 (function() {
@@ -17270,7 +17376,30 @@ app.get('/admin/homepage', async (c) => {
   <div class="max-w-7xl mx-auto px-4 py-8">
     <!-- 안내 -->
     <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
-      <p class="text-sm text-blue-700"><i class="fas fa-info-circle mr-1"></i>메인 홈페이지에 표시되는 3개 섹션의 코스를 관리합니다. 코스를 추가/제거하고 표시 순서를 변경할 수 있습니다.</p>
+      <p class="text-sm text-blue-700"><i class="fas fa-info-circle mr-1"></i>메인 홈페이지에 표시되는 히어로 캐러셀과 코스 섹션을 관리합니다.</p>
+    </div>
+
+    <!-- 히어로 캐러셀 슬라이드 관리 -->
+    <div class="bg-white rounded-xl p-6 shadow-sm mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-2">
+          <i class="fas fa-images text-purple-500 text-lg"></i>
+          <h2 class="text-lg font-bold text-gray-800">히어로 캐러셀 슬라이드</h2>
+          <span id="heroSlideCount" class="text-xs bg-purple-100 text-purple-600 font-semibold px-2 py-0.5 rounded-full">0</span>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="openSlideModal()" class="text-sm bg-purple-500 hover:bg-purple-600 text-white px-3 py-1.5 rounded-lg transition-all">
+            <i class="fas fa-plus mr-1"></i>슬라이드 추가
+          </button>
+          <button onclick="saveSlideOrder()" class="text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-lg transition-all">
+            <i class="fas fa-save mr-1"></i>순서 저장
+          </button>
+        </div>
+      </div>
+      <p class="text-xs text-gray-400 mb-3">메인 페이지 상단에 표시되는 캐러셀 슬라이드를 관리합니다. 활성 슬라이드만 노출됩니다.</p>
+      <div id="heroSlideList" class="space-y-2">
+        <p class="text-sm text-gray-400 py-4 text-center">로딩 중...</p>
+      </div>
     </div>
 
     <!-- 정률 특강 코스 섹션 -->
@@ -17390,9 +17519,147 @@ app.get('/admin/homepage', async (c) => {
     </div>
   </div>
 
+  <!-- 슬라이드 편집 모달 -->
+  <div id="slideModal" class="fixed inset-0 bg-black/50 z-50 hidden items-center justify-center" onclick="if(event.target===this)closeSlideModal()">
+    <div class="bg-white rounded-2xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col">
+      <div class="p-5 border-b border-gray-100 flex items-center justify-between">
+        <h3 id="slideModalTitle" class="text-lg font-bold text-gray-800">슬라이드 추가</h3>
+        <button onclick="closeSlideModal()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="p-5 overflow-y-auto flex-1 space-y-5">
+        <input type="hidden" id="slideEditId" value="">
+
+        <!-- 배지 -->
+        <div class="bg-gray-50 rounded-lg p-4">
+          <h4 class="text-sm font-semibold text-gray-700 mb-3"><i class="fas fa-tag mr-1"></i>배지</h4>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">아이콘 (빈 값 = 라이브 도트)</label>
+              <input type="text" id="slideBadgeIcon" placeholder="fas fa-chalkboard-teacher text-yellow-400" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">배지 텍스트</label>
+              <input type="text" id="slideBadgeText" placeholder="실시간 라이브 양방향 코스" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+            </div>
+          </div>
+        </div>
+
+        <!-- 제목 -->
+        <div class="bg-gray-50 rounded-lg p-4">
+          <h4 class="text-sm font-semibold text-gray-700 mb-3"><i class="fas fa-heading mr-1"></i>제목</h4>
+          <div class="space-y-3">
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">1행 (흰색 텍스트)</label>
+              <input type="text" id="slideTitleLine1" placeholder="당신의 성장을 위한" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-gray-500 mb-1 block">2행 - 강조 (그라데이션 적용)</label>
+                <input type="text" id="slideTitleLine2" placeholder="라이브 양방향 코스" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+              </div>
+              <div>
+                <label class="text-xs text-gray-500 mb-1 block">접미사 (강조 뒤 일반 텍스트)</label>
+                <input type="text" id="slideTitleSuffix" placeholder="가 시작됩니다" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">제목 그라데이션</label>
+              <select id="slideTitleGradient" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                <option value="from-primary-400 to-pink-400">분홍 (기본)</option>
+                <option value="from-yellow-300 to-orange-400">노랑-주황</option>
+                <option value="from-emerald-300 to-teal-400">초록-틸</option>
+                <option value="from-blue-400 to-cyan-400">파랑-시안</option>
+                <option value="from-red-400 to-rose-400">빨강-로즈</option>
+                <option value="custom">직접 입력</option>
+              </select>
+              <input type="text" id="slideTitleGradientCustom" placeholder="from-purple-400 to-indigo-400" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm mt-2 hidden focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+            </div>
+          </div>
+        </div>
+
+        <!-- 설명 -->
+        <div>
+          <label class="text-xs text-gray-500 mb-1 block">설명</label>
+          <textarea id="slideDescription" rows="2" placeholder="검증된 전문 강사의 실시간 양방향 강의로 배우고..." class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent"></textarea>
+        </div>
+
+        <!-- 버튼 -->
+        <div class="bg-gray-50 rounded-lg p-4">
+          <h4 class="text-sm font-semibold text-gray-700 mb-3"><i class="fas fa-mouse-pointer mr-1"></i>버튼</h4>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">텍스트</label>
+              <input type="text" id="slideButtonText" placeholder="코스 둘러보기" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">링크</label>
+              <input type="text" id="slideButtonLink" placeholder="/categories" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">아이콘</label>
+              <input type="text" id="slideButtonIcon" placeholder="fas fa-play" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">색상</label>
+              <select id="slideButtonColor" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                <option value="bg-primary-500 hover:bg-primary-600|text-white">Primary (기본)</option>
+                <option value="bg-yellow-500 hover:bg-yellow-600|text-gray-900">노란색</option>
+                <option value="bg-emerald-500 hover:bg-emerald-600|text-white">초록색</option>
+                <option value="bg-blue-500 hover:bg-blue-600|text-white">파란색</option>
+                <option value="bg-red-500 hover:bg-red-600|text-white">빨간색</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- 배경 -->
+        <div class="bg-gray-50 rounded-lg p-4">
+          <h4 class="text-sm font-semibold text-gray-700 mb-3"><i class="fas fa-palette mr-1"></i>배경</h4>
+          <div class="space-y-3">
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">배경 그라데이션</label>
+              <select id="slideBgGradient" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                <option value="linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%)">다크 네이비 (기본)</option>
+                <option value="linear-gradient(135deg, hsl(235,55%,35%) 0%, hsl(255,45%,20%) 100%)">보라색</option>
+                <option value="linear-gradient(135deg, hsl(160,50%,30%) 0%, hsl(180,45%,18%) 100%)">초록-틸</option>
+                <option value="linear-gradient(135deg, hsl(0,50%,35%) 0%, hsl(330,45%,20%) 100%)">레드-핑크</option>
+                <option value="custom">직접 입력</option>
+              </select>
+              <input type="text" id="slideBgGradientCustom" placeholder="linear-gradient(135deg, ...)" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm mt-2 hidden focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">배경 이미지 (선택사항)</label>
+              <div class="flex items-center gap-2">
+                <input type="file" id="slideImageFile" accept="image/*" class="text-sm text-gray-500 file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:bg-purple-50 file:text-purple-600 hover:file:bg-purple-100">
+                <button onclick="removeSlideImage()" id="slideImageRemoveBtn" class="text-xs text-red-500 hover:text-red-700 hidden"><i class="fas fa-trash mr-1"></i>이미지 제거</button>
+              </div>
+              <p id="slideImagePreview" class="text-xs text-gray-400 mt-1"></p>
+            </div>
+            <div class="flex items-center gap-2">
+              <input type="checkbox" id="slideShowInstructors" class="rounded border-gray-300 text-purple-500 focus:ring-purple-500">
+              <label for="slideShowInstructors" class="text-sm text-gray-700">강사 이미지 그리드 표시 (슬라이드 우측)</label>
+            </div>
+          </div>
+        </div>
+
+        <!-- 활성 상태 -->
+        <div class="flex items-center gap-2">
+          <input type="checkbox" id="slideIsActive" checked class="rounded border-gray-300 text-purple-500 focus:ring-purple-500">
+          <label for="slideIsActive" class="text-sm text-gray-700 font-medium">활성 (메인 페이지에 노출)</label>
+        </div>
+      </div>
+
+      <div class="p-5 border-t border-gray-100 flex justify-end gap-2">
+        <button onclick="closeSlideModal()" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-all">취소</button>
+        <button onclick="saveSlide()" class="px-4 py-2 text-sm bg-purple-500 hover:bg-purple-600 text-white font-semibold rounded-lg transition-all">저장</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 let sections = { bestseller: [], newCourses: [], liveCourses: [], allActive: [] };
 let currentSection = '';
+let heroSlidesData = [];
 
 function showAlert(title, msg) {
   document.getElementById('alertTitle').textContent = title;
@@ -17410,6 +17677,353 @@ async function loadSections() {
     renderSection('new', sections.newCourses, 'newList', 'newCount');
   } catch (e) {
     showAlert('오류', '데이터를 불러오지 못했습니다.');
+  }
+  loadHeroSlides();
+}
+
+// ==================== 히어로 슬라이드 관리 ====================
+
+async function loadHeroSlides() {
+  try {
+    const res = await fetch('/api/admin/hero-slides');
+    const data = await res.json();
+    heroSlidesData = data.slides || [];
+    renderHeroSlides();
+  } catch (e) {
+    document.getElementById('heroSlideList').innerHTML = '<p class="text-sm text-red-400 py-4 text-center">슬라이드를 불러오지 못했습니다.</p>';
+  }
+}
+
+function renderHeroSlides() {
+  const list = document.getElementById('heroSlideList');
+  const countEl = document.getElementById('heroSlideCount');
+  const activeCount = heroSlidesData.filter(s => s.is_active).length;
+  countEl.textContent = activeCount + '/' + heroSlidesData.length;
+
+  if (heroSlidesData.length === 0) {
+    list.innerHTML = '<p class="text-sm text-gray-400 py-4 text-center">등록된 슬라이드가 없습니다.</p>';
+    return;
+  }
+
+  list.innerHTML = heroSlidesData.map((slide, idx) => \`
+    <div class="flex items-center gap-3 p-3 \${slide.is_active ? 'bg-gray-50' : 'bg-gray-100 opacity-60'} rounded-lg group" draggable="true"
+         data-section="heroSlide" data-id="\${slide.id}" data-index="\${idx}"
+         ondragstart="onSlideDragStart(event)" ondragover="onSlideDragOver(event)" ondrop="onSlideDrop(event)" ondragend="onSlideDragEnd(event)">
+      <div class="cursor-grab text-gray-300 hover:text-gray-500">
+        <i class="fas fa-grip-vertical"></i>
+      </div>
+      <span class="text-xs text-gray-400 font-mono w-5 text-center">\${idx + 1}</span>
+      <div class="w-14 h-10 rounded-lg flex-shrink-0 border border-gray-200" style="background:\${slide.background_image ? 'url(' + slide.background_image + ') center/cover' : slide.background_gradient};"></div>
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-semibold text-gray-800 truncate">\${slide.title_line1} \${slide.title_line2}\${slide.title_suffix}</p>
+        <p class="text-xs text-gray-500 truncate">\${slide.badge_text} · \${slide.button_text}</p>
+      </div>
+      <div class="flex items-center gap-1">
+        \${slide.is_active
+          ? '<span class="text-[10px] bg-green-100 text-green-600 px-1.5 py-0.5 rounded font-semibold">활성</span>'
+          : '<span class="text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded font-semibold">비활성</span>'}
+        \${slide.background_image ? '<span class="text-[10px] bg-purple-100 text-purple-600 px-1.5 py-0.5 rounded font-semibold">IMG</span>' : ''}
+      </div>
+      <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <button onclick="moveSlide(\${idx}, -1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 \${idx === 0 ? 'invisible' : ''}">
+          <i class="fas fa-chevron-up text-xs"></i>
+        </button>
+        <button onclick="moveSlide(\${idx}, 1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 \${idx === heroSlidesData.length - 1 ? 'invisible' : ''}">
+          <i class="fas fa-chevron-down text-xs"></i>
+        </button>
+        <button onclick="openSlideModal(\${slide.id})" class="w-7 h-7 flex items-center justify-center rounded hover:bg-blue-100 text-blue-400 hover:text-blue-600">
+          <i class="fas fa-pen text-xs"></i>
+        </button>
+        <button onclick="deleteSlide(\${slide.id})" class="w-7 h-7 flex items-center justify-center rounded hover:bg-red-100 text-red-400 hover:text-red-600">
+          <i class="fas fa-trash text-xs"></i>
+        </button>
+      </div>
+    </div>
+  \`).join('');
+}
+
+// 슬라이드 드래그 앤 드롭
+let slideDragItem = null;
+
+function onSlideDragStart(e) {
+  slideDragItem = e.currentTarget;
+  slideDragItem.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+function onSlideDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  const target = e.currentTarget;
+  if (target !== slideDragItem && target.dataset.section === 'heroSlide') {
+    target.classList.add('drag-over');
+  }
+}
+function onSlideDrop(e) {
+  e.preventDefault();
+  const target = e.currentTarget;
+  target.classList.remove('drag-over');
+  if (!slideDragItem || target === slideDragItem) return;
+  if (target.dataset.section !== 'heroSlide') return;
+
+  const fromIdx = parseInt(slideDragItem.dataset.index);
+  const toIdx = parseInt(target.dataset.index);
+  const [moved] = heroSlidesData.splice(fromIdx, 1);
+  heroSlidesData.splice(toIdx, 0, moved);
+  renderHeroSlides();
+}
+function onSlideDragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+  document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+  slideDragItem = null;
+}
+
+function moveSlide(idx, direction) {
+  const newIdx = idx + direction;
+  if (newIdx < 0 || newIdx >= heroSlidesData.length) return;
+  [heroSlidesData[idx], heroSlidesData[newIdx]] = [heroSlidesData[newIdx], heroSlidesData[idx]];
+  renderHeroSlides();
+}
+
+async function saveSlideOrder() {
+  const items = heroSlidesData.map((s, idx) => ({ id: s.id, sortOrder: idx + 1 }));
+  try {
+    const res = await fetch('/api/admin/hero-slides/reorder', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showAlert('완료', '슬라이드 순서가 저장되었습니다.');
+      loadHeroSlides();
+    } else {
+      showAlert('오류', data.error || '저장에 실패했습니다.');
+    }
+  } catch (e) {
+    showAlert('오류', '네트워크 오류가 발생했습니다.');
+  }
+}
+
+// 그라데이션 프리셋 매칭
+const titleGradientPresets = [
+  'from-primary-400 to-pink-400',
+  'from-yellow-300 to-orange-400',
+  'from-emerald-300 to-teal-400',
+  'from-blue-400 to-cyan-400',
+  'from-red-400 to-rose-400'
+];
+const bgGradientPresets = [
+  'linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%)',
+  'linear-gradient(135deg, hsl(235,55%,35%) 0%, hsl(255,45%,20%) 100%)',
+  'linear-gradient(135deg, hsl(160,50%,30%) 0%, hsl(180,45%,18%) 100%)',
+  'linear-gradient(135deg, hsl(0,50%,35%) 0%, hsl(330,45%,20%) 100%)'
+];
+
+function openSlideModal(id) {
+  const modal = document.getElementById('slideModal');
+  const title = document.getElementById('slideModalTitle');
+
+  // 그라데이션 커스텀 토글 이벤트
+  document.getElementById('slideTitleGradient').onchange = function() {
+    document.getElementById('slideTitleGradientCustom').style.display = this.value === 'custom' ? 'block' : 'none';
+  };
+  document.getElementById('slideBgGradient').onchange = function() {
+    document.getElementById('slideBgGradientCustom').style.display = this.value === 'custom' ? 'block' : 'none';
+  };
+
+  if (id) {
+    // 편집 모드
+    const slide = heroSlidesData.find(s => s.id === id);
+    if (!slide) return;
+    title.textContent = '슬라이드 편집';
+    document.getElementById('slideEditId').value = id;
+    document.getElementById('slideBadgeIcon').value = slide.badge_icon || '';
+    document.getElementById('slideBadgeText').value = slide.badge_text || '';
+    document.getElementById('slideTitleLine1').value = slide.title_line1 || '';
+    document.getElementById('slideTitleLine2').value = slide.title_line2 || '';
+    document.getElementById('slideTitleSuffix').value = slide.title_suffix || '';
+    document.getElementById('slideDescription').value = slide.description || '';
+    document.getElementById('slideButtonText').value = slide.button_text || '';
+    document.getElementById('slideButtonLink').value = slide.button_link || '/categories';
+    document.getElementById('slideButtonIcon').value = slide.button_icon || 'fas fa-play';
+    document.getElementById('slideShowInstructors').checked = !!slide.show_instructor_images;
+    document.getElementById('slideIsActive').checked = !!slide.is_active;
+
+    // 제목 그라데이션 프리셋 매칭
+    const tgSelect = document.getElementById('slideTitleGradient');
+    const tgCustom = document.getElementById('slideTitleGradientCustom');
+    if (titleGradientPresets.includes(slide.title_gradient)) {
+      tgSelect.value = slide.title_gradient;
+      tgCustom.style.display = 'none';
+    } else {
+      tgSelect.value = 'custom';
+      tgCustom.style.display = 'block';
+      tgCustom.value = slide.title_gradient || '';
+    }
+
+    // 배경 그라데이션 프리셋 매칭
+    const bgSelect = document.getElementById('slideBgGradient');
+    const bgCustom = document.getElementById('slideBgGradientCustom');
+    if (bgGradientPresets.includes(slide.background_gradient)) {
+      bgSelect.value = slide.background_gradient;
+      bgCustom.style.display = 'none';
+    } else {
+      bgSelect.value = 'custom';
+      bgCustom.style.display = 'block';
+      bgCustom.value = slide.background_gradient || '';
+    }
+
+    // 버튼 색상 매칭
+    const btnColor = slide.button_color + '|' + slide.button_text_color;
+    const btnSelect = document.getElementById('slideButtonColor');
+    const btnOptions = Array.from(btnSelect.options).map(o => o.value);
+    btnSelect.value = btnOptions.includes(btnColor) ? btnColor : btnOptions[0];
+
+    // 이미지 프리뷰
+    const imgPreview = document.getElementById('slideImagePreview');
+    const imgRemoveBtn = document.getElementById('slideImageRemoveBtn');
+    if (slide.background_image) {
+      imgPreview.textContent = '현재 이미지: ' + slide.background_image;
+      imgRemoveBtn.classList.remove('hidden');
+    } else {
+      imgPreview.textContent = '';
+      imgRemoveBtn.classList.add('hidden');
+    }
+  } else {
+    // 생성 모드: 기본값
+    title.textContent = '슬라이드 추가';
+    document.getElementById('slideEditId').value = '';
+    document.getElementById('slideBadgeIcon').value = '';
+    document.getElementById('slideBadgeText').value = '';
+    document.getElementById('slideTitleLine1').value = '';
+    document.getElementById('slideTitleLine2').value = '';
+    document.getElementById('slideTitleSuffix').value = '';
+    document.getElementById('slideTitleGradient').value = 'from-primary-400 to-pink-400';
+    document.getElementById('slideTitleGradientCustom').style.display = 'none';
+    document.getElementById('slideDescription').value = '';
+    document.getElementById('slideButtonText').value = '';
+    document.getElementById('slideButtonLink').value = '/categories';
+    document.getElementById('slideButtonIcon').value = 'fas fa-play';
+    document.getElementById('slideButtonColor').value = 'bg-primary-500 hover:bg-primary-600|text-white';
+    document.getElementById('slideBgGradient').value = 'linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%)';
+    document.getElementById('slideBgGradientCustom').style.display = 'none';
+    document.getElementById('slideShowInstructors').checked = false;
+    document.getElementById('slideIsActive').checked = true;
+    document.getElementById('slideImagePreview').textContent = '';
+    document.getElementById('slideImageRemoveBtn').classList.add('hidden');
+  }
+
+  document.getElementById('slideImageFile').value = '';
+  modal.style.display = 'flex';
+}
+
+function closeSlideModal() {
+  document.getElementById('slideModal').style.display = 'none';
+}
+
+async function saveSlide() {
+  const editId = document.getElementById('slideEditId').value;
+  const isEdit = !!editId;
+
+  const titleGradientSelect = document.getElementById('slideTitleGradient').value;
+  const titleGradient = titleGradientSelect === 'custom'
+    ? document.getElementById('slideTitleGradientCustom').value
+    : titleGradientSelect;
+
+  const bgGradientSelect = document.getElementById('slideBgGradient').value;
+  const backgroundGradient = bgGradientSelect === 'custom'
+    ? document.getElementById('slideBgGradientCustom').value
+    : bgGradientSelect;
+
+  const btnColorParts = document.getElementById('slideButtonColor').value.split('|');
+
+  const body = {
+    badge_icon: document.getElementById('slideBadgeIcon').value,
+    badge_text: document.getElementById('slideBadgeText').value,
+    title_line1: document.getElementById('slideTitleLine1').value,
+    title_line2: document.getElementById('slideTitleLine2').value,
+    title_suffix: document.getElementById('slideTitleSuffix').value,
+    title_gradient: titleGradient,
+    description: document.getElementById('slideDescription').value,
+    button_text: document.getElementById('slideButtonText').value,
+    button_link: document.getElementById('slideButtonLink').value,
+    button_icon: document.getElementById('slideButtonIcon').value,
+    button_color: btnColorParts[0],
+    button_text_color: btnColorParts[1] || 'text-white',
+    background_gradient: backgroundGradient,
+    show_instructor_images: document.getElementById('slideShowInstructors').checked ? 1 : 0,
+    is_active: document.getElementById('slideIsActive').checked ? 1 : 0
+  };
+
+  try {
+    const url = isEdit ? '/api/admin/hero-slides/' + editId : '/api/admin/hero-slides';
+    const res = await fetch(url, {
+      method: isEdit ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!data.success) {
+      showAlert('오류', data.error || '저장에 실패했습니다.');
+      return;
+    }
+
+    const slideId = isEdit ? parseInt(editId) : data.id;
+
+    // 이미지 업로드 처리
+    const fileInput = document.getElementById('slideImageFile');
+    if (fileInput.files && fileInput.files[0]) {
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      const imgRes = await fetch('/api/admin/hero-slides/' + slideId + '/image', {
+        method: 'POST',
+        body: formData
+      });
+      const imgData = await imgRes.json();
+      if (!imgData.success) {
+        showAlert('경고', '슬라이드는 저장되었지만 이미지 업로드에 실패했습니다: ' + (imgData.error || ''));
+      }
+    }
+
+    closeSlideModal();
+    await loadHeroSlides();
+    showAlert('완료', isEdit ? '슬라이드가 수정되었습니다.' : '슬라이드가 추가되었습니다.');
+  } catch (e) {
+    showAlert('오류', '네트워크 오류가 발생했습니다.');
+  }
+}
+
+async function deleteSlide(id) {
+  if (!confirm('이 슬라이드를 삭제하시겠습니까?')) return;
+  try {
+    const res = await fetch('/api/admin/hero-slides/' + id, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) {
+      await loadHeroSlides();
+      showAlert('완료', '슬라이드가 삭제되었습니다.');
+    } else {
+      showAlert('오류', data.error || '삭제에 실패했습니다.');
+    }
+  } catch (e) {
+    showAlert('오류', '네트워크 오류가 발생했습니다.');
+  }
+}
+
+async function removeSlideImage() {
+  const editId = document.getElementById('slideEditId').value;
+  if (!editId) return;
+  try {
+    const res = await fetch('/api/admin/hero-slides/' + editId + '/image', { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) {
+      document.getElementById('slideImagePreview').textContent = '';
+      document.getElementById('slideImageRemoveBtn').classList.add('hidden');
+      showAlert('완료', '배경 이미지가 제거되었습니다.');
+    } else {
+      showAlert('오류', data.error || '이미지 제거에 실패했습니다.');
+    }
+  } catch (e) {
+    showAlert('오류', '네트워크 오류가 발생했습니다.');
   }
 }
 
