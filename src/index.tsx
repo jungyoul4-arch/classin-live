@@ -4849,8 +4849,18 @@ app.put('/api/admin/homepage/reorder', async (c) => {
 
 // 관리자: 히어로 슬라이드 목록 조회
 app.get('/api/admin/hero-slides', async (c) => {
-  const { results } = await c.env.DB.prepare('SELECT * FROM hero_slides ORDER BY sort_order ASC').all()
-  return c.json({ slides: results })
+  const { results: slides } = await c.env.DB.prepare('SELECT * FROM hero_slides ORDER BY sort_order ASC').all()
+  // slide_items 조회 및 매핑
+  let allItems: any[] = []
+  try {
+    const itemsRes = await c.env.DB.prepare('SELECT * FROM hero_slide_items ORDER BY slide_id, sort_order ASC').all()
+    allItems = itemsRes.results || []
+  } catch (e) { /* hero_slide_items 미존재 시 빈 배열 */ }
+  const slidesWithItems = (slides || []).map((s: any) => ({
+    ...s,
+    items: allItems.filter((i: any) => i.slide_id === s.id)
+  }))
+  return c.json({ slides: slidesWithItems })
 })
 
 // 관리자: 히어로 슬라이드 생성
@@ -4885,7 +4895,19 @@ app.post('/api/admin/hero-slides', async (c) => {
     body.is_active !== undefined ? (body.is_active ? 1 : 0) : 1
   ).run()
 
-  return c.json({ success: true, id: result.meta.last_row_id })
+  const slideId = result.meta.last_row_id
+  // items 배열이 있으면 slide_items INSERT
+  if (body.items && Array.isArray(body.items) && body.items.length > 0) {
+    try {
+      const stmts = body.items.map((item: any, idx: number) =>
+        c.env.DB.prepare('INSERT INTO hero_slide_items (slide_id, role, title, description, thumbnail, category_label, link, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+          .bind(slideId, item.role || 'main', item.title || '', item.description || '', item.thumbnail || '', item.category_label || '', item.link || '', idx)
+      )
+      await c.env.DB.batch(stmts)
+    } catch (e) { /* hero_slide_items 미존재 시 무시 */ }
+  }
+
+  return c.json({ success: true, id: slideId })
 })
 
 // 관리자: 히어로 슬라이드 순서 일괄 변경 (반드시 :id 라우트보다 먼저 등록)
@@ -4909,35 +4931,42 @@ app.put('/api/admin/hero-slides/:id', async (c) => {
   const existing = await c.env.DB.prepare('SELECT id FROM hero_slides WHERE id = ?').bind(id).first()
   if (!existing) return c.json({ error: '슬라이드를 찾을 수 없습니다.' }, 404)
 
-  await c.env.DB.prepare(`
-    UPDATE hero_slides SET
-      badge_icon = ?, badge_text = ?, title_line1 = ?, title_line2 = ?, title_suffix = ?,
-      title_gradient = ?, description = ?, button_text = ?, button_link = ?, button_icon = ?,
-      button_color = ?, button_text_color = ?, background_gradient = ?, background_image = ?,
-      image_position = ?, text_position = ?, content_layout = ?, show_instructor_images = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).bind(
-    body.badge_icon ?? '',
-    body.badge_text ?? '',
-    body.title_line1 ?? '',
-    body.title_line2 ?? '',
-    body.title_suffix ?? '',
-    body.title_gradient ?? 'from-primary-400 to-pink-400',
-    body.description ?? '',
-    body.button_text ?? '',
-    body.button_link ?? '/categories',
-    body.button_icon ?? 'fas fa-play',
-    body.button_color ?? 'bg-primary-500 hover:bg-primary-600',
-    body.button_text_color ?? 'text-white',
-    body.background_gradient ?? 'linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%)',
-    body.background_image !== undefined ? (body.background_image || null) : null,
-    body.image_position || 'center center',
-    body.text_position || 'left center',
-    body.content_layout || '{"text":{"x":5,"y":30},"btn":{"x":5,"y":75}}',
-    body.show_instructor_images ? 1 : 0,
-    body.is_active ? 1 : 0,
-    id
-  ).run()
+  // 슬라이드 기본 필드 업데이트 (전달된 필드만 업데이트)
+  const sets: string[] = []
+  const vals: any[] = []
+  const fieldMap: Record<string, any> = {
+    title_line1: body.title_line1, description: body.description, button_link: body.button_link,
+    is_active: body.is_active !== undefined ? (body.is_active ? 1 : 0) : undefined,
+    badge_icon: body.badge_icon, badge_text: body.badge_text, title_line2: body.title_line2,
+    title_suffix: body.title_suffix, title_gradient: body.title_gradient, button_text: body.button_text,
+    button_icon: body.button_icon, button_color: body.button_color, button_text_color: body.button_text_color,
+    background_gradient: body.background_gradient,
+    background_image: body.background_image !== undefined ? (body.background_image || null) : undefined,
+    image_position: body.image_position, text_position: body.text_position,
+    content_layout: body.content_layout, show_instructor_images: body.show_instructor_images !== undefined ? (body.show_instructor_images ? 1 : 0) : undefined,
+  }
+  for (const [k, v] of Object.entries(fieldMap)) {
+    if (v !== undefined) { sets.push(`${k} = ?`); vals.push(v) }
+  }
+  if (sets.length > 0) {
+    sets.push('updated_at = CURRENT_TIMESTAMP')
+    vals.push(id)
+    await c.env.DB.prepare(`UPDATE hero_slides SET ${sets.join(', ')} WHERE id = ?`).bind(...vals).run()
+  }
+
+  // items 배열이 전달되면: DELETE 후 INSERT (전체 교체)
+  if (body.items !== undefined) {
+    try {
+      await c.env.DB.prepare('DELETE FROM hero_slide_items WHERE slide_id = ?').bind(id).run()
+      if (Array.isArray(body.items) && body.items.length > 0) {
+        const stmts = body.items.map((item: any, idx: number) =>
+          c.env.DB.prepare('INSERT INTO hero_slide_items (slide_id, role, title, description, thumbnail, category_label, link, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            .bind(id, item.role || 'main', item.title || '', item.description || '', item.thumbnail || '', item.category_label || '', item.link || '', idx)
+        )
+        await c.env.DB.batch(stmts)
+      }
+    } catch (e) { /* hero_slide_items 미존재 시 무시 */ }
+  }
 
   return c.json({ success: true })
 })
@@ -4948,8 +4977,34 @@ app.delete('/api/admin/hero-slides/:id', async (c) => {
   const existing = await c.env.DB.prepare('SELECT id FROM hero_slides WHERE id = ?').bind(id).first()
   if (!existing) return c.json({ error: '슬라이드를 찾을 수 없습니다.' }, 404)
 
+  try { await c.env.DB.prepare('DELETE FROM hero_slide_items WHERE slide_id = ?').bind(id).run() } catch (e) {}
   await c.env.DB.prepare('DELETE FROM hero_slides WHERE id = ?').bind(id).run()
   return c.json({ success: true })
+})
+
+// 관리자: 히어로 슬라이드 아이템 이미지 업로드
+app.post('/api/admin/hero-slides/:id/items/:itemId/image', async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const itemId = parseInt(c.req.param('itemId'))
+
+  const formData = await c.req.formData()
+  const file = formData.get('file') as File
+  if (!file) return c.json({ error: '파일이 없습니다.' }, 400)
+
+  const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+  if (!allowedTypes.includes(file.type)) return c.json({ error: '지원하지 않는 이미지 형식입니다.' }, 400)
+  if (file.size > 5 * 1024 * 1024) return c.json({ error: '파일 크기는 5MB 이하여야 합니다.' }, 400)
+
+  const ext = file.name.split('.').pop() || 'jpg'
+  const filename = `hero-slides/item-${id}-${itemId}-${Date.now()}.${ext}`
+  const arrayBuffer = await file.arrayBuffer()
+
+  await c.env.IMAGES.put(filename, arrayBuffer, { httpMetadata: { contentType: file.type } })
+
+  const imageUrl = `/api/images/${filename}`
+  await c.env.DB.prepare('UPDATE hero_slide_items SET thumbnail = ? WHERE id = ? AND slide_id = ?').bind(imageUrl, itemId, id).run()
+
+  return c.json({ success: true, url: imageUrl })
 })
 
 // 관리자: 히어로 슬라이드 배경 이미지 업로드
@@ -8191,6 +8246,15 @@ const headHTML = `<!DOCTYPE html>
     .skeleton { background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; }
     @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
     input:focus, select:focus { outline: none; border-color: #f43f5e; box-shadow: 0 0 0 3px rgba(244,63,94,0.1); }
+    /* Hero carousel: group-hover utilities (Tailwind CDN JIT off) */
+    .hero-slide-link:hover .gh-bg-black-50 { background: rgba(0,0,0,0.5); }
+    .hero-slide-link:hover .gh-top-0 { top: 0; }
+    .hero-slide-link:hover .gh-flex { display: flex; }
+    .hero-slide-link:hover .gh-flex-col { flex-direction: column; }
+    .hero-slide-link:hover .gh-justify-start { justify-content: flex-start; }
+    .hero-slide-link:hover .gh-pt-10 { padding-top: 2.5rem; }
+    .hero-slide-link:hover .gh-block { display: block; }
+    .hero-slide-link:hover .gh-scale-110 { transform: scale(1.1); }
   </style>
 </head>`
 
@@ -9758,6 +9822,14 @@ app.get('/', async (c) => {
   try {
     const heroResult = await c.env.DB.prepare('SELECT * FROM hero_slides WHERE is_active = 1 ORDER BY sort_order ASC').all()
     heroSlides = heroResult.results || []
+    // slide_items 조회 및 그룹핑
+    try {
+      const itemsResult = await c.env.DB.prepare('SELECT * FROM hero_slide_items ORDER BY slide_id, sort_order ASC').all()
+      const allItems = itemsResult.results || []
+      heroSlides.forEach((s: any) => {
+        s.items = allItems.filter((i: any) => i.slide_id === s.id)
+      })
+    } catch (e) { /* hero_slide_items 미존재 시 무시 */ }
   } catch (e) { /* hero_slides 테이블 미존재 시 폴백 */ }
 
   const [categories, featured, newClasses, liveClasses, specialClasses, requestClasses] = await c.env.DB.batch([
@@ -9802,164 +9874,257 @@ app.get('/', async (c) => {
 <body class="bg-gray-50 min-h-screen">
 ${navHTML}
 
-${heroSlides.length > 0 ? `
-<!-- Hero Carousel (동적) -->
-<section class="relative bg-gray-900 pt-6 pb-2">
-  <div class="relative max-w-[1420px] mx-auto">
-    <div class="relative overflow-hidden" style="aspect-ratio:100/37; min-height:280px;">
-      <div class="absolute inset-0 flex items-center justify-center" id="heroSlides">
-        ${heroSlides.map((slide: any, i: number) => {
-          let cl = { text: { x: 5, y: 30 }, btn: { x: 5, y: 75 } }
-          try { if (slide.content_layout) cl = JSON.parse(slide.content_layout) } catch(e) {}
-          return `
-        <div class="hero-slide absolute rounded-xl overflow-hidden" style="width:76%; height:100%;" data-index="${i}">
-          <div class="absolute inset-0" style="background:${slide.background_image ? `url(${escapeAttr(slide.background_image)}) center/cover no-repeat, ${escapeAttr(slide.background_gradient)}` : escapeAttr(slide.background_gradient)};"></div>
-          ${slide.show_instructor_images ? `
-          <div class="absolute inset-0 flex items-center">
-            <div class="w-full max-w-7xl mx-auto px-6 md:px-10 grid md:grid-cols-2 gap-8 items-center">
-              <div>
-                <div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-4">
-                  ${slide.badge_icon ? `<i class="${escapeAttr(slide.badge_icon)} text-sm"></i>` : '<span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>'}
-                  <span class="text-sm font-medium text-white">${escapeHtml(slide.badge_text)}</span>
-                </div>
-                <h2 class="text-2xl md:text-4xl lg:text-5xl font-extrabold leading-tight mb-3 text-white">
-                  ${escapeHtml(slide.title_line1)}${slide.title_line2 ? `<br><span class="text-transparent bg-clip-text bg-gradient-to-r ${escapeAttr(slide.title_gradient)}">${escapeHtml(slide.title_line2)}</span>${escapeHtml(slide.title_suffix)}` : ''}
-                </h2>
-                <p class="text-gray-300 text-sm md:text-base mb-6 leading-relaxed">${escapeHtml(slide.description)}</p>
-                <a href="${escapeAttr(slide.button_link)}" class="inline-block px-6 py-3 ${escapeAttr(slide.button_color)} ${escapeAttr(slide.button_text_color)} font-bold rounded-xl transition-all shadow-lg">
-                  <i class="${escapeAttr(slide.button_icon)} mr-2"></i>${escapeHtml(slide.button_text)}
-                </a>
-              </div>
-              <div class="hidden md:grid grid-cols-2 gap-3">
-                <div class="space-y-3">
-                  <img src="/static/instructors/park-sw.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
-                  <img src="/static/instructors/cho-wj.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
-                </div>
-                <div class="space-y-3 mt-6">
-                  <img src="/static/instructors/lee-jh.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
-                  <img src="/static/instructors/park-jy.jpg" class="w-full rounded-2xl shadow-2xl object-cover" alt="강사">
-                </div>
-              </div>
-            </div>
-          </div>` : `
-          <div class="absolute inset-0">
-            <div class="absolute max-w-[55%]" style="left:${cl.text.x}%;top:${cl.text.y}%;transform:translateY(-50%);">
-              ${slide.badge_text ? `<div class="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-4">
-                ${slide.badge_icon ? `<i class="${escapeAttr(slide.badge_icon)} text-sm"></i>` : '<span class="w-2 h-2 bg-red-500 rounded-full badge-live"></span>'}
-                <span class="text-sm font-medium text-white">${escapeHtml(slide.badge_text)}</span>
-              </div>` : ''}
-              <h2 class="text-2xl md:text-4xl lg:text-5xl font-extrabold leading-tight mb-3 text-white">
-                ${escapeHtml(slide.title_line1)}${slide.title_line2 ? `<br><span class="text-transparent bg-clip-text bg-gradient-to-r ${escapeAttr(slide.title_gradient)}">${escapeHtml(slide.title_line2)}</span>${escapeHtml(slide.title_suffix)}` : ''}
-              </h2>
-              <p class="text-gray-300 text-sm md:text-base leading-relaxed">${escapeHtml(slide.description)}</p>
-            </div>
-            <a href="${escapeAttr(slide.button_link)}" class="absolute inline-block px-6 py-3 ${escapeAttr(slide.button_color)} ${escapeAttr(slide.button_text_color)} font-bold rounded-xl transition-all shadow-lg" style="left:${cl.btn.x}%;top:${cl.btn.y}%;transform:translateY(-50%);">
-              <i class="${escapeAttr(slide.button_icon)} mr-2"></i>${escapeHtml(slide.button_text)}
-            </a>
-          </div>`}
-        </div>`}).join('')}
+${heroSlides.length > 0 ? (() => {
+  const hasMultiple = heroSlides.length > 1
+
+  // --- 공통 마이크로 컴포넌트 ---
+  const imgBg = (src: string, fallback: string) => src
+    ? `<div class="absolute inset-0"><img src="${escapeAttr(src)}" alt="" class="w-full h-full object-cover transition-transform duration-300 ease-out gh-scale-110" loading="lazy"></div>`
+    : `<div class="absolute inset-0" style="background:${escapeAttr(fallback || '#374151')};"></div>`
+  const gradientOverlay = `<div class="absolute left-0 bottom-0 w-full pointer-events-none" style="height:50%;background:linear-gradient(0deg,rgba(0,0,0,0.8) 0%,rgba(0,0,0,0) 100%);z-index:1;"></div><div class="absolute inset-0 transition-colors duration-300 pointer-events-none gh-bg-black-50" style="background:transparent;z-index:2;"></div>`
+  const contentOverlay = (cat: string, title: string, desc: string, large?: boolean) => `<div class="absolute left-0 right-0 bottom-0 p-6 md:p-8 lg:p-10 transition-all duration-300 gh-top-0 gh-flex gh-flex-col gh-justify-start gh-pt-10" style="z-index:3;"><p class="text-xs font-semibold mb-2" style="color:#89b4fa;">${escapeHtml(cat)}</p><p class="text-white leading-tight" style="font-weight:700;letter-spacing:-0.04em;font-size:${large ? 'clamp(1.375rem,2vw,1.875rem)' : 'clamp(1rem,1.5vw,1.375rem)'};display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escapeHtml(title)}</p>${desc ? `<p class="text-white/90 mt-3 text-sm md:text-base leading-relaxed hidden gh-block" style="max-width:600px;">${escapeHtml(desc)}</p>` : ''}</div>`
+  const mobileContent = (cat: string, title: string) => `<div class="absolute left-0 right-0 bottom-0 p-5" style="z-index:3;"><p class="text-xs font-semibold mb-2" style="color:#89b4fa;">${escapeHtml(cat)}</p><p class="text-white leading-tight" style="font-weight:700;letter-spacing:-0.04em;font-size:1.375rem;">${escapeHtml(title)}</p></div>`
+  const subCard = (item: any) => `<a href="${escapeAttr(item.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden flex-1 min-h-0" style="height:100%;">${imgBg(item.thumbnail, '#374151')}${gradientOverlay}<div class="absolute left-0 right-0 bottom-0 p-4 lg:p-5 transition-all duration-300 gh-top-0 gh-flex gh-flex-col gh-justify-start gh-pt-6" style="z-index:3;"><p class="text-xs font-semibold mb-1" style="color:#89b4fa;">${escapeHtml(item.category_label)}</p><p class="text-white text-sm leading-snug" style="font-weight:700;letter-spacing:-0.04em;">${escapeHtml(item.title)}</p><p class="text-white/90 mt-2 text-sm hidden gh-block" style="display:none;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.5;">${escapeHtml(item.description)}</p></div></a>`
+  const textCard = (item: any) => `<a href="${escapeAttr(item.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden p-4 transition-colors duration-200" style="background-color:#e0e9fe;height:25%;min-height:64px;" onmouseenter="this.style.backgroundColor='#c7d5fa'" onmouseleave="this.style.backgroundColor='#e0e9fe'"><div class="flex items-center h-full pr-8"><div><p class="text-xs font-semibold mb-1 transition-colors duration-200" style="color:#1428a0;">${escapeHtml(item.category_label)}</p><p class="leading-snug transition-colors duration-200" style="font-weight:700;letter-spacing:-0.04em;font-size:0.95rem;color:#1a1a1a;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escapeHtml(item.title)}</p></div></div><span class="absolute right-4 top-1/2 text-gray-400" style="transform:translateY(-50%);"><i class="fas fa-chevron-right" style="font-size:12px;"></i></span></a>`
+
+  // --- 배너 모드 (기존) ---
+  const renderBanner = (slide: any) => `
+    <a href="${escapeAttr(slide.button_link)}" class="hero-slide-link w-full flex-shrink-0 relative block rounded-xl overflow-hidden" style="padding-top:37.428%;">
+      <div class="absolute inset-0 transition-transform duration-300 ease-out gh-scale-110" style="background:${slide.background_image ? `url(${escapeAttr(slide.background_image)}) ${escapeAttr(slide.image_position || 'center center')}/cover no-repeat, ${escapeAttr(slide.background_gradient)}` : escapeAttr(slide.background_gradient)};"></div>
+      ${gradientOverlay}
+      <div class="absolute left-0 right-0 bottom-0 p-6 md:p-8 lg:p-10 transition-all duration-300 gh-top-0 gh-flex gh-flex-col gh-justify-start gh-pt-10" style="z-index:3;">
+        <p class="text-white text-2xl md:text-4xl lg:text-5xl font-extrabold leading-tight" style="letter-spacing:-0.04em;">
+          ${escapeHtml(slide.title_line1)}${slide.title_line2 ? `<br><span class="text-transparent bg-clip-text bg-gradient-to-r ${escapeAttr(slide.title_gradient)}">${escapeHtml(slide.title_line2)}</span>${escapeHtml(slide.title_suffix)}` : ''}
+        </p>
+        <p class="text-white/90 mt-3 text-sm md:text-base leading-relaxed hidden gh-block" style="max-width:600px;">
+          ${escapeHtml(slide.description)}
+        </p>
+      </div>
+    </a>`
+
+  // --- Case05: 풀사이즈 (아이템 1개) ---
+  const renderCase05 = (main: any) => `
+    <div class="w-full flex-shrink-0">
+      <a href="${escapeAttr(main.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden hidden md:block" style="padding-top:37.428%;">
+        ${imgBg(main.thumbnail, '#374151')}${gradientOverlay}${contentOverlay(main.category_label, main.title, main.description, true)}
+      </a>
+      <a href="${escapeAttr(main.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden md:hidden" style="padding-top:139.144%;">
+        ${imgBg(main.thumbnail, '#374151')}${gradientOverlay}${mobileContent(main.category_label, main.title)}
+      </a>
+    </div>`
+
+  // --- Case03: 2단 (아이템 2개) ---
+  const renderCase03 = (main: any, sub: any) => `
+    <div class="w-full flex-shrink-0">
+      <div class="hidden md:grid gap-5" style="grid-template-columns:77.573% 1fr;">
+        <a href="${escapeAttr(main.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden" style="padding-top:48.251%;">
+          ${imgBg(main.thumbnail, '#374151')}${gradientOverlay}${contentOverlay(main.category_label, main.title, main.description, true)}
+        </a>
+        ${sub ? subCard(sub) : ''}
+      </div>
+      <a href="${escapeAttr(main.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden md:hidden" style="padding-top:139.144%;">
+        ${imgBg(main.thumbnail, '#374151')}${gradientOverlay}${mobileContent(main.category_label, main.title)}
+      </a>
+    </div>`
+
+  // --- Case01: 4단 (아이템 3~4개) ---
+  const renderCase01 = (main: any, subImg: any, texts: any[]) => `
+    <div class="w-full flex-shrink-0">
+      <div class="hidden md:grid gap-5" style="grid-template-columns:66.5719% 1fr;">
+        <a href="${escapeAttr(main.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden" style="padding-top:56.2232%;">
+          ${imgBg(main.thumbnail, '#374151')}${gradientOverlay}${contentOverlay(main.category_label, main.title, main.description, true)}
+        </a>
+        <div class="flex flex-col gap-5">
+          ${subImg ? subCard(subImg) : ''}
+          ${texts.map((t: any) => textCard(t)).join('')}
+        </div>
+      </div>
+      <a href="${escapeAttr(main.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden md:hidden" style="padding-top:139.144%;">
+        ${imgBg(main.thumbnail, '#374151')}${gradientOverlay}${mobileContent(main.category_label, main.title)}
+      </a>
+    </div>`
+
+  // --- 레이아웃 라우터 ---
+  const renderSlide = (slide: any) => {
+    const items = slide.items || []
+    if (items.length === 0) return renderBanner(slide)
+    const main = items.find((i: any) => i.role === 'main') || items[0]
+    const subImage = items.find((i: any) => i.role === 'sub-image')
+    const subTexts = items.filter((i: any) => i.role === 'sub-text')
+    if (items.length === 1) return renderCase05(main)
+    if (items.length === 2) return renderCase03(main, subImage || subTexts[0])
+    return renderCase01(main, subImage, subTexts)
+  }
+
+  // Build extended slides: [cloneLast, ...slides, cloneFirst]
+  const slideItems = hasMultiple
+    ? [renderSlide(heroSlides[heroSlides.length - 1]), ...heroSlides.map((s: any) => renderSlide(s)), renderSlide(heroSlides[0])].join('')
+    : heroSlides.map((s: any) => renderSlide(s)).join('')
+  return `
+<!-- Hero Carousel (jungyoul-homepage style) -->
+<section class="relative bg-white pt-6 pb-2" aria-label="주요 정보">
+  <div class="relative max-w-[1420px] mx-auto px-4 md:px-8" id="heroContainer">
+    ${hasMultiple ? `
+    <div id="heroArrows" class="hidden md:block transition-opacity duration-200" style="opacity:0;pointer-events:none;">
+      <button onclick="heroPrev()" class="absolute z-20 rounded-full bg-white/80 shadow-lg hover:bg-white transition-colors" style="top:calc(50% - 36px);left:16px;width:56px;height:56px;" aria-label="이전 슬라이드">
+        <i class="fas fa-chevron-left text-lg"></i>
+      </button>
+      <button onclick="heroNext()" class="absolute z-20 rounded-full bg-white/80 shadow-lg hover:bg-white transition-colors" style="top:calc(50% - 36px);right:16px;width:56px;height:56px;" aria-label="다음 슬라이드">
+        <i class="fas fa-chevron-right text-lg"></i>
+      </button>
+    </div>` : ''}
+
+    <div class="relative overflow-hidden rounded-xl">
+      <div id="heroTrack" class="flex transition-transform ease-out" style="transform:translateX(-${hasMultiple ? 100 : 0}%);transition-duration:350ms;">
+        ${slideItems}
       </div>
     </div>
 
-    <!-- Controls Bar -->
-    <div class="flex items-center gap-3 mt-3 px-4 md:px-8">
-      <div class="flex items-center gap-1.5 text-sm font-medium select-none">
-        <span class="text-white font-bold" id="heroCurrent">01</span>
-        <span class="text-gray-500 text-xs" id="heroTotal">${String(heroSlides.length).padStart(2, '0')}</span>
+    ${hasMultiple ? `
+    <div class="flex items-center gap-3 mt-6">
+      <div class="flex items-center gap-1.5 text-sm font-medium select-none" style="font-variant-numeric:tabular-nums;">
+        <span class="text-gray-900 font-bold" id="heroCurrent">01</span>
+        <span class="inline-block mx-0.5" style="width:1px;height:9px;background:#ddd;"></span>
+        <span class="text-gray-400 text-xs" id="heroTotal">${String(heroSlides.length).padStart(2, '0')}</span>
       </div>
-      <div class="flex-1 h-0.5 bg-gray-700 rounded-full max-w-[300px]">
-        <div class="h-full bg-white rounded-full" id="heroProgress" style="width:0%; transition:none;"></div>
+      <div class="h-0.5 bg-gray-200 rounded-full" style="width:320px;max-width:100%;">
+        <div class="h-full bg-gray-900 rounded-full" id="heroProgress" style="width:0%;transition:none;"></div>
       </div>
-      <button onclick="heroPrev()" class="text-gray-400 hover:text-white transition-colors p-1" aria-label="이전 슬라이드">
+      <button onclick="heroPrev()" class="text-gray-500 hover:text-gray-900 transition-colors p-1" aria-label="이전 슬라이드">
         <i class="fas fa-chevron-left text-sm"></i>
       </button>
-      <button onclick="heroNext()" class="text-gray-400 hover:text-white transition-colors p-1" aria-label="다음 슬라이드">
+      <button onclick="heroNext()" class="text-gray-500 hover:text-gray-900 transition-colors p-1" aria-label="다음 슬라이드">
         <i class="fas fa-chevron-right text-sm"></i>
       </button>
-      <button onclick="heroTogglePause()" id="heroPauseBtn" class="text-gray-400 hover:text-white transition-colors p-1" aria-label="슬라이드 일시정지">
+      <span class="inline-block" style="width:1px;height:16px;background:#ddd;"></span>
+      <button onclick="heroTogglePause()" id="heroPauseBtn" class="text-gray-500 hover:text-gray-900 transition-colors p-1" aria-label="슬라이드 일시정지">
         <i class="fas fa-pause text-sm"></i>
       </button>
-    </div>
+    </div>` : ''}
   </div>
 </section>
-` : ''}
+`})() : ''}
 
 <script>
 (function() {
-  const slides = document.querySelectorAll('.hero-slide');
-  const total = slides.length;
-  let current = 0, isPaused = false, isTransitioning = false, progress = 0;
-  let rafId = null;
-  const duration = 5000;
+  var track = document.getElementById('heroTrack');
+  if (!track) return;
+  var total = ${heroSlides.length};
+  var hasMultiple = total > 1;
+  var current = hasMultiple ? 1 : 0;
+  var isPaused = false, noTransition = false, rafId = null;
+  var duration = 10000;
 
-  function getSlideStyle(index) {
-    let offset = index - current;
-    if (offset > total / 2) offset -= total;
-    if (offset < -total / 2) offset += total;
-    const isActive = offset === 0;
-    const isAdj = Math.abs(offset) === 1;
-    const isVisible = Math.abs(offset) <= 2;
-    return {
-      transform: 'translateX(' + (offset * 78) + '%) scale(' + (isActive ? 1 : 0.85) + ')',
-      opacity: isActive ? 1 : (isAdj ? 0.7 : 0),
-      zIndex: isActive ? 10 : (isAdj ? 5 : 1),
-      pointerEvents: isActive ? 'auto' : 'none',
-      transition: 'all 0.6s cubic-bezier(0.25, 0.1, 0.25, 1)'
-    };
+  // Touch state
+  var touchStartX = 0, touchStartY = 0, touchDeltaX = 0, isSwiping = false;
+
+  function updatePosition() {
+    track.style.transitionDuration = noTransition ? '0ms' : '350ms';
+    track.style.transform = 'translateX(-' + (current * 100) + '%)';
+    if (noTransition) {
+      requestAnimationFrame(function() { noTransition = false; });
+    }
+    // Update counter
+    var display = !hasMultiple ? 1 : (current <= 0 ? total : (current > total ? 1 : current));
+    var el = document.getElementById('heroCurrent');
+    if (el) el.textContent = String(display).padStart(2, '0');
   }
 
-  function updateSlides() {
-    slides.forEach(function(slide, i) {
-      var s = getSlideStyle(i);
-      slide.style.transform = s.transform;
-      slide.style.opacity = s.opacity;
-      slide.style.zIndex = s.zIndex;
-      slide.style.pointerEvents = s.pointerEvents;
-      slide.style.transition = s.transition;
-    });
-    document.getElementById('heroCurrent').textContent = String(current + 1).padStart(2, '0');
-  }
+  // Clone boundary snap
+  track.addEventListener('transitionend', function() {
+    if (!hasMultiple) return;
+    if (current === 0) {
+      noTransition = true;
+      current = total;
+      updatePosition();
+    } else if (current === total + 1) {
+      noTransition = true;
+      current = 1;
+      updatePosition();
+    }
+  });
 
-  function goTo(index) {
-    if (isTransitioning) return;
-    isTransitioning = true;
-    current = index;
-    progress = 0;
-    updateSlides();
-    setTimeout(function() { isTransitioning = false; }, 600);
-  }
-
-  window.heroNext = function() { goTo((current + 1) % total); };
-  window.heroPrev = function() { goTo((current - 1 + total) % total); };
+  window.heroNext = function() {
+    current++;
+    startAnimation();
+    updatePosition();
+  };
+  window.heroPrev = function() {
+    current--;
+    startAnimation();
+    updatePosition();
+  };
   window.heroTogglePause = function() {
     isPaused = !isPaused;
     var btn = document.getElementById('heroPauseBtn');
-    btn.innerHTML = isPaused ? '<i class="fas fa-play text-sm"></i>' : '<i class="fas fa-pause text-sm"></i>';
-    btn.setAttribute('aria-label', isPaused ? '슬라이드 재생' : '슬라이드 일시정지');
+    if (btn) {
+      btn.innerHTML = isPaused ? '<i class="fas fa-play text-sm"></i>' : '<i class="fas fa-pause text-sm"></i>';
+      btn.setAttribute('aria-label', isPaused ? '슬라이드 재생' : '슬라이드 일시정지');
+    }
     if (!isPaused) startAnimation();
   };
 
+  // Touch handlers
+  var container = document.getElementById('heroContainer');
+  if (container) {
+    container.addEventListener('touchstart', function(e) {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      touchDeltaX = 0;
+      isSwiping = false;
+    }, { passive: true });
+    container.addEventListener('touchmove', function(e) {
+      var dx = e.touches[0].clientX - touchStartX;
+      var dy = e.touches[0].clientY - touchStartY;
+      if (!isSwiping && Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 10) {
+        isSwiping = true;
+      }
+      if (isSwiping) touchDeltaX = dx;
+    }, { passive: true });
+    container.addEventListener('touchend', function() {
+      if (isSwiping) {
+        if (touchDeltaX < -50) window.heroNext();
+        else if (touchDeltaX > 50) window.heroPrev();
+      }
+      isSwiping = false;
+      touchDeltaX = 0;
+    });
+
+    // Hover arrows (desktop)
+    var arrows = document.getElementById('heroArrows');
+    if (arrows) {
+      container.addEventListener('mouseenter', function() {
+        arrows.style.opacity = '1';
+        arrows.style.pointerEvents = 'auto';
+      });
+      container.addEventListener('mouseleave', function() {
+        arrows.style.opacity = '0';
+        arrows.style.pointerEvents = 'none';
+      });
+    }
+  }
+
+  // Auto-play with progress bar
   function startAnimation() {
+    if (rafId) cancelAnimationFrame(rafId);
     var start = null;
     function animate(ts) {
-      if (isPaused) return;
+      if (isPaused || !hasMultiple) return;
       if (!start) start = ts;
-      var elapsed = ts - start;
-      progress = Math.min((elapsed / duration) * 100, 100);
-      document.getElementById('heroProgress').style.width = progress + '%';
-      if (progress >= 100) {
+      var pct = Math.min(((ts - start) / duration) * 100, 100);
+      var bar = document.getElementById('heroProgress');
+      if (bar) bar.style.width = pct + '%';
+      if (pct >= 100) {
         window.heroNext();
-        startAnimation();
         return;
       }
       rafId = requestAnimationFrame(animate);
     }
-    if (rafId) cancelAnimationFrame(rafId);
     rafId = requestAnimationFrame(animate);
   }
 
-  updateSlides();
-  startAnimation();
+  updatePosition();
+  if (hasMultiple) startAnimation();
 })();
 </script>
 
@@ -17553,96 +17718,85 @@ app.get('/admin/homepage', async (c) => {
       <div class="p-5 overflow-y-auto flex-1 space-y-4">
         <input type="hidden" id="slideEditId" value="">
 
-        <!-- 배경 이미지 업로드 -->
-        <div>
-          <label class="text-xs text-gray-500 mb-1.5 block">배경 이미지</label>
-          <div id="slideDropZone" class="relative border-2 border-dashed border-gray-300 rounded-xl bg-gray-900 overflow-hidden cursor-pointer transition-all hover:border-purple-400" style="aspect-ratio:100/37; min-height:120px;"
-               onclick="document.getElementById('slideImageFile').click()"
-               ondragover="event.preventDefault();this.classList.add('border-purple-500','bg-gray-800')"
-               ondragleave="this.classList.remove('border-purple-500','bg-gray-800')"
-               ondrop="event.preventDefault();this.classList.remove('border-purple-500','bg-gray-800');handleSlideImageDrop(event)">
-            <div id="slideDropPlaceholder" class="absolute inset-0 flex flex-col items-center justify-center text-gray-400">
-              <i class="fas fa-cloud-upload-alt text-2xl mb-1.5"></i>
-              <p class="text-xs font-medium">이미지를 드래그하거나 클릭하여 업로드</p>
-              <p class="text-[10px] text-gray-500 mt-1">권장: 1420x520px, 5MB 이하</p>
+        <!-- 모드 전환 -->
+        <div class="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+          <button onclick="setSlideMode('banner')" id="slideModebannerBtn" class="flex-1 text-sm font-medium py-1.5 rounded-md transition-all bg-white shadow text-gray-900">배너 모드</button>
+          <button onclick="setSlideMode('card')" id="slideModecardBtn" class="flex-1 text-sm font-medium py-1.5 rounded-md transition-all text-gray-500">카드 모드</button>
+        </div>
+
+        <!-- 활성 토글 -->
+        <div class="flex items-center gap-2">
+          <input type="checkbox" id="slideIsActive" checked class="rounded border-gray-300 text-purple-500 focus:ring-purple-500">
+          <label for="slideIsActive" class="text-sm text-gray-700 font-medium">활성</label>
+        </div>
+
+        <!-- ========== 배너 모드 섹션 ========== -->
+        <div id="slideBannerSection">
+          <div class="space-y-4">
+            <!-- 배경 이미지 업로드 -->
+            <div>
+              <label class="text-xs text-gray-500 mb-1.5 block">배경 이미지</label>
+              <div id="slideDropZone" class="relative border-2 border-dashed border-gray-300 rounded-xl bg-gray-900 overflow-hidden cursor-pointer transition-all hover:border-purple-400" style="aspect-ratio:100/37; min-height:120px;"
+                   onclick="document.getElementById('slideImageFile').click()"
+                   ondragover="event.preventDefault();this.classList.add('border-purple-500','bg-gray-800')"
+                   ondragleave="this.classList.remove('border-purple-500','bg-gray-800')"
+                   ondrop="event.preventDefault();this.classList.remove('border-purple-500','bg-gray-800');handleSlideImageDrop(event)">
+                <div id="slideDropPlaceholder" class="absolute inset-0 flex flex-col items-center justify-center text-gray-400">
+                  <i class="fas fa-cloud-upload-alt text-2xl mb-1.5"></i>
+                  <p class="text-xs font-medium">이미지를 드래그하거나 클릭하여 업로드</p>
+                  <p class="text-[10px] text-gray-500 mt-1">권장: 1420x520px, 5MB 이하</p>
+                </div>
+                <img id="slideDropPreviewImg" class="absolute inset-0 w-full h-full object-cover hidden" alt="">
+                <input type="file" id="slideImageFile" accept="image/jpeg,image/png,image/gif,image/webp" class="hidden" onchange="handleSlideImageSelect(this)">
+              </div>
+              <div id="slideImageActions" class="flex items-center gap-2 mt-1.5 hidden">
+                <span id="slideImageName" class="text-xs text-gray-500 truncate flex-1"></span>
+                <button onclick="removeSlideImageLocal()" class="text-xs text-red-500 hover:text-red-700"><i class="fas fa-trash mr-1"></i>이미지 제거</button>
+              </div>
             </div>
-            <img id="slideDropPreviewImg" class="absolute inset-0 w-full h-full object-cover hidden" alt="">
-            <input type="file" id="slideImageFile" accept="image/jpeg,image/png,image/gif,image/webp" class="hidden" onchange="handleSlideImageSelect(this)">
-          </div>
-          <div id="slideImageActions" class="flex items-center gap-2 mt-1.5 hidden">
-            <span id="slideImageName" class="text-xs text-gray-500 truncate flex-1"></span>
-            <button onclick="removeSlideImageLocal()" class="text-xs text-red-500 hover:text-red-700"><i class="fas fa-trash mr-1"></i>이미지 제거</button>
-          </div>
-        </div>
-
-        <!-- 제목 -->
-        <div>
-          <label class="text-xs text-gray-500 mb-1 block">제목</label>
-          <input type="text" id="slideTitle" placeholder="당신의 성장을 위한 라이브 양방향 코스" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent" oninput="updateSlidePreview()">
-        </div>
-
-        <!-- 설명 -->
-        <div>
-          <label class="text-xs text-gray-500 mb-1 block">설명</label>
-          <textarea id="slideDescription" rows="2" placeholder="검증된 전문 강사의 실시간 양방향 강의로 배우고..." class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent" oninput="updateSlidePreview()"></textarea>
-        </div>
-
-        <!-- 버튼 텍스트 + 링크 -->
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="text-xs text-gray-500 mb-1 block">버튼 텍스트</label>
-            <input type="text" id="slideButtonText" placeholder="코스 둘러보기" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent" oninput="updateSlidePreview()">
-          </div>
-          <div>
-            <label class="text-xs text-gray-500 mb-1 block">버튼 링크</label>
-            <input type="text" id="slideButtonLink" placeholder="/categories" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent">
-          </div>
-        </div>
-
-        <!-- 배경색 프리셋 + 활성 토글 -->
-        <div class="flex items-center justify-between">
-          <div>
-            <label class="text-xs text-gray-500 mb-2 block">배경 색상</label>
-            <div class="flex items-center gap-2" id="slideColorPresetsEl">
-              <label class="cursor-pointer" title="다크 네이비">
-                <input type="radio" name="slideColorPreset" value="navy" class="sr-only peer" checked onchange="updateSlidePreview()">
-                <span class="block w-8 h-8 rounded-full border-2 border-transparent peer-checked:border-purple-500 peer-checked:ring-2 peer-checked:ring-purple-200 transition-all" style="background:linear-gradient(135deg, #1e293b, #0f172a);"></span>
-              </label>
-              <label class="cursor-pointer" title="보라">
-                <input type="radio" name="slideColorPreset" value="purple" class="sr-only peer" onchange="updateSlidePreview()">
-                <span class="block w-8 h-8 rounded-full border-2 border-transparent peer-checked:border-purple-500 peer-checked:ring-2 peer-checked:ring-purple-200 transition-all" style="background:linear-gradient(135deg, hsl(235,55%,35%), hsl(255,45%,20%));"></span>
-              </label>
-              <label class="cursor-pointer" title="초록">
-                <input type="radio" name="slideColorPreset" value="green" class="sr-only peer" onchange="updateSlidePreview()">
-                <span class="block w-8 h-8 rounded-full border-2 border-transparent peer-checked:border-purple-500 peer-checked:ring-2 peer-checked:ring-purple-200 transition-all" style="background:linear-gradient(135deg, hsl(160,50%,30%), hsl(180,45%,18%));"></span>
-              </label>
-              <label class="cursor-pointer" title="레드">
-                <input type="radio" name="slideColorPreset" value="red" class="sr-only peer" onchange="updateSlidePreview()">
-                <span class="block w-8 h-8 rounded-full border-2 border-transparent peer-checked:border-purple-500 peer-checked:ring-2 peer-checked:ring-purple-200 transition-all" style="background:linear-gradient(135deg, hsl(0,50%,35%), hsl(330,45%,20%));"></span>
-              </label>
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">제목</label>
+              <input type="text" id="slideTitle" placeholder="당신의 성장을 위한 라이브 양방향 코스" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" oninput="updateSlidePreview()">
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">설명</label>
+              <textarea id="slideDescription" rows="2" placeholder="검증된 전문 강사의 실시간 양방향 강의로 배우고..." class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" oninput="updateSlidePreview()"></textarea>
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 mb-1 block">클릭 시 이동할 링크</label>
+              <input type="text" id="slideButtonLink" placeholder="/categories" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+            </div>
+            <!-- 배너 미리보기 -->
+            <div>
+              <label class="text-xs text-gray-500 mb-2 block"><i class="fas fa-eye mr-1"></i>미리보기</label>
+              <div id="slidePreviewArea" class="relative rounded-xl overflow-hidden" style="aspect-ratio:100/37; min-height:120px;">
+                <div id="slidePreviewBg" class="absolute inset-0" style="background:linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%);"></div>
+                <div class="absolute left-0 bottom-0 w-full pointer-events-none" style="height:50%;background:linear-gradient(0deg,rgba(0,0,0,0.8) 0%,rgba(0,0,0,0) 100%);z-index:1;"></div>
+                <div class="absolute left-0 right-0 bottom-0 p-4" style="z-index:3;">
+                  <p class="text-sm font-extrabold leading-tight text-white" id="slidePreviewTitle" style="letter-spacing:-0.04em;">제목을 입력하세요</p>
+                  <p class="text-white/70 text-[10px] leading-relaxed mt-1" id="slidePreviewDesc"></p>
+                </div>
+              </div>
             </div>
           </div>
-          <div class="flex items-center gap-2">
-            <input type="checkbox" id="slideIsActive" checked class="rounded border-gray-300 text-purple-500 focus:ring-purple-500">
-            <label for="slideIsActive" class="text-sm text-gray-700 font-medium">활성</label>
-          </div>
         </div>
 
-        <!-- 실시간 미리보기 (드래그로 요소 자유 배치) -->
-        <div>
-          <label class="text-xs text-gray-500 mb-2 block"><i class="fas fa-eye mr-1"></i>미리보기 <span class="text-gray-400">(텍스트/버튼을 드래그하여 배치)</span></label>
-          <div id="slidePreviewArea" class="relative rounded-xl overflow-hidden select-none" style="aspect-ratio:100/37; min-height:120px;">
-            <div id="slidePreviewBg" class="absolute inset-0" style="background:linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%);"></div>
-            <div class="absolute max-w-[55%] cursor-move" id="slidePreviewText" style="left:5%;top:30%;transform:translateY(-50%);"
-                 onmousedown="startElDrag(event,'text')">
-              <h2 class="text-sm font-extrabold leading-tight mb-1 text-white" id="slidePreviewTitle">제목을 입력하세요</h2>
-              <p class="text-gray-300 text-[10px] leading-relaxed" id="slidePreviewDesc"></p>
+        <!-- ========== 카드 모드 섹션 ========== -->
+        <div id="slideCardSection" style="display:none;">
+          <div class="space-y-3">
+            <div id="slideItemSlots" class="space-y-3"></div>
+            <button onclick="addSlideItemSlot()" id="addSlotBtn" class="w-full py-2 border-2 border-dashed border-gray-300 rounded-lg text-sm text-gray-500 hover:border-purple-400 hover:text-purple-500 transition-all">
+              <i class="fas fa-plus mr-1"></i>슬롯 추가 <span id="slotCountLabel">(0/4)</span>
+            </button>
+            <!-- 레이아웃 라벨 -->
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-gray-400">레이아웃:</span>
+              <span id="layoutLabel" class="text-xs font-semibold text-purple-600">슬롯을 추가하세요</span>
             </div>
-            <div class="absolute cursor-move" id="slidePreviewBtnWrap" style="left:5%;top:75%;transform:translateY(-50%);"
-                 onmousedown="startElDrag(event,'btn')">
-              <span id="slidePreviewBtn" class="inline-block px-3 py-1.5 bg-primary-500 text-white text-[10px] font-bold rounded-lg">
-                <i class="fas fa-play mr-1"></i><span id="slidePreviewBtnText">코스 둘러보기</span>
-              </span>
+            <!-- 카드 모드 미리보기 -->
+            <div>
+              <label class="text-xs text-gray-500 mb-2 block"><i class="fas fa-eye mr-1"></i>레이아웃 미리보기</label>
+              <div id="cardPreviewArea" class="bg-gray-900 rounded-xl p-3" style="aspect-ratio:100/37; min-height:100px;"></div>
             </div>
           </div>
         </div>
@@ -17714,13 +17868,16 @@ function renderHeroSlides() {
       <span class="text-xs text-gray-400 font-mono w-5 text-center">\${idx + 1}</span>
       <div class="w-14 h-10 rounded-lg flex-shrink-0 border border-gray-200" style="background:\${slide.background_image ? 'url(' + slide.background_image + ') center/cover' : slide.background_gradient};"></div>
       <div class="flex-1 min-w-0">
-        <p class="text-sm font-semibold text-gray-800 truncate">\${slide.title_line1} \${slide.title_line2}\${slide.title_suffix}</p>
-        <p class="text-xs text-gray-500 truncate">\${slide.badge_text} · \${slide.button_text}</p>
+        <p class="text-sm font-semibold text-gray-800 truncate">\${slide.title_line1}</p>
+        <p class="text-xs text-gray-500 truncate">\${slide.button_link || '/categories'}</p>
       </div>
       <div class="flex items-center gap-1">
         \${slide.is_active
           ? '<span class="text-[10px] bg-green-100 text-green-600 px-1.5 py-0.5 rounded font-semibold">활성</span>'
           : '<span class="text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded font-semibold">비활성</span>'}
+        \${slide.items && slide.items.length > 0
+          ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-semibold">' + (slide.items.length === 1 ? '풀' : slide.items.length === 2 ? '2단' : '4단') + '</span>'
+          : '<span class="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-semibold">배너</span>'}
         \${slide.background_image ? '<span class="text-[10px] bg-purple-100 text-purple-600 px-1.5 py-0.5 rounded font-semibold">IMG</span>' : ''}
       </div>
       <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -17803,29 +17960,125 @@ async function saveSlideOrder() {
   }
 }
 
-// 배경색 프리셋 (배경 그라데이션 + 제목 그라데이션 + 버튼 색상 세트)
-const slideColorPresets = {
-  navy:   { background_gradient: 'linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%)', title_gradient: 'from-primary-400 to-pink-400', button_color: 'bg-primary-500 hover:bg-primary-600', button_text_color: 'text-white' },
-  purple: { background_gradient: 'linear-gradient(135deg, hsl(235,55%,35%) 0%, hsl(255,45%,20%) 100%)', title_gradient: 'from-yellow-300 to-orange-400', button_color: 'bg-yellow-500 hover:bg-yellow-600', button_text_color: 'text-gray-900' },
-  green:  { background_gradient: 'linear-gradient(135deg, hsl(160,50%,30%) 0%, hsl(180,45%,18%) 100%)', title_gradient: 'from-emerald-300 to-teal-400', button_color: 'bg-emerald-500 hover:bg-emerald-600', button_text_color: 'text-white' },
-  red:    { background_gradient: 'linear-gradient(135deg, hsl(0,50%,35%) 0%, hsl(330,45%,20%) 100%)', title_gradient: 'from-red-400 to-rose-400', button_color: 'bg-red-500 hover:bg-red-600', button_text_color: 'text-white' }
-};
-
-function detectPresetFromGradient(bgGradient) {
-  for (const [key, preset] of Object.entries(slideColorPresets)) {
-    if (preset.background_gradient === bgGradient) return key;
-  }
-  return 'navy';
-}
-
 let slideLocalImageUrl = null;
 let slideRemoveServerImage = false;
-let slideContentLayout = { text: { x: 5, y: 30 }, btn: { x: 5, y: 75 } };
-let dragTarget = null; // 'text' or 'btn'
+let slideMode = 'banner'; // 'banner' | 'card'
+let slideItemSlots = []; // [{role, title, description, thumbnail, category_label, link}]
 
-function getSelectedPreset() {
-  const checked = document.querySelector('input[name="slideColorPreset"]:checked');
-  return checked ? checked.value : 'navy';
+function setSlideMode(mode) {
+  slideMode = mode;
+  document.getElementById('slideBannerSection').style.display = mode === 'banner' ? '' : 'none';
+  document.getElementById('slideCardSection').style.display = mode === 'card' ? '' : 'none';
+  document.getElementById('slideModebannerBtn').className = 'flex-1 text-sm font-medium py-1.5 rounded-md transition-all ' + (mode === 'banner' ? 'bg-white shadow text-gray-900' : 'text-gray-500');
+  document.getElementById('slideModecardBtn').className = 'flex-1 text-sm font-medium py-1.5 rounded-md transition-all ' + (mode === 'card' ? 'bg-white shadow text-gray-900' : 'text-gray-500');
+  if (mode === 'card') renderSlideItemSlots();
+}
+
+var roleLabels = { 'main': '메인', 'sub-image': '서브이미지', 'sub-text': '서브텍스트' };
+var layoutLabels = { 1: '풀사이즈 레이아웃', 2: '2단 레이아웃 (메인 + 서브)', 3: '4단 레이아웃 (메인 + 서브 + 텍스트)', 4: '4단 레이아웃 (메인 + 서브 + 텍스트×2)' };
+
+function getAvailableRoles(currentIdx) {
+  var roles = [];
+  var hasMain = slideItemSlots.some(function(s, i) { return i !== currentIdx && s.role === 'main'; });
+  var hasSubImg = slideItemSlots.some(function(s, i) { return i !== currentIdx && s.role === 'sub-image'; });
+  var subTextCount = slideItemSlots.filter(function(s, i) { return i !== currentIdx && s.role === 'sub-text'; }).length;
+  if (!hasMain || slideItemSlots[currentIdx].role === 'main') roles.push('main');
+  if (!hasSubImg || slideItemSlots[currentIdx].role === 'sub-image') roles.push('sub-image');
+  if (subTextCount < 2 || slideItemSlots[currentIdx].role === 'sub-text') roles.push('sub-text');
+  return roles;
+}
+
+function addSlideItemSlot() {
+  if (slideItemSlots.length >= 4) return;
+  var hasMain = slideItemSlots.some(function(s) { return s.role === 'main'; });
+  var hasSubImg = slideItemSlots.some(function(s) { return s.role === 'sub-image'; });
+  var role = !hasMain ? 'main' : (!hasSubImg ? 'sub-image' : 'sub-text');
+  slideItemSlots.push({ role: role, title: '', description: '', thumbnail: '', category_label: '', link: '' });
+  renderSlideItemSlots();
+}
+
+function removeSlideItemSlot(idx) {
+  slideItemSlots.splice(idx, 1);
+  renderSlideItemSlots();
+}
+
+function updateSlotField(idx, field, value) {
+  slideItemSlots[idx][field] = value;
+  if (field === 'role') renderSlideItemSlots();
+  else updateCardPreview();
+}
+
+function renderSlideItemSlots() {
+  var container = document.getElementById('slideItemSlots');
+  var html = '';
+  slideItemSlots.forEach(function(slot, idx) {
+    var roles = getAvailableRoles(idx);
+    var roleOptions = roles.map(function(r) {
+      return '<option value="' + r + '"' + (r === slot.role ? ' selected' : '') + '>' + roleLabels[r] + '</option>';
+    }).join('');
+    html += '<div class="border border-gray-200 rounded-lg p-3 space-y-2 bg-gray-50">' +
+      '<div class="flex items-center justify-between">' +
+        '<div class="flex items-center gap-2">' +
+          '<span class="text-xs font-bold text-gray-400">슬롯 ' + (idx + 1) + '</span>' +
+          '<select onchange="updateSlotField(' + idx + ',\'role\',this.value)" class="text-xs border border-gray-200 rounded px-2 py-1 bg-white">' + roleOptions + '</select>' +
+        '</div>' +
+        '<button onclick="removeSlideItemSlot(' + idx + ')" class="text-xs text-red-400 hover:text-red-600"><i class="fas fa-times"></i></button>' +
+      '</div>' +
+      '<input type="text" placeholder="제목" value="' + (slot.title || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',\'title\',this.value)" class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs">' +
+      (slot.role !== 'sub-text' ? '<input type="text" placeholder="설명" value="' + (slot.description || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',\'description\',this.value)" class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs">' : '') +
+      '<div class="grid grid-cols-2 gap-2">' +
+        '<input type="text" placeholder="카테고리" value="' + (slot.category_label || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',\'category_label\',this.value)" class="px-2 py-1.5 border border-gray-200 rounded text-xs">' +
+        '<input type="text" placeholder="링크 URL" value="' + (slot.link || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',\'link\',this.value)" class="px-2 py-1.5 border border-gray-200 rounded text-xs">' +
+      '</div>' +
+      (slot.role !== 'sub-text' ? '<div class="flex items-center gap-2"><input type="text" placeholder="이미지 URL" value="' + (slot.thumbnail || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',\'thumbnail\',this.value)" class="flex-1 px-2 py-1.5 border border-gray-200 rounded text-xs"><input type="file" accept="image/*" class="hidden" id="slotFile' + idx + '" onchange="uploadSlotImage(' + idx + ',this)"><button onclick="document.getElementById(\'slotFile' + idx + '\').click()" class="text-xs text-purple-500 hover:text-purple-700 whitespace-nowrap"><i class="fas fa-upload mr-1"></i>업로드</button></div>' : '') +
+    '</div>';
+  });
+  container.innerHTML = html;
+  document.getElementById('slotCountLabel').textContent = '(' + slideItemSlots.length + '/4)';
+  document.getElementById('addSlotBtn').style.display = slideItemSlots.length >= 4 ? 'none' : '';
+  var label = layoutLabels[slideItemSlots.length] || '슬롯을 추가하세요';
+  if (slideItemSlots.length > 0 && !slideItemSlots.some(function(s) { return s.role === 'main'; })) label = '⚠️ 메인 슬롯이 필요합니다';
+  document.getElementById('layoutLabel').textContent = label;
+  updateCardPreview();
+}
+
+function updateCardPreview() {
+  var area = document.getElementById('cardPreviewArea');
+  var n = slideItemSlots.length;
+  if (n === 0) { area.innerHTML = '<div class="flex items-center justify-center h-full text-gray-500 text-xs">슬롯을 추가하면 미리보기가 표시됩니다</div>'; return; }
+  var main = slideItemSlots.find(function(s) { return s.role === 'main'; }) || slideItemSlots[0];
+  var subImg = slideItemSlots.find(function(s) { return s.role === 'sub-image'; });
+  var subTexts = slideItemSlots.filter(function(s) { return s.role === 'sub-text'; });
+  var card = function(item, label) {
+    var bg = item.thumbnail ? 'background:url(' + item.thumbnail + ') center/cover;' : 'background:#374151;';
+    return '<div class="relative rounded-lg overflow-hidden" style="' + bg + 'min-height:40px;flex:1;"><div class="absolute inset-0" style="background:rgba(0,0,0,0.5);"></div><div class="relative p-2" style="z-index:1;"><p class="text-[9px] text-purple-300 font-semibold">' + label + '</p><p class="text-[10px] text-white font-bold truncate">' + (item.title || '제목 없음') + '</p><p class="text-[8px] text-blue-300">' + (item.category_label || '') + '</p></div></div>';
+  };
+  var textC = function(item) {
+    return '<div class="rounded-lg p-2" style="background:#e0e9fe;flex:0 0 auto;min-height:28px;"><p class="text-[8px] font-semibold" style="color:#1428a0;">' + (item.category_label || '') + '</p><p class="text-[10px] font-bold truncate" style="color:#1a1a1a;">' + (item.title || '제목 없음') + '</p></div>';
+  };
+  var html = '';
+  if (n === 1) {
+    html = card(main, '메인');
+  } else if (n === 2) {
+    html = '<div style="display:grid;grid-template-columns:77.573% 1fr;gap:8px;height:100%;">' + card(main, '메인') + card(subImg || subTexts[0] || main, subImg ? '서브이미지' : '서브텍스트') + '</div>';
+  } else {
+    html = '<div style="display:grid;grid-template-columns:66.57% 1fr;gap:8px;height:100%;">' + card(main, '메인') + '<div style="display:flex;flex-direction:column;gap:6px;">' + (subImg ? card(subImg, '서브이미지') : '') + subTexts.map(function(t) { return textC(t); }).join('') + '</div></div>';
+  }
+  area.innerHTML = html;
+}
+
+async function uploadSlotImage(idx, input) {
+  if (!input.files || !input.files[0]) return;
+  var editId = document.getElementById('slideEditId').value;
+  if (!editId) { slideItemSlots[idx].thumbnail = URL.createObjectURL(input.files[0]); renderSlideItemSlots(); return; }
+  var formData = new FormData();
+  formData.append('file', input.files[0]);
+  try {
+    var res = await fetch('/api/admin/hero-slides/' + editId + '/items/0/image', { method: 'POST', body: formData });
+    var data = await res.json();
+    if (data.success) { slideItemSlots[idx].thumbnail = data.url; renderSlideItemSlots(); }
+    else showAlert('오류', data.error || '이미지 업로드 실패');
+  } catch(e) { showAlert('오류', '이미지 업로드 중 오류가 발생했습니다.'); }
 }
 
 // 이미지 드래그 드롭
@@ -17873,89 +18126,44 @@ function removeSlideImageLocal() {
   updateSlidePreview();
 }
 
-// 요소별 자유 드래그
+// (드래그 배치 제거됨 - jungyoul-homepage 스타일에서는 고정 레이아웃 사용)
 function startElDrag(e, target) {
-  e.preventDefault();
-  dragTarget = target;
-  const area = document.getElementById('slidePreviewArea');
-
-  function onMove(ev) {
-    const rect = area.getBoundingClientRect();
-    const x = Math.max(0, Math.min(95, ((ev.clientX - rect.left) / rect.width) * 100));
-    const y = Math.max(5, Math.min(95, ((ev.clientY - rect.top) / rect.height) * 100));
-    slideContentLayout[dragTarget] = { x: Math.round(x), y: Math.round(y) };
-    applyContentLayout();
-  }
-  function onUp() {
-    dragTarget = null;
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-  }
-  document.addEventListener('mousemove', onMove);
-  document.addEventListener('mouseup', onUp);
+  // no-op: 이전 드래그 배치 기능은 비활성화됨
 }
-
-function applyContentLayout() {
-  const textEl = document.getElementById('slidePreviewText');
-  const btnEl = document.getElementById('slidePreviewBtnWrap');
-  if (textEl) {
-    textEl.style.left = slideContentLayout.text.x + '%';
-    textEl.style.top = slideContentLayout.text.y + '%';
-  }
-  if (btnEl) {
-    btnEl.style.left = slideContentLayout.btn.x + '%';
-    btnEl.style.top = slideContentLayout.btn.y + '%';
-  }
-}
-
-// 실시간 미리보기
+// 실시간 미리보기 (jungyoul-homepage 스타일)
 function updateSlidePreview() {
-  const preset = slideColorPresets[getSelectedPreset()];
-  const title = document.getElementById('slideTitle').value || '제목을 입력하세요';
-  const desc = document.getElementById('slideDescription').value;
-  const btnText = document.getElementById('slideButtonText').value || '코스 둘러보기';
+  var title = document.getElementById('slideTitle').value || '제목을 입력하세요';
+  var desc = document.getElementById('slideDescription').value;
+  var bgEl = document.getElementById('slidePreviewBg');
+  var existing = heroSlidesData.find(function(s) { return s.id === parseInt(document.getElementById('slideEditId').value); });
+  var gradient = (existing && existing.background_gradient) || 'linear-gradient(135deg, #1e293b 0%, #0f172a 50%, #1a1a2e 100%)';
 
-  const bgEl = document.getElementById('slidePreviewBg');
   if (slideLocalImageUrl) {
-    bgEl.style.background = 'url(' + slideLocalImageUrl + ') center/cover no-repeat, ' + preset.background_gradient;
+    bgEl.style.background = 'url(' + slideLocalImageUrl + ') center/cover no-repeat, ' + gradient;
   } else {
-    bgEl.style.background = preset.background_gradient;
+    bgEl.style.background = gradient;
   }
-  applyContentLayout();
 
   document.getElementById('slidePreviewTitle').textContent = title;
   document.getElementById('slidePreviewDesc').textContent = desc;
-  document.getElementById('slidePreviewBtnText').textContent = btnText;
-
-  const btnEl = document.getElementById('slidePreviewBtn');
-  btnEl.className = 'inline-block px-3 py-1.5 ' + preset.button_color + ' ' + preset.button_text_color + ' text-[10px] font-bold rounded-lg';
 }
 
 function openSlideModal(id) {
-  const modal = document.getElementById('slideModal');
-  const titleEl = document.getElementById('slideModalTitle');
+  var modal = document.getElementById('slideModal');
+  var titleEl = document.getElementById('slideModalTitle');
   slideLocalImageUrl = null;
   slideRemoveServerImage = false;
-  slideContentLayout = { text: { x: 5, y: 30 }, btn: { x: 5, y: 75 } };
+  slideItemSlots = [];
 
   if (id) {
-    const slide = heroSlidesData.find(s => s.id === id);
+    var slide = heroSlidesData.find(function(s) { return s.id === id; });
     if (!slide) return;
     titleEl.textContent = '슬라이드 편집';
     document.getElementById('slideEditId').value = id;
-    const fullTitle = [slide.title_line1, slide.title_line2, slide.title_suffix].filter(Boolean).join(' ');
-    document.getElementById('slideTitle').value = fullTitle || '';
+    document.getElementById('slideTitle').value = slide.title_line1 || '';
     document.getElementById('slideDescription').value = slide.description || '';
-    document.getElementById('slideButtonText').value = slide.button_text || '';
     document.getElementById('slideButtonLink').value = slide.button_link || '/categories';
     document.getElementById('slideIsActive').checked = !!slide.is_active;
-
-    const presetKey = detectPresetFromGradient(slide.background_gradient);
-    const radio = document.querySelector('input[name="slideColorPreset"][value="' + presetKey + '"]');
-    if (radio) radio.checked = true;
-
-    // 콘텐츠 레이아웃 복원
-    try { if (slide.content_layout) slideContentLayout = JSON.parse(slide.content_layout); } catch(e) {}
 
     // 이미지 복원
     if (slide.background_image) {
@@ -17966,19 +18174,27 @@ function openSlideModal(id) {
       document.getElementById('slideDropPlaceholder').classList.remove('hidden');
       document.getElementById('slideImageActions').classList.add('hidden');
     }
+
+    // 카드 모드 복원: items가 있으면 카드 모드로 전환
+    if (slide.items && slide.items.length > 0) {
+      slideItemSlots = slide.items.map(function(i) {
+        return { role: i.role, title: i.title, description: i.description, thumbnail: i.thumbnail, category_label: i.category_label, link: i.link };
+      });
+      setSlideMode('card');
+    } else {
+      setSlideMode('banner');
+    }
   } else {
     titleEl.textContent = '슬라이드 추가';
     document.getElementById('slideEditId').value = '';
     document.getElementById('slideTitle').value = '';
     document.getElementById('slideDescription').value = '';
-    document.getElementById('slideButtonText').value = '';
     document.getElementById('slideButtonLink').value = '/categories';
     document.getElementById('slideIsActive').checked = true;
-    const navyRadio = document.querySelector('input[name="slideColorPreset"][value="navy"]');
-    if (navyRadio) navyRadio.checked = true;
     document.getElementById('slideDropPreviewImg').classList.add('hidden');
     document.getElementById('slideDropPlaceholder').classList.remove('hidden');
     document.getElementById('slideImageActions').classList.add('hidden');
+    setSlideMode('banner');
   }
 
   document.getElementById('slideImageFile').value = '';
@@ -17991,24 +18207,21 @@ function closeSlideModal() {
 }
 
 async function saveSlide() {
-  const editId = document.getElementById('slideEditId').value;
-  const isEdit = !!editId;
-  const preset = slideColorPresets[getSelectedPreset()];
+  var editId = document.getElementById('slideEditId').value;
+  var isEdit = !!editId;
 
-  const body = {
-    title_line1: document.getElementById('slideTitle').value,
-    title_line2: '',
-    title_suffix: '',
-    badge_icon: '',
-    badge_text: '',
-    description: document.getElementById('slideDescription').value,
-    button_text: document.getElementById('slideButtonText').value,
-    button_link: document.getElementById('slideButtonLink').value,
-    button_icon: 'fas fa-play',
-    content_layout: JSON.stringify(slideContentLayout),
-    show_instructor_images: 0,
+  // 카드 모드 유효성 검증
+  if (slideMode === 'card') {
+    if (slideItemSlots.length === 0) { showAlert('오류', '카드 모드에서는 최소 1개의 슬롯이 필요합니다.'); return; }
+    if (!slideItemSlots.some(function(s) { return s.role === 'main'; })) { showAlert('오류', '메인 슬롯이 필요합니다.'); return; }
+  }
+
+  var body = {
+    title_line1: slideMode === 'banner' ? document.getElementById('slideTitle').value : (slideItemSlots[0] ? slideItemSlots[0].title : ''),
+    description: slideMode === 'banner' ? document.getElementById('slideDescription').value : '',
+    button_link: slideMode === 'banner' ? document.getElementById('slideButtonLink').value : '',
     is_active: document.getElementById('slideIsActive').checked ? 1 : 0,
-    ...preset
+    items: slideMode === 'card' ? slideItemSlots : []
   };
 
   if (slideRemoveServerImage) {
