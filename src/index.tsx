@@ -9884,7 +9884,7 @@ ${heroSlides.length > 0 ? (() => {
   const gradientOverlay = `<div class="absolute left-0 bottom-0 w-full pointer-events-none" style="height:50%;background:linear-gradient(0deg,rgba(0,0,0,0.8) 0%,rgba(0,0,0,0) 100%);z-index:1;"></div><div class="absolute inset-0 transition-colors duration-300 pointer-events-none gh-bg-black-50" style="background:transparent;z-index:2;"></div>`
   const contentOverlay = (cat: string, title: string, desc: string, large?: boolean) => `<div class="absolute left-0 right-0 bottom-0 p-6 md:p-8 lg:p-10 transition-all duration-300 gh-top-0 gh-flex gh-flex-col gh-justify-start gh-pt-10" style="z-index:3;"><p class="text-xs font-semibold mb-2" style="color:#89b4fa;">${escapeHtml(cat)}</p><p class="text-white leading-tight" style="font-weight:700;letter-spacing:-0.04em;font-size:${large ? 'clamp(1.375rem,2vw,1.875rem)' : 'clamp(1rem,1.5vw,1.375rem)'};display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escapeHtml(title)}</p>${desc ? `<p class="text-white/90 mt-3 text-sm md:text-base leading-relaxed hidden gh-block" style="max-width:600px;">${escapeHtml(desc)}</p>` : ''}</div>`
   const mobileContent = (cat: string, title: string) => `<div class="absolute left-0 right-0 bottom-0 p-5" style="z-index:3;"><p class="text-xs font-semibold mb-2" style="color:#89b4fa;">${escapeHtml(cat)}</p><p class="text-white leading-tight" style="font-weight:700;letter-spacing:-0.04em;font-size:1.375rem;">${escapeHtml(title)}</p></div>`
-  const subCard = (item: any) => `<a href="${escapeAttr(item.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden flex-1 min-h-0" style="height:100%;">${imgBg(item.thumbnail, '#374151')}${gradientOverlay}<div class="absolute left-0 right-0 bottom-0 p-4 lg:p-5 transition-all duration-300 gh-top-0 gh-flex gh-flex-col gh-justify-start gh-pt-6" style="z-index:3;"><p class="text-xs font-semibold mb-1" style="color:#89b4fa;">${escapeHtml(item.category_label)}</p><p class="text-white text-sm leading-snug" style="font-weight:700;letter-spacing:-0.04em;">${escapeHtml(item.title)}</p><p class="text-white/90 mt-2 text-sm hidden gh-block" style="display:none;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.5;">${escapeHtml(item.description)}</p></div></a>`
+  const subCard = (item: any) => `<a href="${escapeAttr(item.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden flex-1 min-h-0" style="height:100%;">${imgBg(item.thumbnail, '#374151')}${gradientOverlay}<div class="absolute left-0 right-0 bottom-0 p-4 lg:p-5 transition-all duration-300 gh-top-0 gh-flex gh-flex-col gh-justify-start gh-pt-6" style="z-index:3;"><p class="text-xs font-semibold mb-1" style="color:#89b4fa;">${escapeHtml(item.category_label)}</p><p class="text-white text-sm leading-snug" style="font-weight:700;letter-spacing:-0.04em;">${escapeHtml(item.title)}</p><p class="text-white/90 mt-2 text-sm hidden gh-block" style="-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.5;">${escapeHtml(item.description)}</p></div></a>`
   const textCard = (item: any) => `<a href="${escapeAttr(item.link || '#')}" class="hero-slide-link relative block rounded-xl overflow-hidden p-4 transition-colors duration-200" style="background-color:#e0e9fe;height:25%;min-height:64px;" onmouseenter="this.style.backgroundColor='#c7d5fa'" onmouseleave="this.style.backgroundColor='#e0e9fe'"><div class="flex items-center h-full pr-8"><div><p class="text-xs font-semibold mb-1 transition-colors duration-200" style="color:#1428a0;">${escapeHtml(item.category_label)}</p><p class="leading-snug transition-colors duration-200" style="font-weight:700;letter-spacing:-0.04em;font-size:0.95rem;color:#1a1a1a;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escapeHtml(item.title)}</p></div></div><span class="absolute right-4 top-1/2 text-gray-400" style="transform:translateY(-50%);"><i class="fas fa-chevron-right" style="font-size:12px;"></i></span></a>`
 
   // --- 배너 모드 (기존) ---
@@ -10030,27 +10030,31 @@ ${heroSlides.length > 0 ? (() => {
     if (el) el.textContent = String(display).padStart(2, '0');
   }
 
-  // Clone boundary snap
+  // Clone boundary: 즉시 snap하는 헬퍼
+  function snapIfNeeded() {
+    if (current <= 0) { noTransition = true; current = total; updatePosition(); }
+    else if (current >= total + 1) { noTransition = true; current = 1; updatePosition(); }
+  }
+
+  // Clone boundary snap (transition 정상 완료 시)
   track.addEventListener('transitionend', function() {
     if (!hasMultiple) return;
-    if (current === 0) {
-      noTransition = true;
-      current = total;
-      updatePosition();
-    } else if (current === total + 1) {
-      noTransition = true;
-      current = 1;
-      updatePosition();
-    }
+    snapIfNeeded();
   });
 
   window.heroNext = function() {
+    // transition 중 clone 영역에 있으면 먼저 snap
+    snapIfNeeded();
     current++;
+    // 범위 제한: 최대 total+1 (cloneFirst)까지만
+    if (current > total + 1) current = total + 1;
     startAnimation();
     updatePosition();
   };
   window.heroPrev = function() {
+    snapIfNeeded();
     current--;
+    if (current < 0) current = 0;
     startAnimation();
     updatePosition();
   };
@@ -17858,44 +17862,28 @@ function renderHeroSlides() {
     return;
   }
 
-  list.innerHTML = heroSlidesData.map((slide, idx) => \`
-    <div class="flex items-center gap-3 p-3 \${slide.is_active ? 'bg-gray-50' : 'bg-gray-100 opacity-60'} rounded-lg group" draggable="true"
-         data-section="heroSlide" data-id="\${slide.id}" data-index="\${idx}"
-         ondragstart="onSlideDragStart(event)" ondragover="onSlideDragOver(event)" ondrop="onSlideDrop(event)" ondragend="onSlideDragEnd(event)">
-      <div class="cursor-grab text-gray-300 hover:text-gray-500">
-        <i class="fas fa-grip-vertical"></i>
-      </div>
-      <span class="text-xs text-gray-400 font-mono w-5 text-center">\${idx + 1}</span>
-      <div class="w-14 h-10 rounded-lg flex-shrink-0 border border-gray-200" style="background:\${slide.background_image ? 'url(' + slide.background_image + ') center/cover' : slide.background_gradient};"></div>
-      <div class="flex-1 min-w-0">
-        <p class="text-sm font-semibold text-gray-800 truncate">\${slide.title_line1}</p>
-        <p class="text-xs text-gray-500 truncate">\${slide.button_link || '/categories'}</p>
-      </div>
-      <div class="flex items-center gap-1">
-        \${slide.is_active
-          ? '<span class="text-[10px] bg-green-100 text-green-600 px-1.5 py-0.5 rounded font-semibold">활성</span>'
-          : '<span class="text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded font-semibold">비활성</span>'}
-        \${slide.items && slide.items.length > 0
-          ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-semibold">' + (slide.items.length === 1 ? '풀' : slide.items.length === 2 ? '2단' : '4단') + '</span>'
-          : '<span class="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-semibold">배너</span>'}
-        \${slide.background_image ? '<span class="text-[10px] bg-purple-100 text-purple-600 px-1.5 py-0.5 rounded font-semibold">IMG</span>' : ''}
-      </div>
-      <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button onclick="moveSlide(\${idx}, -1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 \${idx === 0 ? 'invisible' : ''}">
-          <i class="fas fa-chevron-up text-xs"></i>
-        </button>
-        <button onclick="moveSlide(\${idx}, 1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 \${idx === heroSlidesData.length - 1 ? 'invisible' : ''}">
-          <i class="fas fa-chevron-down text-xs"></i>
-        </button>
-        <button onclick="openSlideModal(\${slide.id})" class="w-7 h-7 flex items-center justify-center rounded hover:bg-blue-100 text-blue-400 hover:text-blue-600">
-          <i class="fas fa-pen text-xs"></i>
-        </button>
-        <button onclick="deleteSlide(\${slide.id})" class="w-7 h-7 flex items-center justify-center rounded hover:bg-red-100 text-red-400 hover:text-red-600">
-          <i class="fas fa-trash text-xs"></i>
-        </button>
-      </div>
-    </div>
-  \`).join('');
+  list.innerHTML = heroSlidesData.map(function(slide, idx) {
+    var bgStyle = slide.background_image ? 'url(' + slide.background_image + ') center/cover' : slide.background_gradient;
+    var statusBadge = slide.is_active
+      ? '<span class="text-[10px] bg-green-100 text-green-600 px-1.5 py-0.5 rounded font-semibold">활성</span>'
+      : '<span class="text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded font-semibold">비활성</span>';
+    var modeBadge = (slide.items && slide.items.length > 0)
+      ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-semibold">' + (slide.items.length === 1 ? '풀' : slide.items.length === 2 ? '2단' : '4단') + '</span>'
+      : '<span class="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-semibold">배너</span>';
+    var imgBadge = slide.background_image ? '<span class="text-[10px] bg-purple-100 text-purple-600 px-1.5 py-0.5 rounded font-semibold">IMG</span>' : '';
+    return '<div class="flex items-center gap-3 p-3 ' + (slide.is_active ? 'bg-gray-50' : 'bg-gray-100 opacity-60') + ' rounded-lg group" draggable="true" data-section="heroSlide" data-id="' + slide.id + '" data-index="' + idx + '" ondragstart="onSlideDragStart(event)" ondragover="onSlideDragOver(event)" ondrop="onSlideDrop(event)" ondragend="onSlideDragEnd(event)">' +
+      '<div class="cursor-grab text-gray-300 hover:text-gray-500"><i class="fas fa-grip-vertical"></i></div>' +
+      '<span class="text-xs text-gray-400 font-mono w-5 text-center">' + (idx + 1) + '</span>' +
+      '<div class="w-14 h-10 rounded-lg flex-shrink-0 border border-gray-200" style="background:' + bgStyle + ';"></div>' +
+      '<div class="flex-1 min-w-0"><p class="text-sm font-semibold text-gray-800 truncate">' + (slide.title_line1 || '') + '</p><p class="text-xs text-gray-500 truncate">' + (slide.button_link || '/categories') + '</p></div>' +
+      '<div class="flex items-center gap-1">' + statusBadge + modeBadge + imgBadge + '</div>' +
+      '<div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">' +
+        '<button onclick="moveSlide(' + idx + ', -1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 ' + (idx === 0 ? 'invisible' : '') + '"><i class="fas fa-chevron-up text-xs"></i></button>' +
+        '<button onclick="moveSlide(' + idx + ', 1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 ' + (idx === heroSlidesData.length - 1 ? 'invisible' : '') + '"><i class="fas fa-chevron-down text-xs"></i></button>' +
+        '<button onclick="openSlideModal(' + slide.id + ')" class="w-7 h-7 flex items-center justify-center rounded hover:bg-blue-100 text-blue-400 hover:text-blue-600"><i class="fas fa-pen text-xs"></i></button>' +
+        '<button onclick="deleteSlide(' + slide.id + ')" class="w-7 h-7 flex items-center justify-center rounded hover:bg-red-100 text-red-400 hover:text-red-600"><i class="fas fa-trash text-xs"></i></button>' +
+      '</div></div>';
+  }).join('');
 }
 
 // 슬라이드 드래그 앤 드롭
@@ -18002,7 +17990,9 @@ function removeSlideItemSlot(idx) {
   renderSlideItemSlots();
 }
 
-function updateSlotField(idx, field, value) {
+var slotFields = ['role', 'title', 'description', 'category_label', 'link', 'thumbnail'];
+function updateSlotField(idx, fieldIdx, value) {
+  var field = typeof fieldIdx === 'number' ? slotFields[fieldIdx] : fieldIdx;
   slideItemSlots[idx][field] = value;
   if (field === 'role') renderSlideItemSlots();
   else updateCardPreview();
@@ -18016,28 +18006,29 @@ function renderSlideItemSlots() {
     var roleOptions = roles.map(function(r) {
       return '<option value="' + r + '"' + (r === slot.role ? ' selected' : '') + '>' + roleLabels[r] + '</option>';
     }).join('');
+    // slotFields: 0=role, 1=title, 2=description, 3=category_label, 4=link, 5=thumbnail
     html += '<div class="border border-gray-200 rounded-lg p-3 space-y-2 bg-gray-50">' +
       '<div class="flex items-center justify-between">' +
         '<div class="flex items-center gap-2">' +
           '<span class="text-xs font-bold text-gray-400">슬롯 ' + (idx + 1) + '</span>' +
-          '<select onchange="updateSlotField(' + idx + ',\'role\',this.value)" class="text-xs border border-gray-200 rounded px-2 py-1 bg-white">' + roleOptions + '</select>' +
+          '<select onchange="updateSlotField(' + idx + ',0,this.value)" class="text-xs border border-gray-200 rounded px-2 py-1 bg-white">' + roleOptions + '</select>' +
         '</div>' +
         '<button onclick="removeSlideItemSlot(' + idx + ')" class="text-xs text-red-400 hover:text-red-600"><i class="fas fa-times"></i></button>' +
       '</div>' +
-      '<input type="text" placeholder="제목" value="' + (slot.title || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',\'title\',this.value)" class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs">' +
-      (slot.role !== 'sub-text' ? '<input type="text" placeholder="설명" value="' + (slot.description || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',\'description\',this.value)" class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs">' : '') +
+      '<input type="text" placeholder="제목" value="' + (slot.title || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',1,this.value)" class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs">' +
+      (slot.role !== 'sub-text' ? '<input type="text" placeholder="설명" value="' + (slot.description || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',2,this.value)" class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs">' : '') +
       '<div class="grid grid-cols-2 gap-2">' +
-        '<input type="text" placeholder="카테고리" value="' + (slot.category_label || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',\'category_label\',this.value)" class="px-2 py-1.5 border border-gray-200 rounded text-xs">' +
-        '<input type="text" placeholder="링크 URL" value="' + (slot.link || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',\'link\',this.value)" class="px-2 py-1.5 border border-gray-200 rounded text-xs">' +
+        '<input type="text" placeholder="카테고리" value="' + (slot.category_label || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',3,this.value)" class="px-2 py-1.5 border border-gray-200 rounded text-xs">' +
+        '<input type="text" placeholder="링크 URL" value="' + (slot.link || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',4,this.value)" class="px-2 py-1.5 border border-gray-200 rounded text-xs">' +
       '</div>' +
-      (slot.role !== 'sub-text' ? '<div class="flex items-center gap-2"><input type="text" placeholder="이미지 URL" value="' + (slot.thumbnail || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',\'thumbnail\',this.value)" class="flex-1 px-2 py-1.5 border border-gray-200 rounded text-xs"><input type="file" accept="image/*" class="hidden" id="slotFile' + idx + '" onchange="uploadSlotImage(' + idx + ',this)"><button onclick="document.getElementById(\'slotFile' + idx + '\').click()" class="text-xs text-purple-500 hover:text-purple-700 whitespace-nowrap"><i class="fas fa-upload mr-1"></i>업로드</button></div>' : '') +
+      (slot.role !== 'sub-text' ? '<div class="flex items-center gap-2"><input type="text" placeholder="이미지 URL" value="' + (slot.thumbnail || '').replace(/"/g, '&quot;') + '" oninput="updateSlotField(' + idx + ',5,this.value)" class="flex-1 px-2 py-1.5 border border-gray-200 rounded text-xs"><input type="file" accept="image/*" class="hidden" id="sf' + idx + '" onchange="uploadSlotImage(' + idx + ',this)"><button onclick="this.previousElementSibling.click()" class="text-xs text-purple-500 hover:text-purple-700 whitespace-nowrap"><i class="fas fa-upload mr-1"></i>업로드</button></div>' : '') +
     '</div>';
   });
   container.innerHTML = html;
   document.getElementById('slotCountLabel').textContent = '(' + slideItemSlots.length + '/4)';
   document.getElementById('addSlotBtn').style.display = slideItemSlots.length >= 4 ? 'none' : '';
   var label = layoutLabels[slideItemSlots.length] || '슬롯을 추가하세요';
-  if (slideItemSlots.length > 0 && !slideItemSlots.some(function(s) { return s.role === 'main'; })) label = '⚠️ 메인 슬롯이 필요합니다';
+  if (slideItemSlots.length > 0 && !slideItemSlots.some(function(s) { return s.role === 'main'; })) label = '메인 슬롯이 필요합니다';
   document.getElementById('layoutLabel').textContent = label;
   updateCardPreview();
 }
@@ -18051,7 +18042,7 @@ function updateCardPreview() {
   var subTexts = slideItemSlots.filter(function(s) { return s.role === 'sub-text'; });
   var card = function(item, label) {
     var bg = item.thumbnail ? 'background:url(' + item.thumbnail + ') center/cover;' : 'background:#374151;';
-    return '<div class="relative rounded-lg overflow-hidden" style="' + bg + 'min-height:40px;flex:1;"><div class="absolute inset-0" style="background:rgba(0,0,0,0.5);"></div><div class="relative p-2" style="z-index:1;"><p class="text-[9px] text-purple-300 font-semibold">' + label + '</p><p class="text-[10px] text-white font-bold truncate">' + (item.title || '제목 없음') + '</p><p class="text-[8px] text-blue-300">' + (item.category_label || '') + '</p></div></div>';
+    return '<div class="relative rounded-lg overflow-hidden" style="' + bg + 'min-height:40px;flex:1;"><div class="absolute inset-0" style="background:rgba(0,0,0,0.5);"></div><div class="relative p-2" style="z-index:1;"><p class="text-[9px] text-purple-300 font-semibold">' + label + '</p><p class="text-[10px] text-white font-bold truncate">' + (item.title || '제목 없음') + '</p><p class="text-[8px] text-blue-300">' + (item.category_label || '') + '</p>' + (item.description ? '<p class="text-[8px] text-gray-300 truncate mt-0.5" title="호버 시 표시됨">' + item.description.substring(0, 30) + '...</p>' : '<p class="text-[8px] text-gray-500 mt-0.5">호버 텍스트 없음</p>') + '</div></div>';
   };
   var textC = function(item) {
     return '<div class="rounded-lg p-2" style="background:#e0e9fe;flex:0 0 auto;min-height:28px;"><p class="text-[8px] font-semibold" style="color:#1428a0;">' + (item.category_label || '') + '</p><p class="text-[10px] font-bold truncate" style="color:#1a1a1a;">' + (item.title || '제목 없음') + '</p></div>';
@@ -18302,37 +18293,24 @@ function renderSection(type, courses, listId, countId) {
     return;
   }
 
-  list.innerHTML = courses.map((cls, idx) => \`
-    <div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg group" draggable="true"
-         data-section="\${type}" data-id="\${cls.id}" data-index="\${idx}"
-         ondragstart="onDragStart(event)" ondragover="onDragOver(event)" ondrop="onDrop(event)" ondragend="onDragEnd(event)">
-      <div class="cursor-grab text-gray-300 hover:text-gray-500">
-        <i class="fas fa-grip-vertical"></i>
-      </div>
-      <span class="text-xs text-gray-400 font-mono w-5 text-center">\${idx + 1}</span>
-      <img src="\${cls.thumbnail || ''}" class="w-14 h-10 rounded-lg object-cover bg-gray-200 flex-shrink-0" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 56 40%22><rect fill=%22%23e5e7eb%22 width=%2256%22 height=%2240%22/></svg>'">
-      <div class="flex-1 min-w-0">
-        <p class="text-sm font-semibold text-gray-800 truncate">\${cls.title}</p>
-        <p class="text-xs text-gray-500">\${cls.instructor_name} · \${cls.price ? cls.price.toLocaleString() + '원' : '무료'}</p>
-      </div>
-      <div class="flex items-center gap-1" id="classLabels\${cls.id}">
-        \${cls.is_bestseller ? '<span class="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded font-semibold">BEST</span>' : ''}
-        \${cls.is_new ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-semibold">NEW</span>' : ''}
-        \${cls.class_type === 'live' ? '<span class="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded font-semibold">LIVE</span>' : ''}
-      </div>
-      <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button onclick="moveCourse('\${type}', \${idx}, -1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 \${idx === 0 ? 'invisible' : ''}">
-          <i class="fas fa-chevron-up text-xs"></i>
-        </button>
-        <button onclick="moveCourse('\${type}', \${idx}, 1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 \${idx === courses.length - 1 ? 'invisible' : ''}">
-          <i class="fas fa-chevron-down text-xs"></i>
-        </button>
-        \${type !== 'live' ? \`<button onclick="removeCourse('\${type}', \${cls.id})" class="w-7 h-7 flex items-center justify-center rounded hover:bg-red-100 text-red-400 hover:text-red-600">
-          <i class="fas fa-times text-xs"></i>
-        </button>\` : ''}
-      </div>
-    </div>
-  \`).join('');
+  list.innerHTML = courses.map(function(cls, idx) {
+    var removeBtn = type !== 'live' ? '<button onclick="removeCourse(' + "'" + type + "'" + ', ' + cls.id + ')" class="w-7 h-7 flex items-center justify-center rounded hover:bg-red-100 text-red-400 hover:text-red-600"><i class="fas fa-times text-xs"></i></button>' : '';
+    return '<div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg group" draggable="true" data-section="' + type + '" data-id="' + cls.id + '" data-index="' + idx + '" ondragstart="onDragStart(event)" ondragover="onDragOver(event)" ondrop="onDrop(event)" ondragend="onDragEnd(event)">' +
+      '<div class="cursor-grab text-gray-300 hover:text-gray-500"><i class="fas fa-grip-vertical"></i></div>' +
+      '<span class="text-xs text-gray-400 font-mono w-5 text-center">' + (idx + 1) + '</span>' +
+      '<img src="' + (cls.thumbnail || '') + '" class="w-14 h-10 rounded-lg object-cover bg-gray-200 flex-shrink-0" onerror="this.src=' + "'data:image/svg+xml," + '<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 56 40%22><rect fill=%22%23e5e7eb%22 width=%2256%22 height=%2240%22/></svg>' + "'" + '">' +
+      '<div class="flex-1 min-w-0"><p class="text-sm font-semibold text-gray-800 truncate">' + cls.title + '</p><p class="text-xs text-gray-500">' + cls.instructor_name + ' · ' + (cls.price ? cls.price.toLocaleString() + '원' : '무료') + '</p></div>' +
+      '<div class="flex items-center gap-1" id="classLabels' + cls.id + '">' +
+        (cls.is_bestseller ? '<span class="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded font-semibold">BEST</span>' : '') +
+        (cls.is_new ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-semibold">NEW</span>' : '') +
+        (cls.class_type === 'live' ? '<span class="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded font-semibold">LIVE</span>' : '') +
+      '</div>' +
+      '<div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">' +
+        '<button onclick="moveCourse(' + "'" + type + "'" + ', ' + idx + ', -1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 ' + (idx === 0 ? 'invisible' : '') + '"><i class="fas fa-chevron-up text-xs"></i></button>' +
+        '<button onclick="moveCourse(' + "'" + type + "'" + ', ' + idx + ', 1)" class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-400 ' + (idx === courses.length - 1 ? 'invisible' : '') + '"><i class="fas fa-chevron-down text-xs"></i></button>' +
+        removeBtn +
+      '</div></div>';
+  }).join('');
 }
 
 // 드래그 앤 드롭
@@ -18468,21 +18446,17 @@ function filterCourses() {
     return;
   }
 
-  container.innerHTML = filtered.map(cls => \`
-    <button onclick="addCourseToSection(\${cls.id})" class="w-full flex items-center gap-3 p-3 hover:bg-gray-50 rounded-lg text-left transition-all">
-      <img src="\${cls.thumbnail || ''}" class="w-12 h-8 rounded object-cover bg-gray-200 flex-shrink-0" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 48 32%22><rect fill=%22%23e5e7eb%22 width=%2248%22 height=%2232%22/></svg>'">
-      <div class="flex-1 min-w-0">
-        <p class="text-sm font-medium text-gray-800 truncate">\${cls.title}</p>
-        <p class="text-xs text-gray-500">\${cls.instructor_name} · \${cls.price ? cls.price.toLocaleString() + '원' : '무료'}</p>
-      </div>
-      <div class="flex items-center gap-1">
-        \${cls.is_bestseller ? '<span class="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded">BEST</span>' : ''}
-        \${cls.is_new ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded">NEW</span>' : ''}
-        \${cls.class_type === 'live' ? '<span class="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded">LIVE</span>' : ''}
-      </div>
-      <i class="fas fa-plus text-blue-400 text-sm"></i>
-    </button>
-  \`).join('');
+  container.innerHTML = filtered.map(function(cls) {
+    return '<button onclick="addCourseToSection(' + cls.id + ')" class="w-full flex items-center gap-3 p-3 hover:bg-gray-50 rounded-lg text-left transition-all">' +
+      '<img src="' + (cls.thumbnail || '') + '" class="w-12 h-8 rounded object-cover bg-gray-200 flex-shrink-0" onerror="this.src=' + "'data:image/svg+xml," + '<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 48 32%22><rect fill=%22%23e5e7eb%22 width=%2248%22 height=%2232%22/></svg>' + "'" + '">' +
+      '<div class="flex-1 min-w-0"><p class="text-sm font-medium text-gray-800 truncate">' + cls.title + '</p><p class="text-xs text-gray-500">' + cls.instructor_name + ' · ' + (cls.price ? cls.price.toLocaleString() + '원' : '무료') + '</p></div>' +
+      '<div class="flex items-center gap-1">' +
+        (cls.is_bestseller ? '<span class="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded">BEST</span>' : '') +
+        (cls.is_new ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded">NEW</span>' : '') +
+        (cls.class_type === 'live' ? '<span class="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded">LIVE</span>' : '') +
+      '</div>' +
+      '<i class="fas fa-plus text-blue-400 text-sm"></i></button>';
+  }).join('');
 }
 
 async function addCourseToSection(courseId) {
