@@ -1389,7 +1389,8 @@ app.get('/api/classes', async (c) => {
   const limit = parseInt(c.req.query('limit') || '20')
   const offset = parseInt(c.req.query('offset') || '0')
 
-  let query = `SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug
+  let query = `SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug,
+    (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
     JOIN categories cat ON c.category_id = cat.id
@@ -1425,7 +1426,8 @@ app.get('/api/classes', async (c) => {
 // Get featured/bestseller classes
 app.get('/api/classes/featured', async (c) => {
   const { results } = await c.env.DB.prepare(`
-    SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug
+    SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug,
+      (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
     JOIN categories cat ON c.category_id = cat.id
@@ -1438,7 +1440,8 @@ app.get('/api/classes/featured', async (c) => {
 // Get new classes
 app.get('/api/classes/new', async (c) => {
   const { results } = await c.env.DB.prepare(`
-    SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug
+    SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug,
+      (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
     JOIN categories cat ON c.category_id = cat.id
@@ -4451,7 +4454,8 @@ app.get('/api/admin/classes', async (c) => {
            (SELECT id FROM class_lessons
             WHERE class_id = c.id
               AND datetime(scheduled_at, '+' || COALESCE(duration_minutes, 60) || ' minutes') > datetime('now')
-            ORDER BY scheduled_at ASC LIMIT 1) as latest_lesson_id
+            ORDER BY scheduled_at ASC LIMIT 1) as latest_lesson_id,
+           (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
     JOIN categories cat ON c.category_id = cat.id
@@ -4757,35 +4761,40 @@ app.get('/api/admin/homepage/sections', async (c) => {
   const [bestseller, newCourses, liveCourses, allActive, specialCourses] = await c.env.DB.batch([
     c.env.DB.prepare(`
       SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
-             i.display_name as instructor_name
+             i.display_name as instructor_name,
+             (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
       FROM classes c JOIN instructors i ON c.instructor_id = i.id
       WHERE c.status = 'active' AND c.is_bestseller = 1
       ORDER BY c.homepage_sort_order ASC, c.rating DESC
     `),
     c.env.DB.prepare(`
       SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
-             i.display_name as instructor_name
+             i.display_name as instructor_name,
+             (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
       FROM classes c JOIN instructors i ON c.instructor_id = i.id
       WHERE c.status = 'active' AND c.is_new = 1
       ORDER BY c.homepage_sort_order ASC, c.created_at DESC
     `),
     c.env.DB.prepare(`
       SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
-             i.display_name as instructor_name
+             i.display_name as instructor_name,
+             (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
       FROM classes c JOIN instructors i ON c.instructor_id = i.id
       WHERE c.status = 'active' AND c.class_type = 'live'
       ORDER BY c.homepage_sort_order ASC, c.schedule_start ASC
     `),
     c.env.DB.prepare(`
       SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.class_type, c.homepage_sort_order, c.price, c.status,
-             i.display_name as instructor_name
+             i.display_name as instructor_name,
+             (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
       FROM classes c JOIN instructors i ON c.instructor_id = i.id
       WHERE c.status = 'active'
       ORDER BY c.title ASC
     `),
     c.env.DB.prepare(`
       SELECT c.id, c.title, c.slug, c.thumbnail, c.is_bestseller, c.is_new, c.is_featured_special, c.class_type, c.homepage_sort_order, c.price, c.rating, c.status,
-             i.display_name as instructor_name
+             i.display_name as instructor_name,
+             (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
       FROM classes c JOIN instructors i ON c.instructor_id = i.id
       WHERE c.status = 'active' AND c.is_featured_special = 1
       ORDER BY c.homepage_sort_order ASC, c.rating DESC
@@ -5620,10 +5629,69 @@ app.delete('/api/admin/users/:id', async (c) => {
 // 관리자: 회원 라벨 관리
 // ============================================
 
-// 전체 라벨 목록
+// 전체 라벨 목록 (코스 사용 수 포함)
 app.get('/api/admin/labels', async (c) => {
-  const { results } = await c.env.DB.prepare('SELECT * FROM user_labels ORDER BY id').all()
+  const { results } = await c.env.DB.prepare(`
+    SELECT ul.*,
+      (SELECT COUNT(*) FROM class_label_requirements clr WHERE clr.label_id = ul.id) as class_count
+    FROM user_labels ul ORDER BY ul.id
+  `).all()
   return c.json(results)
+})
+
+// 라벨 생성
+app.post('/api/admin/labels', async (c) => {
+  const { name, displayName, color, priceText } = await c.req.json()
+  if (!name || !displayName) {
+    return c.json({ error: '라벨 이름과 표시 이름은 필수입니다.' }, 400)
+  }
+  try {
+    await c.env.DB.prepare(
+      'INSERT INTO user_labels (name, display_name, color, price_text) VALUES (?, ?, ?, ?)'
+    ).bind(name, displayName, color || 'blue', priceText || '').run()
+    return c.json({ success: true, message: '라벨이 생성되었습니다.' })
+  } catch (e: any) {
+    if (e.message?.includes('UNIQUE')) {
+      return c.json({ error: '이미 존재하는 라벨 이름입니다.' }, 400)
+    }
+    throw e
+  }
+})
+
+// 라벨 수정
+app.put('/api/admin/labels/:id', async (c) => {
+  const labelId = parseInt(c.req.param('id'))
+  const { name, displayName, color, priceText } = await c.req.json()
+  if (!name || !displayName) {
+    return c.json({ error: '라벨 이름과 표시 이름은 필수입니다.' }, 400)
+  }
+  const label = await c.env.DB.prepare('SELECT id FROM user_labels WHERE id = ?').bind(labelId).first()
+  if (!label) return c.json({ error: '라벨을 찾을 수 없습니다.' }, 404)
+
+  try {
+    await c.env.DB.prepare(
+      'UPDATE user_labels SET name = ?, display_name = ?, color = ?, price_text = ? WHERE id = ?'
+    ).bind(name, displayName, color || 'blue', priceText ?? '', labelId).run()
+    return c.json({ success: true, message: '라벨이 수정되었습니다.' })
+  } catch (e: any) {
+    if (e.message?.includes('UNIQUE')) {
+      return c.json({ error: '이미 존재하는 라벨 이름입니다.' }, 400)
+    }
+    throw e
+  }
+})
+
+// 라벨 삭제 (연관 할당 데이터도 함께 삭제)
+app.delete('/api/admin/labels/:id', async (c) => {
+  const labelId = parseInt(c.req.param('id'))
+  const label = await c.env.DB.prepare('SELECT id, display_name FROM user_labels WHERE id = ?').bind(labelId).first() as any
+  if (!label) return c.json({ error: '라벨을 찾을 수 없습니다.' }, 404)
+
+  await c.env.DB.prepare('DELETE FROM user_label_assignments WHERE label_id = ?').bind(labelId).run()
+  await c.env.DB.prepare('DELETE FROM class_label_requirements WHERE label_id = ?').bind(labelId).run()
+  await c.env.DB.prepare('DELETE FROM user_labels WHERE id = ?').bind(labelId).run()
+
+  return c.json({ success: true, message: `'${label.display_name}' 라벨이 삭제되었습니다.` })
 })
 
 // 사용자의 라벨 목록
@@ -9711,9 +9779,11 @@ function classCardHTML(cls) {
           <span class="text-xs text-gray-500">(\${cls.review_count})</span>
         </div>
         <div class="flex items-center gap-2">
-          \${cls.discount_percent > 0 ? \`<span class="text-sm font-bold text-primary-500">\${cls.discount_percent}%</span>\` : ''}
-          <span class="text-sm font-bold text-dark-900">\${cls.price.toLocaleString()}원</span>
-          \${cls.discount_percent > 0 ? \`<span class="text-xs text-gray-400 line-through">\${cls.original_price.toLocaleString()}원</span>\` : ''}
+          \${cls.label_price_text
+            ? '<span class="text-sm font-bold text-yellow-600"><i class="fas fa-star text-[10px] mr-0.5"></i>' + cls.label_price_text + '</span>'
+            : (cls.discount_percent > 0 ? '<span class="text-sm font-bold text-primary-500">' + cls.discount_percent + '%</span>' : '') +
+              '<span class="text-sm font-bold text-dark-900">' + cls.price.toLocaleString() + '원</span>' +
+              (cls.discount_percent > 0 ? '<span class="text-xs text-gray-400 line-through">' + cls.original_price.toLocaleString() + '원</span>' : '')}
         </div>
         <div class="flex items-center gap-3 mt-2 pt-2 border-t border-gray-50 text-[11px] text-gray-400">
           <span><i class="far fa-clock mr-0.5"></i>\${cls.duration_minutes}분</span>
@@ -9835,12 +9905,14 @@ app.get('/', async (c) => {
   const [categories, featured, newClasses, liveClasses, specialClasses, requestClasses] = await c.env.DB.batch([
     c.env.DB.prepare('SELECT * FROM categories ORDER BY sort_order'),
     c.env.DB.prepare(`
-      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
+      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name,
+        (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
       FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
       WHERE c.status = 'active' ORDER BY c.current_students DESC, c.rating DESC LIMIT 8
     `),
     c.env.DB.prepare(`
-      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
+      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name,
+        (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
       FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
       WHERE c.status = 'active' ORDER BY COALESCE((SELECT MAX(scheduled_at) FROM class_lessons WHERE class_id = c.id), c.created_at) DESC LIMIT 8
     `),
@@ -9858,12 +9930,14 @@ app.get('/', async (c) => {
       ORDER BY cl.scheduled_at ASC LIMIT 8
     `),
     c.env.DB.prepare(`
-      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
+      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name,
+        (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
       FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
       WHERE c.status = 'active' AND c.is_featured_special = 1 ORDER BY c.homepage_sort_order ASC, c.rating DESC LIMIT 8
     `),
     c.env.DB.prepare(`
-      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name
+      SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name,
+        (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
       FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
       WHERE c.status = 'active' AND c.id IN (SELECT created_class_id FROM class_request_applications WHERE status = 'approved' AND created_class_id IS NOT NULL)
       ORDER BY c.created_at DESC LIMIT 8
@@ -10430,11 +10504,18 @@ app.get('/class/:slug', async (c) => {
   
   if (!cls) return c.html('<h1>Class not found</h1>', 404)
 
-  // 코스의 필수 라벨 확인
+  // 코스의 필수 라벨 확인 + 가격 대치 텍스트 조회
   let classRequiresLabel = false
+  let labelPriceText = ''
   try {
     const { results: clr } = await c.env.DB.prepare('SELECT label_id FROM class_label_requirements WHERE class_id = ?').bind(cls.id).all()
     classRequiresLabel = clr && clr.length > 0
+    if (classRequiresLabel) {
+      const lpt = await c.env.DB.prepare(
+        `SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = ? AND ul.price_text != '' LIMIT 1`
+      ).bind(cls.id).first() as any
+      if (lpt?.price_text) labelPriceText = lpt.price_text
+    }
   } catch (e) { /* 테이블 미존재 시 무시 */ }
 
   const { results: lessons } = await c.env.DB.prepare('SELECT * FROM lessons WHERE class_id = ? ORDER BY sort_order').bind(cls.id).all()
@@ -10530,10 +10611,12 @@ ${navHTML}
           <img src="${cls.thumbnail}" class="w-full aspect-video object-cover">
           <div class="p-5">
             <div class="flex items-baseline gap-2 mb-1">
-              ${cls.discount_percent > 0 ? `<span class="text-xl font-bold text-primary-500">${cls.discount_percent}%</span>` : ''}
-              <span class="text-2xl font-extrabold text-dark-900">${cls.price.toLocaleString()}원</span>
+              ${labelPriceText
+                ? `<span class="text-2xl font-extrabold text-yellow-600"><i class="fas fa-star mr-1"></i>${escapeHtml(labelPriceText)}</span>`
+                : `${cls.discount_percent > 0 ? `<span class="text-xl font-bold text-primary-500">${cls.discount_percent}%</span>` : ''}
+              <span class="text-2xl font-extrabold text-dark-900">${cls.price.toLocaleString()}원</span>`}
             </div>
-            ${cls.discount_percent > 0 ? `<p class="text-sm text-gray-400 line-through mb-3">${cls.original_price.toLocaleString()}원</p>` : '<div class="mb-3"></div>'}
+            ${labelPriceText ? '<div class="mb-3"></div>' : (cls.discount_percent > 0 ? `<p class="text-sm text-gray-400 line-through mb-3">${cls.original_price.toLocaleString()}원</p>` : '<div class="mb-3"></div>')}
             
             ${cls.next_lesson ? `
             <div class="flex items-center gap-2 px-3 py-2 bg-red-50 rounded-xl mb-3">
@@ -10555,8 +10638,8 @@ ${navHTML}
               <span class="text-xs text-gray-500 whitespace-nowrap">${cls.current_students}/${cls.max_students}명</span>
             </div>
             
-            <!-- 결제 옵션 탭 (유료 코스만) -->
-            ${cls.price > 0 ? `
+            <!-- 결제 옵션 탭 (유료 코스만, 라벨 가격 대치 시 숨김) -->
+            ${(cls.price > 0 && !labelPriceText) ? `
             <div class="flex gap-1 mb-3 bg-gray-100 rounded-xl p-1">
               <button onclick="switchPayOption('onetime')" id="payOptOnetime" class="pay-opt-tab flex-1 py-2 text-xs font-semibold rounded-lg bg-white text-dark-900 shadow-sm transition-all">1회 결제</button>
               <button onclick="switchPayOption('monthly')" id="payOptMonthly" class="pay-opt-tab flex-1 py-2 text-xs font-semibold rounded-lg text-gray-500 transition-all">
@@ -10564,11 +10647,11 @@ ${navHTML}
               </button>
             </div>
             ` : ''}
-            
+
             <!-- 1회 결제 -->
             <div id="payOnetime">
-              <button id="btnEnrollOnetime" onclick='openPaymentModal(${JSON.stringify({id:cls.id, slug:cls.slug, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 ${cls.price > 0 ? 'bg-primary-500 hover:bg-primary-600' : 'bg-green-500 hover:bg-green-600'} text-white font-bold rounded-xl transition-all shadow-lg ${cls.price > 0 ? 'shadow-primary-500/30' : 'shadow-green-500/30'} mb-2">
-                ${cls.price > 0 ? `<i class="fas fa-credit-card mr-2"></i>바로 수강하기 · ${cls.price.toLocaleString()}원` : '<i class="fas fa-gift mr-2"></i>무료 수강하기'}
+              <button id="btnEnrollOnetime" onclick='openPaymentModal(${JSON.stringify({id:cls.id, slug:cls.slug, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 ${labelPriceText ? 'bg-yellow-500 hover:bg-yellow-600' : (cls.price > 0 ? 'bg-primary-500 hover:bg-primary-600' : 'bg-green-500 hover:bg-green-600')} text-white font-bold rounded-xl transition-all shadow-lg ${labelPriceText ? 'shadow-yellow-500/30' : (cls.price > 0 ? 'shadow-primary-500/30' : 'shadow-green-500/30')} mb-2">
+                ${labelPriceText ? `<i class="fas fa-star mr-2"></i>${escapeHtml(labelPriceText)}` : (cls.price > 0 ? `<i class="fas fa-credit-card mr-2"></i>바로 수강하기 · ${cls.price.toLocaleString()}원` : '<i class="fas fa-gift mr-2"></i>무료 수강하기')}
               </button>
             </div>
 
@@ -13187,9 +13270,11 @@ function classCardTemplate(cls: any): string {
           <span class="text-xs text-gray-500">(${cls.review_count})</span>
         </div>
         <div class="flex items-center gap-2">
-          ${cls.discount_percent > 0 ? `<span class="text-sm font-bold text-primary-500">${cls.discount_percent}%</span>` : ''}
+          ${cls.label_price_text
+            ? `<span class="text-sm font-bold text-yellow-600"><i class="fas fa-star text-[10px] mr-0.5"></i>${escapeHtml(cls.label_price_text)}</span>`
+            : `${cls.discount_percent > 0 ? `<span class="text-sm font-bold text-primary-500">${cls.discount_percent}%</span>` : ''}
           <span class="text-sm font-bold text-dark-900">${cls.price?.toLocaleString()}원</span>
-          ${cls.discount_percent > 0 ? `<span class="text-xs text-gray-400 line-through">${cls.original_price?.toLocaleString()}원</span>` : ''}
+          ${cls.discount_percent > 0 ? `<span class="text-xs text-gray-400 line-through">${cls.original_price?.toLocaleString()}원</span>` : ''}`}
         </div>
         <div class="flex items-center gap-3 mt-2 pt-2 border-t border-gray-50 text-[11px] text-gray-400">
           <span><i class="far fa-clock mr-0.5"></i>${cls.duration_minutes}분</span>
@@ -14908,7 +14993,7 @@ app.get('/admin', async (c) => {
               <div class="text-xs text-gray-400">\${cls.category_name || ''}</div>
             </td>
             <td class="px-3 py-2 text-sm">\${cls.instructor_name || '-'}</td>
-            <td class="px-3 py-2 text-sm">\${(cls.price || 0).toLocaleString()}원</td>
+            <td class="px-3 py-2 text-sm">\${cls.label_price_text ? '<span class="text-yellow-600 font-medium"><i class="fas fa-star text-[10px] mr-0.5"></i>' + cls.label_price_text + '</span>' : (cls.price || 0).toLocaleString() + '원'}</td>
             <td class="px-3 py-2">\${lessonBadge}</td>
             <td class="px-3 py-2">\${createBtn}</td>
             <td class="px-3 py-2"><div class="flex flex-wrap gap-1">\${labelsHtml}</div></td>
@@ -17690,6 +17775,68 @@ app.get('/admin/homepage', async (c) => {
         <p class="text-sm text-gray-400 py-4 text-center">로딩 중...</p>
       </div>
     </div>
+
+    <!-- 라벨 관리 섹션 -->
+    <div class="bg-white rounded-xl p-6 shadow-sm mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-2">
+          <i class="fas fa-tags text-indigo-500 text-lg"></i>
+          <h2 class="text-lg font-bold text-gray-800">라벨 관리</h2>
+          <span id="labelCount" class="text-xs bg-indigo-100 text-indigo-600 font-semibold px-2 py-0.5 rounded-full">0</span>
+        </div>
+        <button onclick="openLabelFormModal()" class="text-sm bg-indigo-500 hover:bg-indigo-600 text-white px-3 py-1.5 rounded-lg transition-all">
+          <i class="fas fa-plus mr-1"></i>라벨 추가
+        </button>
+      </div>
+      <p class="text-xs text-gray-400 mb-3">라벨을 생성하고 가격 대치 텍스트를 지정합니다. 코스에 라벨을 부여하면 가격 대신 지정한 텍스트가 표시됩니다.</p>
+      <div id="labelList">
+        <p class="text-sm text-gray-400 py-4 text-center">로딩 중...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 라벨 추가/편집 모달 -->
+  <div id="labelFormModal" class="fixed inset-0 bg-black/50 z-50 hidden items-center justify-center" onclick="if(event.target===this)closeLabelFormModal()">
+    <div class="bg-white rounded-2xl w-full max-w-md mx-4">
+      <div class="p-5 border-b border-gray-100">
+        <div class="flex items-center justify-between">
+          <h3 id="labelFormTitle" class="text-lg font-bold text-gray-800">라벨 추가</h3>
+          <button onclick="closeLabelFormModal()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button>
+        </div>
+      </div>
+      <div class="p-5 space-y-4">
+        <input type="hidden" id="labelFormId" value="">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">라벨 이름 (표시용) <span class="text-red-500">*</span></label>
+          <input type="text" id="labelFormDisplayName" placeholder="예: 학부모" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">시스템 이름 (영문) <span class="text-red-500">*</span></label>
+          <input type="text" id="labelFormName" placeholder="예: parent" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">가격 대치 텍스트</label>
+          <input type="text" id="labelFormPriceText" placeholder="예: 특별 수강 강의" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+          <p class="text-xs text-gray-400 mt-1">이 라벨이 부여된 코스의 가격 대신 표시될 텍스트입니다. 비워두면 가격이 그대로 표시됩니다.</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">색상</label>
+          <div id="labelFormColors" class="flex gap-2 flex-wrap">
+            <button type="button" onclick="selectLabelColor('blue')" data-color="blue" class="label-color-btn w-8 h-8 rounded-full bg-blue-500 border-2 border-blue-600 ring-2 ring-blue-300"></button>
+            <button type="button" onclick="selectLabelColor('green')" data-color="green" class="label-color-btn w-8 h-8 rounded-full bg-green-500 border-2 border-transparent"></button>
+            <button type="button" onclick="selectLabelColor('red')" data-color="red" class="label-color-btn w-8 h-8 rounded-full bg-red-500 border-2 border-transparent"></button>
+            <button type="button" onclick="selectLabelColor('yellow')" data-color="yellow" class="label-color-btn w-8 h-8 rounded-full bg-yellow-500 border-2 border-transparent"></button>
+            <button type="button" onclick="selectLabelColor('purple')" data-color="purple" class="label-color-btn w-8 h-8 rounded-full bg-purple-500 border-2 border-transparent"></button>
+            <button type="button" onclick="selectLabelColor('gray')" data-color="gray" class="label-color-btn w-8 h-8 rounded-full bg-gray-500 border-2 border-transparent"></button>
+            <button type="button" onclick="selectLabelColor('indigo')" data-color="indigo" class="label-color-btn w-8 h-8 rounded-full bg-indigo-500 border-2 border-transparent"></button>
+          </div>
+        </div>
+      </div>
+      <div class="p-5 border-t border-gray-100 flex gap-3">
+        <button onclick="closeLabelFormModal()" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg text-sm">취소</button>
+        <button onclick="saveLabelForm()" class="flex-1 py-2 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold rounded-lg text-sm">저장</button>
+      </div>
+    </div>
   </div>
 
   <!-- 코스 추가 모달 -->
@@ -17845,6 +17992,164 @@ async function loadSections() {
     showAlert('오류', '데이터를 불러오지 못했습니다.');
   }
   loadHeroSlides();
+  loadLabels();
+}
+
+// ==================== 라벨 관리 ====================
+
+let labelsData = [];
+let labelFormColor = 'blue';
+
+const labelColorMap = {
+  blue: { bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-200', dot: 'bg-blue-500' },
+  green: { bg: 'bg-green-100', text: 'text-green-700', border: 'border-green-200', dot: 'bg-green-500' },
+  red: { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-200', dot: 'bg-red-500' },
+  yellow: { bg: 'bg-yellow-100', text: 'text-yellow-700', border: 'border-yellow-200', dot: 'bg-yellow-500' },
+  purple: { bg: 'bg-purple-100', text: 'text-purple-700', border: 'border-purple-200', dot: 'bg-purple-500' },
+  gray: { bg: 'bg-gray-100', text: 'text-gray-600', border: 'border-gray-200', dot: 'bg-gray-500' },
+  indigo: { bg: 'bg-indigo-100', text: 'text-indigo-700', border: 'border-indigo-200', dot: 'bg-indigo-500' }
+};
+
+async function loadLabels() {
+  try {
+    const res = await fetch('/api/admin/labels');
+    labelsData = await res.json();
+    renderLabelsTable();
+  } catch (e) {
+    document.getElementById('labelList').innerHTML = '<p class="text-sm text-red-400 py-4 text-center">라벨을 불러오지 못했습니다.</p>';
+  }
+}
+
+function renderLabelsTable() {
+  var list = document.getElementById('labelList');
+  var countEl = document.getElementById('labelCount');
+  countEl.textContent = labelsData.length;
+
+  if (labelsData.length === 0) {
+    list.innerHTML = '<p class="text-sm text-gray-400 py-4 text-center">등록된 라벨이 없습니다. 라벨을 추가해 주세요.</p>';
+    return;
+  }
+
+  list.innerHTML = '<div class="overflow-hidden rounded-lg border border-gray-200">' +
+    '<table class="w-full text-sm">' +
+    '<thead><tr class="bg-gray-50 text-gray-500 text-xs">' +
+    '<th class="px-4 py-2.5 text-left font-medium">라벨</th>' +
+    '<th class="px-4 py-2.5 text-left font-medium">시스템 이름</th>' +
+    '<th class="px-4 py-2.5 text-left font-medium">가격 대치 텍스트</th>' +
+    '<th class="px-4 py-2.5 text-center font-medium">코스 수</th>' +
+    '<th class="px-4 py-2.5 text-right font-medium">관리</th>' +
+    '</tr></thead><tbody>' +
+    labelsData.map(function(label) {
+      var c = labelColorMap[label.color] || labelColorMap.gray;
+      var priceTextDisplay = label.price_text
+        ? '<span class="text-gray-800">' + label.price_text + '</span>'
+        : '<span class="text-gray-300">(미지정)</span>';
+      return '<tr class="border-t border-gray-100 hover:bg-gray-50">' +
+        '<td class="px-4 py-3"><span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ' + c.bg + ' ' + c.text + ' border ' + c.border + '"><span class="w-2 h-2 rounded-full ' + c.dot + '"></span>' + label.display_name + '</span></td>' +
+        '<td class="px-4 py-3 text-gray-500 font-mono text-xs">' + label.name + '</td>' +
+        '<td class="px-4 py-3">' + priceTextDisplay + '</td>' +
+        '<td class="px-4 py-3 text-center"><span class="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">' + (label.class_count || 0) + '개</span></td>' +
+        '<td class="px-4 py-3 text-right">' +
+          '<button onclick="openLabelFormModal(' + label.id + ')" class="text-gray-400 hover:text-indigo-500 mr-2" title="편집"><i class="fas fa-edit"></i></button>' +
+          '<button onclick="deleteLabel(' + label.id + ', ' + "'" + label.display_name.replace(/'/g, "\\\\'") + "'" + ')" class="text-gray-400 hover:text-red-500" title="삭제"><i class="fas fa-trash-alt"></i></button>' +
+        '</td></tr>';
+    }).join('') +
+    '</tbody></table></div>';
+}
+
+function selectLabelColor(color) {
+  labelFormColor = color;
+  document.querySelectorAll('.label-color-btn').forEach(function(btn) {
+    if (btn.dataset.color === color) {
+      btn.classList.add('ring-2');
+      btn.classList.add('ring-' + color + '-300');
+      btn.style.borderColor = '';
+      btn.classList.remove('border-transparent');
+    } else {
+      btn.classList.remove('ring-2');
+      btn.className = btn.className.replace(/ring-\\w+-300/g, '');
+      btn.classList.add('border-transparent');
+    }
+  });
+}
+
+function openLabelFormModal(labelId) {
+  document.getElementById('labelFormId').value = '';
+  document.getElementById('labelFormDisplayName').value = '';
+  document.getElementById('labelFormName').value = '';
+  document.getElementById('labelFormPriceText').value = '';
+  labelFormColor = 'blue';
+
+  if (labelId) {
+    var label = labelsData.find(function(l) { return l.id === labelId; });
+    if (label) {
+      document.getElementById('labelFormId').value = label.id;
+      document.getElementById('labelFormDisplayName').value = label.display_name;
+      document.getElementById('labelFormName').value = label.name;
+      document.getElementById('labelFormPriceText').value = label.price_text || '';
+      labelFormColor = label.color || 'blue';
+      document.getElementById('labelFormTitle').textContent = '라벨 편집';
+    }
+  } else {
+    document.getElementById('labelFormTitle').textContent = '라벨 추가';
+  }
+
+  selectLabelColor(labelFormColor);
+  document.getElementById('labelFormModal').style.display = 'flex';
+}
+
+function closeLabelFormModal() {
+  document.getElementById('labelFormModal').style.display = 'none';
+}
+
+async function saveLabelForm() {
+  var id = document.getElementById('labelFormId').value;
+  var displayName = document.getElementById('labelFormDisplayName').value.trim();
+  var name = document.getElementById('labelFormName').value.trim();
+  var priceText = document.getElementById('labelFormPriceText').value.trim();
+
+  if (!displayName || !name) {
+    showAlert('오류', '라벨 이름과 시스템 이름은 필수입니다.');
+    return;
+  }
+
+  var url = id ? '/api/admin/labels/' + id : '/api/admin/labels';
+  var method = id ? 'PUT' : 'POST';
+
+  try {
+    var res = await fetch(url, {
+      method: method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, displayName: displayName, color: labelFormColor, priceText: priceText })
+    });
+    var data = await res.json();
+    if (data.success) {
+      closeLabelFormModal();
+      showAlert('성공', data.message);
+      loadLabels();
+    } else {
+      showAlert('오류', data.error || '저장에 실패했습니다.');
+    }
+  } catch (e) {
+    showAlert('오류', '저장 중 오류가 발생했습니다.');
+  }
+}
+
+async function deleteLabel(labelId, labelName) {
+  if (!confirm("'" + labelName + "' 라벨을 삭제하시겠습니까?\\n이 라벨이 부여된 모든 코스와 회원에서도 제거됩니다.")) return;
+
+  try {
+    var res = await fetch('/api/admin/labels/' + labelId, { method: 'DELETE' });
+    var data = await res.json();
+    if (data.success) {
+      showAlert('성공', data.message);
+      loadLabels();
+    } else {
+      showAlert('오류', data.error || '삭제에 실패했습니다.');
+    }
+  } catch (e) {
+    showAlert('오류', '삭제 중 오류가 발생했습니다.');
+  }
 }
 
 // ==================== 히어로 슬라이드 관리 ====================
@@ -18308,7 +18613,7 @@ function renderSection(type, courses, listId, countId) {
       '<div class="cursor-grab text-gray-300 hover:text-gray-500"><i class="fas fa-grip-vertical"></i></div>' +
       '<span class="text-xs text-gray-400 font-mono w-5 text-center">' + (idx + 1) + '</span>' +
       '<img src="' + (cls.thumbnail || '') + '" class="w-14 h-10 rounded-lg object-cover bg-gray-200 flex-shrink-0" onerror="this.src=' + "'data:image/svg+xml," + '<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 56 40%22><rect fill=%22%23e5e7eb%22 width=%2256%22 height=%2240%22/></svg>' + "'" + '">' +
-      '<div class="flex-1 min-w-0"><p class="text-sm font-semibold text-gray-800 truncate">' + cls.title + '</p><p class="text-xs text-gray-500">' + cls.instructor_name + ' · ' + (cls.price ? cls.price.toLocaleString() + '원' : '무료') + '</p></div>' +
+      '<div class="flex-1 min-w-0"><p class="text-sm font-semibold text-gray-800 truncate">' + cls.title + '</p><p class="text-xs text-gray-500">' + cls.instructor_name + ' · ' + (cls.label_price_text || (cls.price ? cls.price.toLocaleString() + '원' : '무료')) + '</p></div>' +
       '<div class="flex items-center gap-1" id="classLabels' + cls.id + '">' +
         (cls.is_bestseller ? '<span class="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded font-semibold">BEST</span>' : '') +
         (cls.is_new ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-semibold">NEW</span>' : '') +
@@ -18458,7 +18763,7 @@ function filterCourses() {
   container.innerHTML = filtered.map(function(cls) {
     return '<button onclick="addCourseToSection(' + cls.id + ')" class="w-full flex items-center gap-3 p-3 hover:bg-gray-50 rounded-lg text-left transition-all">' +
       '<img src="' + (cls.thumbnail || '') + '" class="w-12 h-8 rounded object-cover bg-gray-200 flex-shrink-0" onerror="this.src=' + "'data:image/svg+xml," + '<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 48 32%22><rect fill=%22%23e5e7eb%22 width=%2248%22 height=%2232%22/></svg>' + "'" + '">' +
-      '<div class="flex-1 min-w-0"><p class="text-sm font-medium text-gray-800 truncate">' + cls.title + '</p><p class="text-xs text-gray-500">' + cls.instructor_name + ' · ' + (cls.price ? cls.price.toLocaleString() + '원' : '무료') + '</p></div>' +
+      '<div class="flex-1 min-w-0"><p class="text-sm font-medium text-gray-800 truncate">' + cls.title + '</p><p class="text-xs text-gray-500">' + cls.instructor_name + ' · ' + (cls.label_price_text || (cls.price ? cls.price.toLocaleString() + '원' : '무료')) + '</p></div>' +
       '<div class="flex items-center gap-1">' +
         (cls.is_bestseller ? '<span class="text-[10px] bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded">BEST</span>' : '') +
         (cls.is_new ? '<span class="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded">NEW</span>' : '') +
