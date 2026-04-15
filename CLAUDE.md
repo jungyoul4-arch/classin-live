@@ -1,10 +1,26 @@
 # 프로젝트 헌법 (CLAUDE.md)
 
 ## 프로젝트 개요
-- 프로젝트명: ClassIn Live
+- 프로젝트명: **ClassIn Live (L)** - 학생용 플랫폼
 - 기술 스택: Hono, TypeScript, Cloudflare Workers, D1 SQLite, R2 Storage, Cloudflare Stream
-- 배포 환경: Cloudflare Workers (live: classin-live.jung-youl.com / teachers: classin-teachers.jung-youl.com)
+- 배포 환경: Cloudflare Pages → https://live.jung-youl.com
 - 외부 API: ClassIn (EEO.cn) 라이브 수업, 헥토파이낸셜 PG 결제
+
+## ⚠️ L/T 분리 구조 (2026-04-15~)
+> **L (Live, 학생용)과 T (Teachers, 강사용)는 별도의 Git 저장소로 분리됨**
+
+| 항목 | L (학생용) | T (강사용) |
+|------|-----------|-----------|
+| 폴더 | `C:/classin/classin-live` | `C:/classin/classin-teachers` |
+| Git | 별도 저장소 | 별도 저장소 |
+| 배포 | `npm run deploy` → classin-live | `npm run deploy` → classin-teachers |
+| D1 DB | classin-live-db | classin-teachers-db-v2 |
+| URL | live.jung-youl.com | teachers.jung-youl.com |
+
+### 중요 규칙
+- **L 수정은 classin-live 폴더에서, T 수정은 classin-teachers 폴더에서 작업**
+- **절대 한 폴더에서 다른 프로젝트로 배포하면 안 됨** (코드가 덮어씌워짐)
+- 소스 코드가 다르게 분기되었으므로 기능 변경 시 양쪽 동기화 필요 여부 확인
 
 ## 핵심 규칙
 - 단일 파일 구조: `src/index.tsx` 하나에 모든 라우트, HTML, JS 포함 (~14000줄)
@@ -97,6 +113,26 @@
   - DB 상태를 변경할 때 **해당 상태를 읽는 다른 모든 기능을 확인**할 것
   - 자식 테이블(class_lessons) 변경 시 **부모 테이블(classes)의 참조 필드도 동기화**
   - 방어적 프로그래밍: 상태를 읽을 때 **단일 소스가 아닌 복수 소스를 확인** (fallback 패턴)
+
+### 2026-04-15: teachers 사이트 CLASSIN_SID/SECRET 누락으로 Internal Server Error
+- **실수**: teachers 사이트에서 ClassIn 관련 기능(수업 생성, 입장 등) 사용 시 "Internal Server Error" 발생
+- **원인**: classin-teachers Pages 프로젝트에 `CLASSIN_SID`와 `CLASSIN_SECRET` secret이 미설정
+  - classin-live에는 설정되어 있었으나, classin-teachers에는 누락됨
+  - `wrangler pages secret list`로 비교 시 발견
+- **해결**:
+  ```bash
+  echo "86799720" | npx wrangler pages secret put CLASSIN_SID --project-name=classin-teachers
+  echo "ReldwKsx" | npx wrangler pages secret put CLASSIN_SECRET --project-name=classin-teachers
+  npx wrangler pages deploy dist --project-name=classin-teachers
+  ```
+- **교훈**:
+  - live와 teachers는 **별도 Cloudflare Pages 프로젝트** → secret도 각각 설정 필요
+  - 새 프로젝트/환경 구성 시 **양쪽 secret list를 비교**하여 누락 확인
+  - 외부 API(ClassIn, PG 등) 자격증명은 **환경별로 다를 수 있음** → 올바른 값인지 검증
+  - `wrangler pages secret list --project-name=XXX`로 필수 secret 체크리스트:
+    - `JWT_SECRET` (인증)
+    - `CLASSIN_SID`, `CLASSIN_SECRET` (ClassIn API)
+    - `CF_ACCOUNT_ID`, `CF_STREAM_TOKEN` (Cloudflare Stream)
 
 ## DB 상태 계약 (ClassIn 관련 필수 동기화 규칙)
 - **class_lessons 생성 시** → `classes.classin_class_id`, `classes.classin_course_id` 반드시 설정

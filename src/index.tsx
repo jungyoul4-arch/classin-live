@@ -13691,6 +13691,15 @@ app.get('/admin', async (c) => {
   const authRedirect = await requireAdminAuth(c)
   if (authRedirect) return authRedirect
 
+  // 현재 DB의 가상계정 범위와 SID 조회 (기본값용)
+  const vaRange = await c.env.DB.prepare(`
+    SELECT MIN(account_uid) as min_uid, MAX(account_uid) as max_uid, sid
+    FROM classin_virtual_accounts LIMIT 1
+  `).first() as any
+  const defaultStartUid = vaRange?.min_uid || '0065-20000534100'
+  const defaultEndUid = vaRange?.max_uid || '0065-20000534599'
+  const defaultSid = c.env.CLASSIN_SID || vaRange?.sid || '86799720'
+
   return c.html(`
 <!DOCTYPE html>
 <html lang="ko">
@@ -13826,15 +13835,15 @@ app.get('/admin', async (c) => {
       <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
         <div>
           <label class="block text-sm text-gray-600 mb-1">시작 UID</label>
-          <input type="text" id="startUid" value="0065-20000531700" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+          <input type="text" id="startUid" value="${defaultStartUid}" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
         </div>
         <div>
           <label class="block text-sm text-gray-600 mb-1">끝 UID</label>
-          <input type="text" id="endUid" value="0065-20000531999" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+          <input type="text" id="endUid" value="${defaultEndUid}" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
         </div>
         <div>
           <label class="block text-sm text-gray-600 mb-1">SID (학교 ID)</label>
-          <input type="text" id="sid" value="67406208" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
+          <input type="text" id="sid" value="${defaultSid}" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500">
         </div>
         <div>
           <label class="block text-sm text-gray-600 mb-1">만료일</label>
