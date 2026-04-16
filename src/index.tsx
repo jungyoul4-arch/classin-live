@@ -340,6 +340,59 @@ async function deleteClassInLesson(
   }
 }
 
+// ClassIn API: End (Delete) Course via Partner API
+async function deleteClassInCourse(
+  config: ClassInConfig,
+  courseId: string
+): Promise<{ success: boolean; notFound?: boolean; error?: string }> {
+  const timestamp = Math.floor(Date.now() / 1000)
+  const safeKey = await generateSafeKey(config.SECRET, timestamp)
+
+  const formData = new URLSearchParams()
+  formData.set('SID', config.SID)
+  formData.set('safeKey', safeKey)
+  formData.set('timeStamp', timestamp.toString())
+  formData.set('courseId', courseId)
+
+  console.log('deleteClassInCourse request:', { courseId, SID: config.SID })
+
+  try {
+    const res = await fetch(`${config.API_BASE}/partner/api/course.api.php?action=endCourse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString()
+    })
+    const text = await res.text()
+    console.log('deleteClassInCourse response text:', text)
+
+    if (!text) {
+      return { success: false, error: 'ClassIn API 응답이 비어있습니다.' }
+    }
+
+    let data: any
+    try {
+      data = JSON.parse(text)
+    } catch {
+      return { success: false, error: 'ClassIn API 응답 파싱 실패: ' + text.substring(0, 200) }
+    }
+
+    if (data.error_info?.errno === 1) {
+      return { success: true }
+    }
+    // 394: 진행중인 수업이 있어 종료 불가
+    if (data.error_info?.errno === 394) {
+      return { success: false, error: '진행중인 수업이 있어 ClassIn 코스를 종료할 수 없습니다.' }
+    }
+    // 코스가 존재하지 않는 경우
+    if (data.error_info?.error && (data.error_info.error.includes('不存在') || data.error_info.error.includes('not exist'))) {
+      return { success: true, notFound: true }
+    }
+    return { success: false, error: translateClassInError(data.error_info?.error || JSON.stringify(data)) }
+  } catch (e: any) {
+    return { success: false, error: e.message || 'Network error' }
+  }
+}
+
 // ClassIn API: Get webcast/replay URL for a class
 async function getClassInWebcastUrl(
   config: ClassInConfig,
@@ -4565,7 +4618,7 @@ app.put('/api/admin/classes/:id', async (c) => {
 app.delete('/api/admin/classes/:id', async (c) => {
   const classId = parseInt(c.req.param('id'))
 
-  const cls = await c.env.DB.prepare('SELECT id, title FROM classes WHERE id = ?').bind(classId).first() as any
+  const cls = await c.env.DB.prepare('SELECT id, title, classin_course_id FROM classes WHERE id = ?').bind(classId).first() as any
   if (!cls) {
     return c.json({ error: '코스를 찾을 수 없습니다.' }, 404)
   }
@@ -4576,6 +4629,26 @@ app.delete('/api/admin/classes/:id', async (c) => {
   ).bind(classId).first() as any
   if (enrollments?.count > 0) {
     return c.json({ error: `${enrollments.count}명의 활성 수강생이 있습니다. 먼저 수강을 종료해주세요.` }, 400)
+  }
+
+  // ClassIn API로 코스 삭제 (종료)
+  let classInDeleted = false
+  let classInError: string | undefined
+  if (cls.classin_course_id) {
+    const config: ClassInConfig = {
+      SID: c.env.CLASSIN_SID || '',
+      SECRET: c.env.CLASSIN_SECRET || '',
+      API_BASE: 'https://api.eeo.cn'
+    }
+    if (config.SID && config.SECRET) {
+      const result = await deleteClassInCourse(config, cls.classin_course_id)
+      classInDeleted = result.success
+      classInError = result.error
+      if (!result.success && !result.notFound) {
+        console.log('ClassIn 코스 삭제 실패:', result.error)
+        // ClassIn 삭제 실패해도 로컬 DB는 삭제 진행 (경고만 표시)
+      }
+    }
   }
 
   try {
@@ -4607,7 +4680,17 @@ app.delete('/api/admin/classes/:id', async (c) => {
     return c.json({ error: '삭제 실패: ' + e.message }, 500)
   }
 
-  return c.json({ success: true, message: '코스가 삭제되었습니다.' })
+  // 응답 메시지 구성
+  let message = '코스가 삭제되었습니다.'
+  if (cls.classin_course_id) {
+    if (classInDeleted) {
+      message += ' (ClassIn 코스도 종료됨)'
+    } else if (classInError) {
+      message += ` (ClassIn 코스 삭제 실패: ${classInError})`
+    }
+  }
+
+  return c.json({ success: true, message, classInDeleted })
 })
 
 // ==================== 강사 수업 편집 API ====================
