@@ -10643,149 +10643,161 @@ app.get('/class/:slug', async (c) => {
   let courseMaterials: any[] = []
   try { courseMaterials = JSON.parse(cls.materials || '[]') } catch(e) {}
 
+  // 추천 강의 (동일 카테고리, 다른 강의)
+  let relatedClasses: any[] = []
+  try {
+    const { results: rc } = await c.env.DB.prepare(
+      `SELECT id, slug, title, thumbnail, rating, review_count, price
+       FROM classes WHERE category_id = ? AND id != ? AND is_active = 1
+       ORDER BY current_students DESC LIMIT 6`
+    ).bind(cls.category_id, cls.id).all()
+    relatedClasses = (rc || []) as any[]
+  } catch(e) { /* 무시 */ }
+
   const html = `${headHTML}
-<body class="bg-gray-50 min-h-screen">
+<body class="bg-white min-h-screen">
+<style>
+:root {
+  --cta-orange:#FF5D00; --sidebar-width:400px; --content-max:772px;
+  --col-gap:60px; --header-h:72px; --tabs-h:47px;
+}
+.cta-orange{background:var(--cta-orange);color:#000;}
+.cta-orange:hover{background:#e05200;}
+.class-wrap{max-width:1232px;margin:0 auto;padding:0 40px;}
+.class-row{display:flex;gap:var(--col-gap);align-items:flex-start;}
+.class-content{flex:1;min-width:0;max-width:var(--content-max);}
+.class-sidebar{width:var(--sidebar-width);flex-shrink:0;}
+.tab-link{padding:0;height:var(--tabs-h);display:inline-flex;align-items:center;font-size:16px;color:#888;border-bottom:2px solid transparent;transition:all .2s;text-decoration:none;white-space:nowrap;}
+.tab-link:hover{color:#555;}
+.tab-link.active{color:#0C0C0C;font-weight:700;border-bottom-color:#0C0C0C;}
+.review-clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+.bio-clamp{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;}
+.scroll-hide::-webkit-scrollbar{display:none;}
+.scroll-hide{scrollbar-width:none;}
+.sec-anchor{scroll-margin-top:calc(var(--header-h) + var(--tabs-h) + 16px);}
+@media (max-width:767px){
+  .class-wrap{padding:0 16px;}
+  .class-row{flex-direction:column;gap:24px;}
+  .class-sidebar{width:100%;}
+  .class-content{max-width:100%;}
+}
+</style>
 ${navHTML}
 
-<!-- Hero -->
-<section class="bg-dark-900">
-  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-8 md:py-12">
-    <div class="grid md:grid-cols-5 gap-8">
-      <div class="md:col-span-3">
-        <!-- Breadcrumb -->
-        <div class="flex items-center gap-2 text-sm text-gray-400 mb-4">
-          <a href="/" class="hover:text-white transition-colors">홈</a>
-          <i class="fas fa-chevron-right text-[10px]"></i>
-          <a href="/categories?category=${cls.category_slug}" class="hover:text-white transition-colors">${cls.category_name}</a>
-          <i class="fas fa-chevron-right text-[10px]"></i>
-          <span class="text-gray-300">${cls.title}</span>
+<!-- Hero + Purchase Sidebar (class101 2-column) -->
+<section class="bg-white border-b border-gray-100">
+  <div class="class-wrap py-8">
+    <!-- Breadcrumb -->
+    <div class="flex items-center gap-2 text-sm text-gray-500 mb-6">
+      <a href="/" class="hover:text-dark-900 transition-colors">홈</a>
+      <i class="fas fa-chevron-right text-[10px]"></i>
+      <a href="/categories?category=${cls.category_slug}" class="hover:text-dark-900 transition-colors">${cls.category_name}</a>
+      <i class="fas fa-chevron-right text-[10px]"></i>
+      <span class="text-dark-700">${cls.title}</span>
+    </div>
+
+    <div class="class-row">
+      <!-- Left: Carousel + Review Preview + Compare + Title/Info -->
+      <div class="class-content w-full">
+        <!-- 1) Hero Carousel (구조만, 1장 동작) -->
+        <div class="relative mb-6 overflow-hidden rounded-xl bg-gray-100">
+          <div id="heroCarousel" class="flex transition-transform duration-300" data-idx="0" style="aspect-ratio:16/9;">
+            <div class="flex-shrink-0 w-full h-full"><img src="${cls.thumbnail}" class="w-full h-full object-cover"></div>
+          </div>
+          <div class="absolute top-3 right-3 bg-black/60 text-white text-xs font-semibold px-2 py-1 rounded-full">1/1</div>
         </div>
-        
+
+        <!-- 2) Review Preview (2 cards) -->
+        ${reviews.length > 0 ? `
+        <div class="mb-6">
+          <div class="flex items-center gap-2 mb-3">
+            <i class="fas fa-star text-yellow-400"></i>
+            <span class="font-bold text-dark-900">${cls.rating}</span>
+            <span class="text-gray-500 text-sm">· ${cls.review_count}개</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            ${reviews.slice(0,2).map((r: any) => `
+              <div class="p-4 border border-gray-200 rounded-xl bg-white">
+                <div class="flex items-center gap-2 mb-2">
+                  <div class="flex gap-0.5">${Array.from({length:5}, (_, i) => `<i class="${i < r.rating ? 'fas' : 'far'} fa-star text-yellow-400 text-[10px]"></i>`).join('')}</div>
+                  <span class="text-xs font-semibold text-dark-800">${r.user_name}</span>
+                </div>
+                <p class="text-sm text-dark-600 leading-relaxed review-clamp">${r.content}</p>
+                <button onclick="var p=this.previousElementSibling; p.classList.toggle('review-clamp'); this.textContent = p.classList.contains('review-clamp') ? '펼치기 ▼' : '접기 ▲'" class="text-xs text-gray-400 hover:text-gray-700 mt-1">펼치기 ▼</button>
+              </div>
+            `).join('')}
+          </div>
+          ${cls.review_count > 2 ? `<a href="#sec-reviews" class="mt-3 w-full h-12 flex items-center justify-center border border-gray-200 rounded-xl text-sm font-medium text-dark-800 hover:bg-gray-50 transition-all">${cls.review_count}개 리뷰 전체 보기</a>` : ''}
+        </div>
+        ` : ''}
+
+        <!-- 3) 함께 비교해 보세요 -->
+        ${relatedClasses.length > 0 ? `
+        <div class="mb-6">
+          <h2 class="text-lg font-bold text-dark-900 mb-3">함께 비교해 보세요</h2>
+          <div class="flex gap-4 overflow-x-auto pb-2 scroll-hide">
+            ${relatedClasses.slice(0,4).map((rc: any) => `
+              <a href="/class/${rc.slug}" class="flex-shrink-0 w-48 group">
+                <img src="${rc.thumbnail}" class="w-full h-28 object-cover rounded-xl mb-2 bg-gray-100">
+                <p class="text-xs font-semibold text-dark-800 leading-tight mb-1 group-hover:text-primary-500 line-clamp-2">${rc.title}</p>
+                <div class="flex items-center gap-1">
+                  <i class="fas fa-star text-yellow-400 text-[10px]"></i>
+                  <span class="text-xs text-gray-500">${rc.rating}</span>
+                  <span class="text-xs text-gray-400">(${rc.review_count})</span>
+                </div>
+              </a>
+            `).join('')}
+          </div>
+        </div>
+        ` : ''}
+
+        <!-- 4) Badges + Title + Rating + Instructor card -->
         <div class="flex items-center gap-2 mb-3">
           ${cls.class_type === 'live' ? '<span class="px-2 py-0.5 bg-red-500 text-white text-xs font-bold rounded-md badge-live"><i class="fas fa-circle text-[6px] mr-0.5"></i>LIVE</span>' : ''}
           ${cls.is_bestseller ? '<span class="px-2 py-0.5 bg-primary-500 text-white text-xs font-bold rounded-md">BEST</span>' : ''}
-          <span class="text-sm text-gray-400">${cls.category_name}</span>
+          <span class="text-sm text-gray-500">${cls.category_name}</span>
         </div>
-        
-        <h1 class="text-2xl md:text-3xl font-bold text-white mb-3 leading-tight">${cls.title}</h1>
-        <p class="text-gray-400 mb-4">${cls.subtitle}</p>
-        
-        <div class="flex flex-wrap items-center gap-4 mb-6">
+        <h1 class="text-2xl md:text-3xl font-bold text-dark-900 mb-3 leading-tight">${cls.title}</h1>
+        <p class="text-gray-500 mb-4">${cls.subtitle}</p>
+        <div class="flex flex-wrap items-center gap-4 mb-6 text-sm">
           <div class="flex items-center gap-1">
-            ${Array.from({length:5}, (_, i) => `<i class="${i < Math.round(cls.rating) ? 'fas' : 'far'} fa-star text-yellow-400 text-sm"></i>`).join('')}
-            <span class="text-white font-bold ml-1">${cls.rating}</span>
+            ${Array.from({length:5}, (_, i) => `<i class="${i < Math.round(cls.rating) ? 'fas' : 'far'} fa-star text-yellow-400"></i>`).join('')}
+            <span class="text-dark-900 font-bold ml-1">${cls.rating}</span>
             <span class="text-gray-500">(${cls.review_count}개 리뷰)</span>
           </div>
-          <span class="text-gray-600">|</span>
-          <span class="text-gray-400"><i class="far fa-user mr-1"></i>${cls.active_students || 0}명 수강중</span>
-          <span class="text-gray-600">|</span>
-          <span class="text-gray-400"><i class="far fa-clock mr-1"></i>${cls.duration_minutes}분</span>
+          <span class="text-gray-300">|</span>
+          <span class="text-gray-500"><i class="far fa-user mr-1"></i>${cls.active_students || 0}명 수강중</span>
+          <span class="text-gray-300">|</span>
+          <span class="text-gray-500"><i class="far fa-clock mr-1"></i>${cls.duration_minutes}분</span>
         </div>
-
-        <!-- Instructor -->
-        <div class="flex items-center gap-3 p-4 bg-white/5 rounded-xl">
-          <img src="${cls.instructor_image}" class="w-12 h-12 rounded-full bg-gray-700">
+        <div class="flex items-center gap-3 p-4 bg-gray-50 rounded-xl">
+          <img src="${cls.instructor_image}" class="w-12 h-12 rounded-full bg-gray-200">
           <div>
             <div class="flex items-center gap-1.5">
-              <span class="text-white font-semibold">${cls.instructor_name}</span>
-              ${cls.instructor_verified ? '<i class="fas fa-check-circle text-blue-400 text-sm"></i>' : ''}
+              <span class="text-dark-900 font-semibold">${cls.instructor_name}</span>
+              ${cls.instructor_verified ? '<i class="fas fa-check-circle text-blue-500 text-sm"></i>' : ''}
             </div>
-            <p class="text-sm text-gray-400">${cls.instructor_specialty}</p>
+            <p class="text-sm text-gray-500">${cls.instructor_specialty}</p>
           </div>
         </div>
-      </div>
-      
-      <!-- Thumbnail & Purchase Card -->
-      <div class="md:col-span-2">
-        <div class="bg-white rounded-2xl overflow-hidden shadow-2xl sticky top-20">
-          <img src="${cls.thumbnail}" class="w-full aspect-video object-cover">
-          <div class="p-5">
-            <div class="flex items-baseline gap-2 mb-1">
-              ${labelPriceText
-                ? `<span class="text-2xl font-extrabold text-yellow-600"><i class="fas fa-star mr-1"></i>${escapeHtml(labelPriceText)}</span>`
-                : `${cls.discount_percent > 0 ? `<span class="text-xl font-bold text-primary-500">${cls.discount_percent}%</span>` : ''}
-              <span class="text-2xl font-extrabold text-dark-900">${cls.price.toLocaleString()}원</span>`}
-            </div>
-            ${labelPriceText ? '<div class="mb-3"></div>' : (cls.discount_percent > 0 ? `<p class="text-sm text-gray-400 line-through mb-3">${cls.original_price.toLocaleString()}원</p>` : '<div class="mb-3"></div>')}
-            
-            ${cls.next_lesson ? `
-            <div class="flex items-center gap-2 px-3 py-2 bg-red-50 rounded-xl mb-3">
-              <i class="fas fa-calendar-alt text-red-500"></i>
-              <span class="text-sm font-medium text-red-700">다음 강의: ${new Date(cls.next_lesson.scheduled_at).toLocaleString('ko-KR', {timeZone:'Asia/Seoul', year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit'})}</span>
-            </div>
-            <p class="text-xs text-gray-500 mb-3 -mt-1">${cls.next_lesson.lesson_title}</p>
-            ` : `
-            <div class="flex items-center gap-2 px-3 py-2 bg-gray-50 rounded-xl mb-3">
-              <i class="fas fa-calendar-alt text-gray-500"></i>
-              <span class="text-sm font-medium text-gray-600">예정된 강의 없음</span>
-            </div>
-            `}
-            
-            <div class="flex items-center gap-2 mb-3">
-              <div class="flex-1 bg-gray-100 rounded-full h-2">
-                <div class="bg-primary-500 h-2 rounded-full" style="width:${Math.round((cls.active_students || 0) / cls.max_students * 100)}%"></div>
-              </div>
-              <span class="text-xs text-gray-500 whitespace-nowrap">${cls.active_students || 0}/${cls.max_students}명</span>
-            </div>
-            
-            <!-- 결제 옵션 탭 (유료 코스만, 라벨 가격 대치 시 숨김) -->
-            ${(cls.price > 0 && !labelPriceText) ? `
-            <div class="flex gap-1 mb-3 bg-gray-100 rounded-xl p-1">
-              <button onclick="switchPayOption('onetime')" id="payOptOnetime" class="pay-opt-tab flex-1 py-2 text-xs font-semibold rounded-lg bg-white text-dark-900 shadow-sm transition-all">1회 결제</button>
-              <button onclick="switchPayOption('monthly')" id="payOptMonthly" class="pay-opt-tab flex-1 py-2 text-xs font-semibold rounded-lg text-gray-500 transition-all">
-                <i class="fas fa-sync-alt mr-0.5 text-[10px]"></i>월간 자동결제
-              </button>
-            </div>
-            ` : ''}
 
-            <!-- 1회 결제 -->
-            <div id="payOnetime">
-              <button id="btnEnrollOnetime" onclick='openPaymentModal(${JSON.stringify({id:cls.id, slug:cls.slug, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 ${labelPriceText ? 'bg-yellow-500 hover:bg-yellow-600' : (cls.price > 0 ? 'bg-primary-500 hover:bg-primary-600' : 'bg-green-500 hover:bg-green-600')} text-white font-bold rounded-xl transition-all shadow-lg ${labelPriceText ? 'shadow-yellow-500/30' : (cls.price > 0 ? 'shadow-primary-500/30' : 'shadow-green-500/30')} mb-2">
-                ${labelPriceText ? `<i class="fas fa-star mr-2"></i>${escapeHtml(labelPriceText)}` : (cls.price > 0 ? `<i class="fas fa-credit-card mr-2"></i>바로 수강하기 · ${cls.price.toLocaleString()}원` : '<i class="fas fa-gift mr-2"></i>무료 수강하기')}
-              </button>
-            </div>
-
-            <!-- 월간 구독 -->
-            <div id="payMonthly" class="hidden">
-              <div class="bg-blue-50 rounded-xl p-3 mb-2">
-                <div class="flex items-center justify-between mb-1">
-                  <span class="text-xs font-bold text-blue-800"><i class="fas fa-sync-alt mr-1"></i>월간 자동결제</span>
-                  <span class="text-[10px] text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">매월 결제일 자동결제</span>
-                </div>
-                <p class="text-[11px] text-blue-600">오늘 결제 시 매월 ${new Date().getDate()}일에 자동으로 결제됩니다</p>
-              </div>
-              <button id="btnEnrollMonthly" onclick='openSubscriptionModal(${JSON.stringify({planType:"class_monthly", classId:cls.id, slug:cls.slug, title:cls.title, amount:cls.price, originalAmount:cls.original_price, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/30 mb-2">
-                <i class="fas fa-sync-alt mr-2"></i>월간 구독 시작 · ${cls.price.toLocaleString()}원/월
-              </button>
-            </div>
-
-            <div class="grid grid-cols-2 gap-2">
-              <button id="btnAddToCart" onclick="addToCart(${cls.id})" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
-                <i class="fas fa-shopping-cart mr-1"></i>장바구니
-              </button>
-              <button id="btnWishlist" onclick="toggleWishlistItem(${cls.id})" data-wishlist="${cls.id}" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
-                <i class="far fa-heart mr-1"></i>찜하기
-              </button>
-            </div>
-            
-            <div class="grid grid-cols-3 gap-2 mt-4 pt-4 border-t border-gray-100 text-center">
-              <div><p class="text-xs text-gray-400">강의 수</p><p class="text-sm font-bold text-dark-800">${cls.total_lessons}강</p></div>
-              <div><p class="text-xs text-gray-400">총 시간</p><p class="text-sm font-bold text-dark-800">${cls.duration_minutes}분</p></div>
-              <div><p class="text-xs text-gray-400">난이도</p><p class="text-sm font-bold text-dark-800">${cls.level === 'beginner' ? '입문' : cls.level === 'intermediate' ? '중급' : cls.level === 'advanced' ? '고급' : '전체'}</p></div>
-            </div>
-          </div>
+      <!-- Section Tab Navigation (inside class-content, sticky) -->
+      <nav id="sectionTabs" class="bg-white border-b border-gray-200 sticky z-40 mt-8 mb-6" style="top:72px;">
+        <div class="flex gap-8 overflow-x-auto scroll-hide">
+          <a href="#sec-intro" class="tab-link active">클래스 소개</a>
+          <a href="#sec-curriculum" class="tab-link">커리큘럼</a>
+          <a href="#sec-reviews" class="tab-link">리뷰 ${cls.review_count}</a>
+          <a href="#sec-instructor" class="tab-link">강사 소개</a>
+          <a href="#sec-recommend" class="tab-link">추천</a>
+          <a href="#sec-qna" class="tab-link">Q&amp;A</a>
         </div>
-      </div>
-    </div>
-  </div>
-</section>
+      </nav>
 
-<!-- Detail Tabs Content -->
-<section class="max-w-7xl mx-auto px-4 sm:px-6 py-8">
-  <div class="grid md:grid-cols-5 gap-8">
-    <div class="md:col-span-3 space-y-10">
-      
-      <!-- What you'll learn -->
+      <!-- Detail Content (class101 section order) -->
+      <div class="space-y-10">
+
+      <!-- #sec-intro : WhatYouLearn + Description -->
+      <div id="sec-intro" class="sec-anchor space-y-10">
       ${whatYouLearn.length > 0 ? `
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
         <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-lightbulb text-yellow-500 mr-2"></i>이런 걸 배워요</h2>
@@ -10800,27 +10812,14 @@ ${navHTML}
       </div>
       ` : ''}
 
-      <!-- Description -->
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
         <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-info-circle text-blue-500 mr-2"></i>코스 소개</h2>
         <p class="text-sm text-dark-600 leading-relaxed whitespace-pre-line">${cls.description}</p>
       </div>
+      </div><!-- /#sec-intro -->
 
-      <!-- Course Materials (강의 자료) -->
-      ${courseMaterials.length > 0 ? `
-      <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-paperclip text-amber-500 mr-2"></i>강의 자료 <span class="text-sm font-normal text-gray-500">(${courseMaterials.length}개)</span></h2>
-        <div class="flex flex-wrap gap-3">
-          ${courseMaterials.map((m: any) => `
-            <a href="javascript:void(0)" onclick="downloadMaterial('${m.url}', '${(m.filename || '자료').replace(/'/g, "\\'")}')" data-material-link class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded-xl text-sm text-amber-800 transition-all cursor-pointer">
-              <i class="fas fa-file-download text-amber-500"></i>
-              <span>${m.filename || '다운로드'}</span>
-            </a>
-          `).join('')}
-        </div>
-        <p class="text-xs text-gray-400 mt-3"><i class="fas fa-info-circle mr-1"></i>수강 등록 후 자료를 다운로드할 수 있습니다</p>
-      </div>
-      ` : ''}
+      <!-- #sec-curriculum : Scheduled Lessons + Curriculum + Course Materials -->
+      <div id="sec-curriculum" class="sec-anchor space-y-6">
 
       <!-- Scheduled Lessons (강의 목록) -->
       ${scheduledLessons.length > 0 ? `
@@ -10969,7 +10968,16 @@ ${navHTML}
 
       <!-- Curriculum (챕터별 + 강의 입장 연결) -->
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-list-ol text-purple-500 mr-2"></i>커리큘럼 <span class="text-sm font-normal text-gray-500">(${lessons.length}강)</span></h2>
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-bold text-dark-900"><i class="fas fa-list-ol text-purple-500 mr-2"></i>커리큘럼 <span class="text-sm font-normal text-gray-500">(${lessons.length}강)</span></h2>
+          <button onclick="toggleAllChapters(this)" class="text-xs text-gray-500 hover:text-dark-900 underline">전체 열기</button>
+        </div>
+        <div class="flex flex-wrap gap-4 text-xs text-gray-500 mb-4 pb-4 border-b border-gray-100">
+          <span><i class="far fa-calendar mr-1"></i>즉시 수강 가능</span>
+          <span><i class="fas fa-play mr-1"></i>${cls.total_lessons}강</span>
+          <span><i class="far fa-clock mr-1"></i>${cls.duration_minutes}분</span>
+          <span><i class="fas fa-signal mr-1"></i>${cls.level === 'beginner' ? '입문' : cls.level === 'intermediate' ? '중급' : cls.level === 'advanced' ? '고급' : '전체'}</span>
+        </div>
         <div class="space-y-3">
           ${Object.entries(chapters).map(([chapter, chLessons]: [string, any[]], ci) => `
             <div class="border border-gray-100 rounded-xl overflow-hidden">
@@ -10981,14 +10989,14 @@ ${navHTML}
                 </div>
                 <i class="fas fa-chevron-down text-gray-400 text-xs transition-transform chev-icon"></i>
               </button>
-              <div class="${ci === 0 ? '' : 'hidden'}">
+              <div data-chapter-content class="${ci === 0 ? '' : 'hidden'}">
                 ${chLessons.map((lesson: any, li: number) => {
                   const iconClass = lesson.lesson_type === 'live' ? 'fa-video text-red-400' : lesson.lesson_type === 'assignment' ? 'fa-pencil-alt text-blue-400' : 'fa-play-circle text-gray-400'
                   return `
                   <div class="curriculum-item flex items-center gap-3 px-4 py-3 border-t border-gray-50 hover:bg-purple-50 transition-all cursor-pointer group" data-lesson-title="${lesson.title.replace(/"/g, '&quot;')}" data-lesson-type="${lesson.lesson_type}" onclick="enterCurriculumLesson(this)">
                     <span class="text-xs text-gray-400 w-5">${li + 1}</span>
                     <i class="fas ${iconClass} text-sm"></i>
-                    <span class="text-sm text-dark-700 flex-1 group-hover:text-purple-700 transition-colors">${lesson.title}</span>
+                    <span class="text-sm font-medium text-dark-700 flex-1 group-hover:text-purple-700 transition-colors">${lesson.title}</span>
                     ${lesson.is_preview ? '<span class="text-[10px] text-primary-500 font-bold border border-primary-200 px-1.5 py-0.5 rounded">미리보기</span>' : ''}
                     <span class="text-xs text-gray-400">${lesson.duration_minutes}분</span>
                     <i class="fas fa-chevron-right text-gray-300 text-xs group-hover:text-purple-400 transition-colors"></i>
@@ -11000,41 +11008,26 @@ ${navHTML}
         </div>
       </div>
 
-      <!-- Requirements -->
-      ${requirements.length > 0 ? `
+      <!-- Course Materials (강의 자료) — 커리큘럼 영역 안으로 이동 -->
+      ${courseMaterials.length > 0 ? `
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-clipboard-list text-orange-500 mr-2"></i>준비물 & 사전 지식</h2>
-        <ul class="space-y-2">
-          ${requirements.map(req => `
-            <li class="flex items-center gap-2 text-sm text-dark-600"><i class="fas fa-chevron-right text-primary-400 text-xs"></i>${req}</li>
+        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-paperclip text-amber-500 mr-2"></i>강의 자료 <span class="text-sm font-normal text-gray-500">(${courseMaterials.length}개)</span></h2>
+        <div class="flex flex-wrap gap-3">
+          ${courseMaterials.map((m: any) => `
+            <a href="javascript:void(0)" onclick="downloadMaterial('${m.url}', '${(m.filename || '자료').replace(/'/g, "\\'")}')" data-material-link class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded-xl text-sm text-amber-800 transition-all cursor-pointer">
+              <i class="fas fa-file-download text-amber-500"></i>
+              <span>${m.filename || '다운로드'}</span>
+            </a>
           `).join('')}
-        </ul>
+        </div>
+        <p class="text-xs text-gray-400 mt-3"><i class="fas fa-info-circle mr-1"></i>수강 등록 후 자료를 다운로드할 수 있습니다</p>
       </div>
       ` : ''}
 
-      <!-- Instructor Detail -->
-      <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-chalkboard-teacher text-indigo-500 mr-2"></i>러닝퍼실리테이터 소개</h2>
-        <div class="flex items-start gap-4">
-          <img src="${cls.instructor_image}" class="w-16 h-16 rounded-full bg-gray-200">
-          <div class="flex-1">
-            <div class="flex items-center gap-1.5 mb-1">
-              <span class="text-base font-bold text-dark-900">${cls.instructor_name}</span>
-              ${cls.instructor_verified ? '<i class="fas fa-check-circle text-blue-500 text-sm"></i>' : ''}
-            </div>
-            <p class="text-sm text-gray-500 mb-3">${cls.instructor_specialty}</p>
-            <p class="text-sm text-dark-600 leading-relaxed mb-4">${cls.instructor_bio}</p>
-            <div class="flex gap-4 text-sm text-gray-500">
-              <span><i class="far fa-user mr-1"></i>${cls.instructor_total_students?.toLocaleString()}명 수강생</span>
-              <span><i class="far fa-play-circle mr-1"></i>${cls.instructor_total_classes}개 코스</span>
-              <span><i class="fas fa-star text-yellow-400 mr-1"></i>${cls.instructor_rating}</span>
-            </div>
-          </div>
-        </div>
-      </div>
+      </div><!-- /#sec-curriculum -->
 
-      <!-- Reviews -->
-      <div class="bg-white rounded-2xl p-6 border border-gray-100">
+      <!-- #sec-reviews : class101 순서상 커리큘럼 다음 -->
+      <div id="sec-reviews" class="sec-anchor bg-white rounded-2xl p-6 border border-gray-100">
         <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-comments text-green-500 mr-2"></i>수강생 후기 <span class="text-sm font-normal text-gray-500">(${cls.review_count}개)</span></h2>
 
         <div class="flex items-center gap-6 mb-6 p-4 bg-gray-50 rounded-xl">
@@ -11077,9 +11070,9 @@ ${navHTML}
           </div>
         </div>
 
-        <div class="space-y-4" id="reviewsList">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4" id="reviewsList">
           ${reviews.map((r: any) => `
-            <div class="pb-4 border-b border-gray-50 last:border-0">
+            <div class="border border-gray-100 rounded-xl p-4 bg-white">
               <div class="flex items-center justify-between mb-2">
                 <div class="flex items-center gap-2">
                   <div class="w-8 h-8 bg-gray-200 rounded-full flex items-center justify-center text-xs font-bold text-gray-500">${(r.user_name || 'U').charAt(0)}</div>
@@ -11090,14 +11083,69 @@ ${navHTML}
                 </div>
                 <span class="text-xs text-gray-400">${new Date(r.created_at).toLocaleDateString('ko-KR')}</span>
               </div>
-              <p class="text-sm text-dark-600 leading-relaxed">${r.content}</p>
+              <p class="text-sm text-dark-600 leading-relaxed review-clamp">${r.content}</p>
+              <button onclick="var p=this.previousElementSibling; p.classList.toggle('review-clamp'); this.textContent = p.classList.contains('review-clamp') ? '펼치기 ▼' : '접기 ▲'" class="text-xs text-gray-400 hover:text-gray-700 mt-1">펼치기 ▼</button>
             </div>
           `).join('')}
         </div>
+      </div><!-- /#sec-reviews -->
+
+      <!-- #sec-instructor : 강사 소개 -->
+      <div id="sec-instructor" class="sec-anchor bg-white rounded-2xl p-6 border border-gray-100">
+        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-chalkboard-teacher text-indigo-500 mr-2"></i>강사 소개</h2>
+        <div class="flex items-start gap-4">
+          <img src="${cls.instructor_image}" class="w-16 h-16 rounded-full bg-gray-200">
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-1.5 mb-1">
+              <span class="text-base font-bold text-dark-900">${cls.instructor_name}</span>
+              ${cls.instructor_verified ? '<i class="fas fa-check-circle text-blue-500 text-sm"></i>' : ''}
+            </div>
+            <p class="text-sm text-gray-500 mb-3">${cls.instructor_specialty}</p>
+            <p id="instructorBioText" class="text-sm text-dark-600 leading-relaxed mb-2 bio-clamp">${cls.instructor_bio}</p>
+            <button id="instructorBioMore" onclick="document.getElementById('instructorBioText').classList.remove('bio-clamp'); this.remove()" class="text-xs text-gray-500 hover:text-dark-900 underline mb-4">더보기 ▼</button>
+            <div class="flex gap-4 text-sm text-gray-500">
+              <span><i class="far fa-user mr-1"></i>${cls.instructor_total_students?.toLocaleString()}명 수강생</span>
+              <span><i class="far fa-play-circle mr-1"></i>${cls.instructor_total_classes}개 코스</span>
+              <span><i class="fas fa-star text-yellow-400 mr-1"></i>${cls.instructor_rating}</span>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <!-- Q&A 게시판 -->
-      <div class="bg-white rounded-2xl p-6 border border-gray-100" id="qna">
+      <!-- #sec-recommend : 추천 강의 -->
+      ${relatedClasses.length > 0 ? `
+      <div id="sec-recommend" class="sec-anchor bg-white rounded-2xl p-6 border border-gray-100">
+        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-thumbs-up text-primary-500 mr-2"></i>추천 강의</h2>
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+          ${relatedClasses.map((rc: any) => `
+            <a href="/class/${rc.slug}" class="group">
+              <img src="${rc.thumbnail}" class="w-full aspect-video object-cover rounded-xl mb-2 bg-gray-100">
+              <p class="text-sm font-semibold text-dark-800 line-clamp-2 group-hover:text-primary-500 transition-colors">${rc.title}</p>
+              <div class="flex items-center gap-1 mt-1">
+                <i class="fas fa-star text-yellow-400 text-xs"></i>
+                <span class="text-xs text-gray-500">${rc.rating}</span>
+                <span class="text-xs text-gray-400">(${rc.review_count})</span>
+              </div>
+            </a>
+          `).join('')}
+        </div>
+      </div>
+      ` : ''}
+
+      <!-- #sec-materials : 준비물 & 사전 지식 (class101 없음, 하위 우선순위) -->
+      ${requirements.length > 0 ? `
+      <div id="sec-materials" class="sec-anchor bg-white rounded-2xl p-6 border border-gray-100">
+        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-clipboard-list text-orange-500 mr-2"></i>준비물 & 사전 지식</h2>
+        <ul class="space-y-2">
+          ${requirements.map(req => `
+            <li class="flex items-center gap-2 text-sm text-dark-600"><i class="fas fa-chevron-right text-primary-400 text-xs"></i>${req}</li>
+          `).join('')}
+        </ul>
+      </div>
+      ` : ''}
+
+      <!-- #sec-qna : Q&A 게시판 -->
+      <div id="sec-qna" class="sec-anchor bg-white rounded-2xl p-6 border border-gray-100">
         <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-question-circle text-blue-500 mr-2"></i>Q&A <span class="text-sm font-normal text-gray-500" id="qnaCount"></span></h2>
 
         <!-- 질문 작성 폼 (로그인 시) -->
@@ -11125,14 +11173,172 @@ ${navHTML}
           </div>
         </div>
       </div>
-    </div>
 
-    <!-- Sidebar spacer for sticky card on desktop -->
-    <div class="hidden md:block md:col-span-2"></div>
-  </div>
+      </div><!-- /Detail space-y-10 -->
+      </div><!-- /.class-content (left column) -->
+
+      <!-- Right: Purchase Sidebar (sticky, spans full .class-row height) -->
+      <aside class="class-sidebar md:sticky" style="top:84px;">
+        <div class="bg-white rounded-2xl border border-gray-200 shadow-lg p-5">
+          <!-- 1) 강사 프로필 (소) -->
+          <div class="flex items-center gap-2 mb-3">
+            <img src="${cls.instructor_image}" class="w-8 h-8 rounded-full bg-gray-200">
+            <span class="text-sm font-medium text-dark-800">${cls.instructor_name}</span>
+            ${cls.instructor_verified ? '<i class="fas fa-check-circle text-blue-500 text-xs"></i>' : ''}
+          </div>
+          <!-- 2) 강의 제목 -->
+          <h2 class="text-xl font-bold text-dark-900 leading-snug mb-3">${cls.title}</h2>
+          <!-- 3) 평점 + TOP 배지 -->
+          <div class="flex items-center gap-3 mb-4 text-sm">
+            <div class="flex items-center gap-1">
+              <i class="fas fa-star text-yellow-400"></i>
+              <span class="font-bold text-dark-900">${cls.rating}</span>
+              <span class="text-gray-500">(${cls.review_count})</span>
+            </div>
+            ${cls.is_bestseller ? '<span class="px-2 py-0.5 bg-orange-100 text-orange-600 text-xs font-bold rounded-full">TOP</span>' : ''}
+          </div>
+          <!-- 4) 가격 블록 (기존 유지) -->
+          <div class="flex items-baseline gap-2 mb-1">
+            ${labelPriceText
+              ? `<span class="text-2xl font-extrabold text-yellow-600"><i class="fas fa-star mr-1"></i>${escapeHtml(labelPriceText)}</span>`
+              : `${cls.discount_percent > 0 ? `<span class="text-xl font-bold text-primary-500">${cls.discount_percent}%</span>` : ''}
+            <span class="text-2xl font-extrabold text-dark-900">${cls.price.toLocaleString()}원</span>`}
+          </div>
+          ${labelPriceText ? '<div class="mb-3"></div>' : (cls.discount_percent > 0 ? `<p class="text-sm text-gray-400 line-through mb-3">${cls.original_price.toLocaleString()}원</p>` : '<div class="mb-3"></div>')}
+
+          <!-- 5) 다음 강의 알림 (기존 유지) -->
+          ${cls.next_lesson ? `
+          <div class="flex items-center gap-2 px-3 py-2 bg-red-50 rounded-xl mb-3">
+            <i class="fas fa-calendar-alt text-red-500"></i>
+            <span class="text-sm font-medium text-red-700">다음 강의: ${new Date(cls.next_lesson.scheduled_at).toLocaleString('ko-KR', {timeZone:'Asia/Seoul', year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit'})}</span>
+          </div>
+          <p class="text-xs text-gray-500 mb-3 -mt-1">${cls.next_lesson.lesson_title}</p>
+          ` : `
+          <div class="flex items-center gap-2 px-3 py-2 bg-gray-50 rounded-xl mb-3">
+            <i class="fas fa-calendar-alt text-gray-500"></i>
+            <span class="text-sm font-medium text-gray-600">예정된 강의 없음</span>
+          </div>
+          `}
+
+          <!-- 6) 진행률 바 (기존 유지) -->
+          <div class="flex items-center gap-2 mb-3">
+            <div class="flex-1 bg-gray-100 rounded-full h-2">
+              <div class="bg-primary-500 h-2 rounded-full" style="width:${Math.round((cls.active_students || 0) / cls.max_students * 100)}%"></div>
+            </div>
+            <span class="text-xs text-gray-500 whitespace-nowrap">${cls.active_students || 0}/${cls.max_students}명</span>
+          </div>
+
+          <!-- 7) 결제 옵션 탭 (유료, 기존 유지) -->
+          ${(cls.price > 0 && !labelPriceText) ? `
+          <div class="flex gap-1 mb-3 bg-gray-100 rounded-xl p-1">
+            <button onclick="switchPayOption('onetime')" id="payOptOnetime" class="pay-opt-tab flex-1 py-2 text-xs font-semibold rounded-lg bg-white text-dark-900 shadow-sm transition-all">1회 결제</button>
+            <button onclick="switchPayOption('monthly')" id="payOptMonthly" class="pay-opt-tab flex-1 py-2 text-xs font-semibold rounded-lg text-gray-500 transition-all">
+              <i class="fas fa-sync-alt mr-0.5 text-[10px]"></i>월간 자동결제
+            </button>
+          </div>
+          ` : ''}
+
+          <!-- 8-a) 1회 결제 CTA -->
+          <div id="payOnetime">
+            <button id="btnEnrollOnetime" onclick='openPaymentModal(${JSON.stringify({id:cls.id, slug:cls.slug, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full ${labelPriceText ? 'bg-yellow-500 hover:bg-yellow-600 text-white shadow-yellow-500/30' : (cls.price > 0 ? 'cta-orange' : 'bg-green-500 hover:bg-green-600 text-white shadow-green-500/30')} font-bold transition-all shadow-lg mb-2" style="height:50px;border-radius:12px;">
+              ${labelPriceText ? `<i class="fas fa-star mr-2"></i>${escapeHtml(labelPriceText)}` : (cls.price > 0 ? `<i class="fas fa-credit-card mr-2"></i>바로 수강하기 · ${cls.price.toLocaleString()}원` : '<i class="fas fa-gift mr-2"></i>무료 수강하기')}
+            </button>
+          </div>
+
+          <!-- 8-b) 월간 구독 CTA (기존 유지) -->
+          <div id="payMonthly" class="hidden">
+            <div class="bg-blue-50 rounded-xl p-3 mb-2">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs font-bold text-blue-800"><i class="fas fa-sync-alt mr-1"></i>월간 자동결제</span>
+                <span class="text-[10px] text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">매월 결제일 자동결제</span>
+              </div>
+              <p class="text-[11px] text-blue-600">오늘 결제 시 매월 ${new Date().getDate()}일에 자동으로 결제됩니다</p>
+            </div>
+            <button id="btnEnrollMonthly" onclick='openSubscriptionModal(${JSON.stringify({planType:"class_monthly", classId:cls.id, slug:cls.slug, title:cls.title, amount:cls.price, originalAmount:cls.original_price, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="w-full h-12 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/30 mb-2">
+              <i class="fas fa-sync-alt mr-2"></i>월간 구독 시작 · ${cls.price.toLocaleString()}원/월
+            </button>
+          </div>
+
+          <!-- 9) 장바구니 + 찜 -->
+          <div class="grid grid-cols-2 gap-2">
+            <button id="btnAddToCart" onclick="addToCart(${cls.id})" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
+              <i class="fas fa-shopping-cart mr-1"></i>장바구니
+            </button>
+            <button id="btnWishlist" onclick="toggleWishlistItem(${cls.id})" data-wishlist="${cls.id}" class="h-10 border border-gray-200 text-dark-600 font-medium rounded-xl hover:bg-gray-50 transition-all text-sm">
+              <i class="far fa-heart mr-1"></i>찜하기
+            </button>
+          </div>
+
+          <!-- 10) 메타 3 -->
+          <div class="grid grid-cols-3 gap-2 mt-4 pt-4 border-t border-gray-100 text-center">
+            <div><p class="text-xs text-gray-400">강의 수</p><p class="text-sm font-bold text-dark-800">${cls.total_lessons}강</p></div>
+            <div><p class="text-xs text-gray-400">총 시간</p><p class="text-sm font-bold text-dark-800">${cls.duration_minutes}분</p></div>
+            <div><p class="text-xs text-gray-400">난이도</p><p class="text-sm font-bold text-dark-800">${cls.level === 'beginner' ? '입문' : cls.level === 'intermediate' ? '중급' : cls.level === 'advanced' ? '고급' : '전체'}</p></div>
+          </div>
+        </div>
+      </aside>
+    </div><!-- /.class-row -->
+  </div><!-- /.class-wrap -->
 </section>
 
+<!-- 모바일 하단 고정 CTA (3요소: 찜 + 구독 + 구매) -->
+<div class="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-gray-100 shadow-lg"
+     style="padding:16px;padding-bottom:max(16px, env(safe-area-inset-bottom));">
+  <div class="flex items-center gap-2">
+    <button onclick="toggleWishlistItem(${cls.id})" data-wishlist="${cls.id}" class="flex-shrink-0 w-11 h-12 border border-gray-200 rounded-xl flex items-center justify-center">
+      <i class="far fa-heart text-gray-700"></i>
+    </button>
+    ${cls.price > 0 ? `
+    <button onclick='openSubscriptionModal(${JSON.stringify({planType:"class_monthly", classId:cls.id, slug:cls.slug, title:cls.title, amount:cls.price, originalAmount:cls.original_price, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="flex-1 h-12 border border-gray-200 text-dark-800 font-semibold rounded-xl text-sm">구독으로 시작</button>
+    ` : ''}
+    <button onclick='openPaymentModal(${JSON.stringify({id:cls.id, slug:cls.slug, title:cls.title, price:cls.price, original_price:cls.original_price, discount_percent:cls.discount_percent, thumbnail:cls.thumbnail, instructor_name:cls.instructor_name})})' class="flex-1 h-12 ${labelPriceText ? 'bg-yellow-500 text-white' : (cls.price > 0 ? 'cta-orange' : 'bg-green-500 text-white')} font-bold rounded-xl text-sm shadow-lg" style="border-radius:12px;">
+      ${labelPriceText ? escapeHtml(labelPriceText) : (cls.price > 0 ? '구매하기' : '무료 수강하기')}
+    </button>
+  </div>
+</div>
+
 <script>
+// 섹션 탭 스크롤스파이 + smooth scroll
+(function(){
+  var tabs = document.querySelectorAll('#sectionTabs .tab-link');
+  var secIds = ['sec-intro','sec-curriculum','sec-reviews','sec-instructor','sec-recommend','sec-materials','sec-qna'];
+  var secs = secIds.map(function(id){ return document.getElementById(id); }).filter(Boolean);
+  if (tabs.length && secs.length && 'IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (e.isIntersecting) {
+          var id = e.target.id;
+          tabs.forEach(function(t){ t.classList.toggle('active', t.getAttribute('href') === '#' + id); });
+        }
+      });
+    }, { threshold: 0.15, rootMargin: '-100px 0px -60% 0px' });
+    secs.forEach(function(s){ io.observe(s); });
+  }
+  tabs.forEach(function(t){
+    t.addEventListener('click', function(e){
+      e.preventDefault();
+      var tgt = document.querySelector(t.getAttribute('href'));
+      if (tgt) tgt.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+})();
+
+// 커리큘럼 전체 열기/접기
+function toggleAllChapters(btn) {
+  var els = document.querySelectorAll('[data-chapter-content]');
+  var isClosing = btn.textContent.indexOf('접기') !== -1;
+  els.forEach(function(el){ el.classList.toggle('hidden', isClosing); });
+  document.querySelectorAll('.chev-icon').forEach(function(ic){ ic.classList.toggle('rotate-180', !isClosing); });
+  btn.textContent = isClosing ? '전체 열기' : '전체 접기';
+}
+
+// 강사 bio 짧으면 "더보기" 버튼 숨김
+(function(){
+  var bio = document.getElementById('instructorBioText');
+  var moreBtn = document.getElementById('instructorBioMore');
+  if (bio && moreBtn && bio.scrollHeight <= bio.clientHeight + 2) { bio.classList.remove('bio-clamp'); moreBtn.remove(); }
+})();
+
 // 강의 버튼 활성화 함수
 function activateLessonButtons(isInstructor) {
   document.querySelectorAll('.lesson-action-btn').forEach(function(wrapper) {
