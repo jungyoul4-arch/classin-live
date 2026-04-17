@@ -10824,7 +10824,16 @@ ${navHTML}
       <!-- Scheduled Lessons (강의 목록) -->
       ${scheduledLessons.length > 0 ? `
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-calendar-alt text-red-500 mr-2"></i>강의 목록 <span class="text-sm font-normal text-gray-500">(${scheduledLessons.length}개)</span></h2>
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-bold text-dark-900"><i class="fas fa-calendar-alt text-red-500 mr-2"></i>강의 목록 <span class="text-sm font-normal text-gray-500">(${scheduledLessons.length}개)</span></h2>
+          <button onclick="toggleAllLessonDetails(this)" class="text-xs text-gray-500 hover:text-dark-900 underline">전체 상세 열기</button>
+        </div>
+        <div class="flex flex-wrap gap-4 text-xs text-gray-500 mb-4 pb-4 border-b border-gray-100">
+          <span><i class="fas fa-circle text-red-500 mr-1" style="font-size:6px;vertical-align:middle;"></i>진행중 ${scheduledLessons.filter((sl:any)=>{const iR=sl.lesson_type==='recorded'||!!sl.stream_uid;const s=new Date(sl.scheduled_at).getTime();const e=s+(sl.duration_minutes||60)*60000;return !iR && s<=Date.now() && Date.now()<e;}).length}개</span>
+          <span><i class="far fa-clock mr-1"></i>예정 ${scheduledLessons.filter((sl:any)=>{const iR=sl.lesson_type==='recorded'||!!sl.stream_uid;return !iR && new Date(sl.scheduled_at).getTime()>Date.now();}).length}개</span>
+          <span><i class="fas fa-video mr-1"></i>녹화 ${scheduledLessons.filter((sl:any)=>sl.lesson_type==='recorded'||!!sl.stream_uid).length}개</span>
+          <span><i class="fas fa-flag-checkered mr-1"></i>종료 ${scheduledLessons.filter((sl:any)=>{const iR=sl.lesson_type==='recorded'||!!sl.stream_uid;const s=new Date(sl.scheduled_at).getTime();const e=s+(sl.duration_minutes||60)*60000;return !iR && e<Date.now();}).length}개</span>
+        </div>
         <div class="space-y-3">
           ${scheduledLessons.map((sl: any, idx: number) => {
             const now = Date.now()
@@ -10906,7 +10915,7 @@ ${navHTML}
 
             let slDetailSection = ''
             if (slHasDetail) {
-              slDetailSection = '<div id="' + slDetailId + '" class="hidden mt-3 pt-3 border-t border-gray-200 space-y-3">'
+              slDetailSection = '<div id="' + slDetailId + '" data-lesson-content class="' + (idx === 0 ? '' : 'hidden ') + 'mt-3 pt-3 border-t border-gray-200 space-y-3">'
               if (sl.description && sl.description.trim()) {
                 slDetailSection += '<div><p class="text-xs font-semibold text-gray-500 mb-1"><i class="fas fa-align-left mr-1"></i>강의 소개</p><p class="text-sm text-gray-700 whitespace-pre-line">' + sl.description + '</p></div>'
               }
@@ -10927,7 +10936,7 @@ ${navHTML}
               slDetailSection += '</div>'
             }
 
-            const slExpandBtn = slHasDetail ? '<button onclick="event.stopPropagation(); var el=document.getElementById(\'' + slDetailId + '\'); el.classList.toggle(\'hidden\'); this.querySelector(\'i\').classList.toggle(\'rotate-180\')" class="text-gray-400 hover:text-gray-600 text-xs transition-all"><i class="fas fa-chevron-down transition-transform"></i> 상세보기</button>' : ''
+            const slExpandBtn = slHasDetail ? '<button onclick="event.stopPropagation(); var el=document.getElementById(\'' + slDetailId + '\'); el.classList.toggle(\'hidden\'); this.querySelector(\'i\').classList.toggle(\'rotate-180\')" class="text-gray-400 hover:text-gray-600 text-xs transition-all"><i class="fas fa-chevron-down transition-transform lesson-chev ' + (idx === 0 ? 'rotate-180' : '') + '"></i> 상세보기</button>' : ''
             const slCurrBadge = slCurrItems.length > 0 ? '<span class="px-1.5 py-0.5 bg-indigo-100 text-indigo-600 text-[10px] font-medium rounded"><i class="fas fa-list-ol mr-0.5"></i>' + slCurrItems.length + '</span>' : ''
             const slMatBadge = slMatItems.length > 0 ? '<span class="text-amber-500 text-xs"><i class="fas fa-paperclip"></i></span>' : ''
 
@@ -11008,19 +11017,31 @@ ${navHTML}
         </div>
       </div>
 
-      <!-- Course Materials (강의 자료) — 커리큘럼 영역 안으로 이동 -->
+      <!-- Course Materials (강의 자료) — 커리큘럼 패턴 아코디언 -->
       ${courseMaterials.length > 0 ? `
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
         <h2 class="text-lg font-bold text-dark-900 mb-4"><i class="fas fa-paperclip text-amber-500 mr-2"></i>강의 자료 <span class="text-sm font-normal text-gray-500">(${courseMaterials.length}개)</span></h2>
-        <div class="flex flex-wrap gap-3">
-          ${courseMaterials.map((m: any) => `
-            <a href="javascript:void(0)" onclick="downloadMaterial('${m.url}', '${(m.filename || '자료').replace(/'/g, "\\'")}')" data-material-link class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded-xl text-sm text-amber-800 transition-all cursor-pointer">
-              <i class="fas fa-file-download text-amber-500"></i>
-              <span>${m.filename || '다운로드'}</span>
-            </a>
-          `).join('')}
+        <div class="border border-gray-100 rounded-xl overflow-hidden">
+          <button onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.material-chev').classList.toggle('rotate-180')" class="w-full flex items-center justify-between p-4 bg-gray-50 hover:bg-gray-100 transition-all">
+            <div class="flex items-center gap-2">
+              <span class="w-6 h-6 bg-amber-100 text-amber-600 text-xs font-bold rounded-full flex items-center justify-center"><i class="fas fa-paperclip text-[10px]"></i></span>
+              <span class="text-sm font-semibold text-dark-800">전체 자료</span>
+              <span class="text-xs text-gray-400">(${courseMaterials.length}개)</span>
+            </div>
+            <i class="fas fa-chevron-down text-gray-400 text-xs transition-transform material-chev rotate-180"></i>
+          </button>
+          <div data-material-content class="p-4">
+            <div class="flex flex-wrap gap-3">
+              ${courseMaterials.map((m: any) => `
+                <a href="javascript:void(0)" onclick="downloadMaterial('${m.url}', '${(m.filename || '자료').replace(/'/g, "\\'")}')" data-material-link class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded-xl text-sm text-amber-800 transition-all cursor-pointer">
+                  <i class="fas fa-file-download text-amber-500"></i>
+                  <span>${m.filename || '다운로드'}</span>
+                </a>
+              `).join('')}
+            </div>
+            <p class="text-xs text-gray-400 mt-3"><i class="fas fa-info-circle mr-1"></i>수강 등록 후 자료를 다운로드할 수 있습니다</p>
+          </div>
         </div>
-        <p class="text-xs text-gray-400 mt-3"><i class="fas fa-info-circle mr-1"></i>수강 등록 후 자료를 다운로드할 수 있습니다</p>
       </div>
       ` : ''}
 
@@ -11330,6 +11351,15 @@ function toggleAllChapters(btn) {
   els.forEach(function(el){ el.classList.toggle('hidden', isClosing); });
   document.querySelectorAll('.chev-icon').forEach(function(ic){ ic.classList.toggle('rotate-180', !isClosing); });
   btn.textContent = isClosing ? '전체 열기' : '전체 접기';
+}
+
+// 강의 목록 전체 상세 열기/접기
+function toggleAllLessonDetails(btn) {
+  var els = document.querySelectorAll('[data-lesson-content]');
+  var isClosing = btn.textContent.indexOf('접기') !== -1;
+  els.forEach(function(el){ el.classList.toggle('hidden', isClosing); });
+  document.querySelectorAll('.lesson-chev').forEach(function(ic){ ic.classList.toggle('rotate-180', !isClosing); });
+  btn.textContent = isClosing ? '전체 상세 열기' : '전체 상세 접기';
 }
 
 // 강사 bio 짧으면 "더보기" 버튼 숨김
