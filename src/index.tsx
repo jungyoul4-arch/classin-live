@@ -10654,6 +10654,20 @@ app.get('/class/:slug', async (c) => {
     relatedClasses = (rc || []) as any[]
   } catch(e) { /* 무시 */ }
 
+  // Hero carousel 슬라이드 소스 (영상 우선 → 갤러리 → 썸네일)
+  type HeroSlide = { type: 'video' | 'image'; src: string }
+  const heroSlides: HeroSlide[] = []
+  if (cls.preview_video) heroSlides.push({ type: 'video', src: cls.preview_video })
+  try {
+    const gallery: string[] = JSON.parse((cls as any).gallery_images || '[]')
+    for (const u of gallery) if (u) heroSlides.push({ type: 'image', src: u })
+  } catch(e) { /* 무시 */ }
+  if (cls.thumbnail && !heroSlides.some(s => s.src === cls.thumbnail)) {
+    heroSlides.push({ type: 'image', src: cls.thumbnail })
+  }
+  if (heroSlides.length === 0) heroSlides.push({ type: 'image', src: cls.thumbnail || '' })
+  const hasMultipleSlides = heroSlides.length > 1
+
   const html = `${headHTML}
 <body class="bg-white min-h-screen">
 <style>
@@ -10675,13 +10689,25 @@ app.get('/class/:slug', async (c) => {
 .scroll-hide::-webkit-scrollbar{display:none;}
 .scroll-hide{scrollbar-width:none;}
 .sec-anchor{scroll-margin-top:calc(var(--header-h) + var(--tabs-h) + 16px);}
-/* Hero carousel (class101 style): 단일 슬라이드는 100%, 다중 슬라이드는 peek 효과 */
-.hero-carousel-wrap{border-radius:16px;}
-.hero-carousel .hero-slide{aspect-ratio:16/9;flex:0 0 100%;border-radius:16px;}
-.hero-carousel.has-peek .hero-slide{flex:0 0 calc(100% - 64px);}
-.hero-carousel.has-peek{scroll-padding-left:0;}
-@media (max-width:767px){
-  .hero-carousel.has-peek .hero-slide{flex:0 0 calc(100% - 24px);}
+/* Hero carousel (class101 style): 슬라이드는 항상 728x(16:9) 고정, 단일은 wrap을 슬라이드 크기로 축소 */
+.hero-carousel-wrap{position:relative;overflow:hidden;border-radius:12px;background:#f3f4f6;user-select:none;max-width:728px;margin:0 auto;}
+.hero-carousel-wrap.has-peek{max-width:100%;}
+.hero-carousel{display:flex;gap:12px;transition:transform .3s ease;will-change:transform;justify-content:center;}
+.hero-carousel.has-peek{justify-content:flex-start;padding-left:calc((100% - 728px) / 2);padding-right:calc((100% - 728px) / 2);}
+.hero-carousel .hero-slide{flex:0 0 728px;max-width:100%;aspect-ratio:16/9;overflow:hidden;}
+.hero-carousel .hero-slide > img,
+.hero-carousel .hero-slide > video{width:100%;height:100%;object-fit:cover;display:block;}
+.hero-nav-btn{position:absolute;top:50%;transform:translateY(-50%);width:50px;height:50px;background:#fff;border:1px solid rgba(0,0,0,.05);border-radius:9999px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,.08);transition:background .15s,opacity .15s;color:#0c0c0c;}
+.hero-nav-btn:hover{background:#f5f5f5;}
+.hero-nav-btn.prev{left:15px;}
+.hero-nav-btn.next{right:15px;}
+.hero-nav-btn:disabled{opacity:.35;pointer-events:none;}
+.hero-counter{position:absolute;top:12px;right:12px;background:#fff;color:#0c0c0c;font-size:12px;line-height:1;padding:4px 12px;border-radius:12px;z-index:10;pointer-events:none;}
+@media (max-width:820px){
+  .hero-carousel-wrap{border-radius:0;max-width:100%;}
+  .hero-nav-btn{display:none;}
+  .hero-carousel,.hero-carousel.has-peek{justify-content:flex-start;padding-left:0;padding-right:0;}
+  .hero-carousel .hero-slide{flex:0 0 100%;}
 }
 @media (max-width:767px){
   .class-wrap{padding:0 16px;}
@@ -10705,11 +10731,22 @@ ${navHTML}
     </div>
 
     <!-- 1) Hero Carousel — 상단 전체폭 (class101 스타일) -->
-    <div class="hero-carousel-wrap relative mb-8 overflow-hidden rounded-2xl bg-gray-100">
-      <div id="heroCarousel" class="hero-carousel flex gap-3 overflow-x-auto scroll-smooth scroll-hide snap-x snap-mandatory" data-idx="0">
-        <div class="hero-slide flex-shrink-0 snap-start bg-gray-100 overflow-hidden"><img src="${cls.thumbnail}" class="w-full h-full object-cover"></div>
+    <div class="hero-carousel-wrap${hasMultipleSlides ? ' has-peek' : ''} mb-8">
+      <div id="heroCarousel" class="hero-carousel${hasMultipleSlides ? ' has-peek' : ''}" data-idx="0" data-total="${heroSlides.length}">
+        ${heroSlides.map((s, i) => s.type === 'video'
+          ? `<div class="hero-slide"><video src="${escapeAttr(s.src)}" autoplay muted loop playsinline></video></div>`
+          : `<div class="hero-slide"><img src="${escapeAttr(s.src)}" alt="${escapeAttr(cls.title)} 이미지 ${i+1}" loading="${i===0?'eager':'lazy'}"></div>`
+        ).join('')}
       </div>
-      <div class="absolute top-3 right-3 bg-black/60 text-white text-xs font-semibold px-2.5 py-1 rounded-full z-10">1/1</div>
+      ${hasMultipleSlides ? `
+      <button class="hero-nav-btn prev" id="heroPrevBtn" aria-label="이전 이미지" onclick="clsHeroNav(-1)">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+      </button>
+      <button class="hero-nav-btn next" id="heroNextBtn" aria-label="다음 이미지" onclick="clsHeroNav(1)">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+      </button>
+      <div class="hero-counter"><span id="heroCurrent">1</span>/<span>${heroSlides.length}</span></div>
+      ` : ''}
     </div>
 
     <div class="class-row">
@@ -11972,6 +12009,40 @@ function updateQnaCount(delta) {
       document.getElementById('qnaList').innerHTML = questions.map(function(q) { return renderComment(q, false); }).join('');
     }
   } catch(e) { console.log('Q&A load failed:', e); }
+})();
+
+// === Hero Carousel (class101 스타일) ===
+(function(){
+  var car = document.getElementById('heroCarousel');
+  if (!car) return;
+  var total = parseInt(car.dataset.total || '1', 10);
+  if (total <= 1) return;
+  var slides = car.querySelectorAll('.hero-slide');
+  var prev = document.getElementById('heroPrevBtn');
+  var next = document.getElementById('heroNextBtn');
+  var cur  = document.getElementById('heroCurrent');
+  var idx = 0;
+
+  function go(i){
+    idx = Math.max(0, Math.min(total - 1, i));
+    var w = slides[0].getBoundingClientRect().width + 12;
+    car.style.transform = 'translateX(-' + (idx * w) + 'px)';
+    if (cur) cur.textContent = String(idx + 1);
+    if (prev) prev.disabled = idx === 0;
+    if (next) next.disabled = idx === total - 1;
+  }
+  window.clsHeroNav = function(dir){ go(idx + dir); };
+
+  var sx = 0;
+  car.addEventListener('touchstart', function(e){ sx = e.touches[0].clientX; }, { passive: true });
+  car.addEventListener('touchend', function(e){
+    var dx = e.changedTouches[0].clientX - sx;
+    if (Math.abs(dx) > 40) window.clsHeroNav(dx < 0 ? 1 : -1);
+  }, { passive: true });
+
+  var rt;
+  window.addEventListener('resize', function(){ clearTimeout(rt); rt = setTimeout(function(){ go(idx); }, 100); });
+  go(0);
 })();
 </script>
 
