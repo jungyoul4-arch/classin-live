@@ -144,3 +144,12 @@
 - 커밋 메시지: 한글 또는 영어, feat/fix/refactor 프리픽스
 - DB 변경 시 마이그레이션 파일 생성 필수 (migrations/00XX_*.sql)
 - 보리스 워크플로우 5원칙 적용: Plan → 구현 → 자기확인 → 실수노트 → 세션로그
+
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)

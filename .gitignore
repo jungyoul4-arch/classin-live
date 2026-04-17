@@ -30,3 +30,6 @@ logs/
 *.tar.gz
 *.zip
 .claude/
+
+# Graphipy
+graphify-out/
