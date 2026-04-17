@@ -10826,7 +10826,7 @@ ${navHTML}
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
         <div class="flex items-center justify-between mb-3">
           <h2 class="text-lg font-bold text-dark-900"><i class="fas fa-calendar-alt text-red-500 mr-2"></i>강의 목록 <span class="text-sm font-normal text-gray-500">(${scheduledLessons.length}개)</span></h2>
-          <button onclick="toggleAllLessonDetails(this)" class="text-xs text-gray-500 hover:text-dark-900 underline">전체 상세 열기</button>
+          ${scheduledLessons.some((sl:any) => { let ci=[],mi=[]; try{ci=JSON.parse(sl.curriculum_items||'[]')}catch(e){}; try{mi=JSON.parse(sl.materials||'[]')}catch(e){}; return ci.length>0 || mi.length>0 || (sl.description && sl.description.trim()); }) ? `<button onclick="toggleAllLessonDetails(this)" class="text-xs text-gray-500 hover:text-dark-900 underline">전체 상세 열기</button>` : ''}
         </div>
         <div class="flex flex-wrap gap-4 text-xs text-gray-500 mb-4 pb-4 border-b border-gray-100">
           <span><i class="fas fa-circle text-red-500 mr-1" style="font-size:6px;vertical-align:middle;"></i>진행중 ${scheduledLessons.filter((sl:any)=>{const iR=sl.lesson_type==='recorded'||!!sl.stream_uid;const s=new Date(sl.scheduled_at).getTime();const e=s+(sl.duration_minutes||60)*60000;return !iR && s<=Date.now() && Date.now()<e;}).length}개</span>
