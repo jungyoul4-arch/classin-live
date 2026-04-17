@@ -10675,6 +10675,14 @@ app.get('/class/:slug', async (c) => {
 .scroll-hide::-webkit-scrollbar{display:none;}
 .scroll-hide{scrollbar-width:none;}
 .sec-anchor{scroll-margin-top:calc(var(--header-h) + var(--tabs-h) + 16px);}
+/* Hero carousel (class101 style): 단일 슬라이드는 100%, 다중 슬라이드는 peek 효과 */
+.hero-carousel-wrap{border-radius:16px;}
+.hero-carousel .hero-slide{aspect-ratio:16/9;flex:0 0 100%;border-radius:16px;}
+.hero-carousel.has-peek .hero-slide{flex:0 0 calc(100% - 64px);}
+.hero-carousel.has-peek{scroll-padding-left:0;}
+@media (max-width:767px){
+  .hero-carousel.has-peek .hero-slide{flex:0 0 calc(100% - 24px);}
+}
 @media (max-width:767px){
   .class-wrap{padding:0 16px;}
   .class-row{flex-direction:column;gap:24px;}
@@ -10696,17 +10704,17 @@ ${navHTML}
       <span class="text-dark-700">${cls.title}</span>
     </div>
 
-    <div class="class-row">
-      <!-- Left: Carousel + Review Preview + Compare + Title/Info -->
-      <div class="class-content w-full">
-        <!-- 1) Hero Carousel (구조만, 1장 동작) -->
-        <div class="relative mb-6 overflow-hidden rounded-xl bg-gray-100">
-          <div id="heroCarousel" class="flex transition-transform duration-300" data-idx="0" style="aspect-ratio:16/9;">
-            <div class="flex-shrink-0 w-full h-full"><img src="${cls.thumbnail}" class="w-full h-full object-cover"></div>
-          </div>
-          <div class="absolute top-3 right-3 bg-black/60 text-white text-xs font-semibold px-2 py-1 rounded-full">1/1</div>
-        </div>
+    <!-- 1) Hero Carousel — 상단 전체폭 (class101 스타일) -->
+    <div class="hero-carousel-wrap relative mb-8 overflow-hidden rounded-2xl bg-gray-100">
+      <div id="heroCarousel" class="hero-carousel flex gap-3 overflow-x-auto scroll-smooth scroll-hide snap-x snap-mandatory" data-idx="0">
+        <div class="hero-slide flex-shrink-0 snap-start bg-gray-100 overflow-hidden"><img src="${cls.thumbnail}" class="w-full h-full object-cover"></div>
+      </div>
+      <div class="absolute top-3 right-3 bg-black/60 text-white text-xs font-semibold px-2.5 py-1 rounded-full z-10">1/1</div>
+    </div>
 
+    <div class="class-row">
+      <!-- Left: Review Preview + Compare + Title/Info -->
+      <div class="class-content w-full">
         <!-- 2) Review Preview (2 cards) -->
         ${reviews.length > 0 ? `
         <div class="mb-6">
@@ -10824,10 +10832,11 @@ ${navHTML}
       <!-- Scheduled Lessons (강의 목록) -->
       ${scheduledLessons.length > 0 ? `
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <div class="flex items-center justify-between mb-3">
+        <button onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.lessons-chev').classList.toggle('rotate-180')" class="w-full flex items-center justify-between">
           <h2 class="text-lg font-bold text-dark-900"><i class="fas fa-calendar-alt text-red-500 mr-2"></i>강의 목록 <span class="text-sm font-normal text-gray-500">(${scheduledLessons.length}개)</span></h2>
-          ${scheduledLessons.some((sl:any) => { let ci=[],mi=[]; try{ci=JSON.parse(sl.curriculum_items||'[]')}catch(e){}; try{mi=JSON.parse(sl.materials||'[]')}catch(e){}; return ci.length>0 || mi.length>0 || (sl.description && sl.description.trim()); }) ? `<button onclick="toggleAllLessonDetails(this)" class="text-xs text-gray-500 hover:text-dark-900 underline">전체 상세 열기</button>` : ''}
-        </div>
+          <i class="fas fa-chevron-down text-gray-400 text-sm transition-transform lessons-chev"></i>
+        </button>
+        <div class="hidden mt-3">
         <div class="flex flex-wrap gap-4 text-xs text-gray-500 mb-4 pb-4 border-b border-gray-100">
           <span><i class="fas fa-circle text-red-500 mr-1" style="font-size:6px;vertical-align:middle;"></i>진행중 ${scheduledLessons.filter((sl:any)=>{const iR=sl.lesson_type==='recorded'||!!sl.stream_uid;const s=new Date(sl.scheduled_at).getTime();const e=s+(sl.duration_minutes||60)*60000;return !iR && s<=Date.now() && Date.now()<e;}).length}개</span>
           <span><i class="far fa-clock mr-1"></i>예정 ${scheduledLessons.filter((sl:any)=>{const iR=sl.lesson_type==='recorded'||!!sl.stream_uid;return !iR && new Date(sl.scheduled_at).getTime()>Date.now();}).length}개</span>
@@ -10972,13 +10981,18 @@ ${navHTML}
             </div>
           </div>
         </div>
+        </div>
       </div>
       ` : ''}
 
       <!-- Curriculum (챕터별 + 강의 입장 연결) -->
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <div class="flex items-center justify-between mb-3">
+        <button onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.curriculum-chev').classList.toggle('rotate-180')" class="w-full flex items-center justify-between">
           <h2 class="text-lg font-bold text-dark-900"><i class="fas fa-list-ol text-purple-500 mr-2"></i>커리큘럼 <span class="text-sm font-normal text-gray-500">(${lessons.length}강)</span></h2>
+          <i class="fas fa-chevron-down text-gray-400 text-sm transition-transform curriculum-chev"></i>
+        </button>
+        <div class="hidden mt-3">
+        <div class="flex items-center justify-end mb-3">
           <button onclick="toggleAllChapters(this)" class="text-xs text-gray-500 hover:text-dark-900 underline">전체 열기</button>
         </div>
         <div class="flex flex-wrap gap-4 text-xs text-gray-500 mb-4 pb-4 border-b border-gray-100">
@@ -11015,6 +11029,7 @@ ${navHTML}
             </div>
           `).join('')}
         </div>
+        </div>
       </div>
 
       <!-- Course Materials (강의 자료) — 커리큘럼 패턴 아코디언 -->
@@ -11028,9 +11043,9 @@ ${navHTML}
               <span class="text-sm font-semibold text-dark-800">전체 자료</span>
               <span class="text-xs text-gray-400">(${courseMaterials.length}개)</span>
             </div>
-            <i class="fas fa-chevron-down text-gray-400 text-xs transition-transform material-chev rotate-180"></i>
+            <i class="fas fa-chevron-down text-gray-400 text-xs transition-transform material-chev"></i>
           </button>
-          <div data-material-content class="p-4">
+          <div data-material-content class="hidden p-4">
             <div class="flex flex-wrap gap-3">
               ${courseMaterials.map((m: any) => `
                 <a href="javascript:void(0)" onclick="downloadMaterial('${m.url}', '${(m.filename || '자료').replace(/'/g, "\\'")}')" data-material-link class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded-xl text-sm text-amber-800 transition-all cursor-pointer">
@@ -11351,15 +11366,6 @@ function toggleAllChapters(btn) {
   els.forEach(function(el){ el.classList.toggle('hidden', isClosing); });
   document.querySelectorAll('.chev-icon').forEach(function(ic){ ic.classList.toggle('rotate-180', !isClosing); });
   btn.textContent = isClosing ? '전체 열기' : '전체 접기';
-}
-
-// 강의 목록 전체 상세 열기/접기
-function toggleAllLessonDetails(btn) {
-  var els = document.querySelectorAll('[data-lesson-content]');
-  var isClosing = btn.textContent.indexOf('접기') !== -1;
-  els.forEach(function(el){ el.classList.toggle('hidden', isClosing); });
-  document.querySelectorAll('.lesson-chev').forEach(function(ic){ ic.classList.toggle('rotate-180', !isClosing); });
-  btn.textContent = isClosing ? '전체 상세 열기' : '전체 상세 접기';
 }
 
 // 강사 bio 짧으면 "더보기" 버튼 숨김
