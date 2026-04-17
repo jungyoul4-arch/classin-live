@@ -1443,7 +1443,8 @@ app.get('/api/classes', async (c) => {
   const offset = parseInt(c.req.query('offset') || '0')
 
   let query = `SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug,
-    (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
+    (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text,
+    (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') as active_students
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
     JOIN categories cat ON c.category_id = cat.id
@@ -1463,7 +1464,7 @@ app.get('/api/classes', async (c) => {
     params.push(level)
   }
 
-  if (sort === 'popular') query += ` ORDER BY c.current_students DESC`
+  if (sort === 'popular') query += ` ORDER BY active_students DESC`
   else if (sort === 'rating') query += ` ORDER BY c.rating DESC`
   else if (sort === 'newest') query += ` ORDER BY COALESCE((SELECT MAX(scheduled_at) FROM class_lessons WHERE class_id = c.id), c.created_at) DESC`
   else if (sort === 'price_low') query += ` ORDER BY c.price ASC`
@@ -1480,7 +1481,8 @@ app.get('/api/classes', async (c) => {
 app.get('/api/classes/featured', async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug,
-      (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
+      (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text,
+      (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') as active_students
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
     JOIN categories cat ON c.category_id = cat.id
@@ -1494,7 +1496,8 @@ app.get('/api/classes/featured', async (c) => {
 app.get('/api/classes/new', async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug,
-      (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
+      (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text,
+      (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') as active_students
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
     JOIN categories cat ON c.category_id = cat.id
@@ -1508,7 +1511,8 @@ app.get('/api/classes/new', async (c) => {
 app.get('/api/classes/:slug', async (c) => {
   const slug = decodeURIComponent(c.req.param('slug'))
   const cls: any = await c.env.DB.prepare(`
-    SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.bio as instructor_bio, i.specialty as instructor_specialty, i.total_students as instructor_total_students, i.total_classes as instructor_total_classes, i.rating as instructor_rating, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug
+    SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.bio as instructor_bio, i.specialty as instructor_specialty, i.total_students as instructor_total_students, i.total_classes as instructor_total_classes, i.rating as instructor_rating, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug,
+    (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') as active_students
     FROM classes c
     JOIN instructors i ON c.instructor_id = i.id
     JOIN categories cat ON c.category_id = cat.id
@@ -9870,7 +9874,7 @@ function classCardHTML(cls) {
         </div>
         <div class="flex items-center gap-3 mt-2 pt-2 border-t border-gray-50 text-[11px] text-gray-400">
           <span><i class="far fa-clock mr-0.5"></i>\${cls.duration_minutes}분</span>
-          <span><i class="far fa-user mr-0.5"></i>\${cls.current_students}명 수강</span>
+          <span><i class="far fa-user mr-0.5"></i>\${cls.active_students || 0}명 수강</span>
         </div>
       </div>
     </a>
@@ -9989,13 +9993,15 @@ app.get('/', async (c) => {
     c.env.DB.prepare('SELECT * FROM categories ORDER BY sort_order'),
     c.env.DB.prepare(`
       SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name,
-        (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
+        (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text,
+        (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') as active_students
       FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
-      WHERE c.status = 'active' ORDER BY c.current_students DESC, c.rating DESC LIMIT 8
+      WHERE c.status = 'active' ORDER BY (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') DESC, c.rating DESC LIMIT 8
     `),
     c.env.DB.prepare(`
       SELECT c.*, i.display_name as instructor_name, i.profile_image as instructor_image, i.verified as instructor_verified, cat.name as category_name,
-        (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text
+        (SELECT ul.price_text FROM class_label_requirements clr JOIN user_labels ul ON clr.label_id = ul.id WHERE clr.class_id = c.id AND ul.price_text != '' LIMIT 1) as label_price_text,
+        (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') as active_students
       FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id
       WHERE c.status = 'active' ORDER BY COALESCE((SELECT MAX(scheduled_at) FROM class_lessons WHERE class_id = c.id), c.created_at) DESC LIMIT 8
     `),
@@ -10581,7 +10587,8 @@ app.get('/class-requests/:id/apply', (c) => c.redirect('/'))
 app.get('/class/:slug', async (c) => {
   const slug = decodeURIComponent(c.req.param('slug'))
   const cls = await c.env.DB.prepare(`
-    SELECT c.*, i.id as iid, i.user_id as instructor_user_id, i.display_name as instructor_name, i.profile_image as instructor_image, i.bio as instructor_bio, i.specialty as instructor_specialty, i.total_students as instructor_total_students, i.total_classes as instructor_total_classes, i.rating as instructor_rating, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug
+    SELECT c.*, i.id as iid, i.user_id as instructor_user_id, i.display_name as instructor_name, i.profile_image as instructor_image, i.bio as instructor_bio, i.specialty as instructor_specialty, i.total_students as instructor_total_students, i.total_classes as instructor_total_classes, i.rating as instructor_rating, i.verified as instructor_verified, cat.name as category_name, cat.slug as category_slug,
+    (SELECT COUNT(*) FROM enrollments WHERE class_id = c.id AND status = 'active') as active_students
     FROM classes c JOIN instructors i ON c.instructor_id = i.id JOIN categories cat ON c.category_id = cat.id WHERE c.slug = ?
   `).bind(slug).first() as any
   
@@ -10670,7 +10677,7 @@ ${navHTML}
             <span class="text-gray-500">(${cls.review_count}개 리뷰)</span>
           </div>
           <span class="text-gray-600">|</span>
-          <span class="text-gray-400"><i class="far fa-user mr-1"></i>${cls.current_students}명 수강중</span>
+          <span class="text-gray-400"><i class="far fa-user mr-1"></i>${cls.active_students || 0}명 수강중</span>
           <span class="text-gray-600">|</span>
           <span class="text-gray-400"><i class="far fa-clock mr-1"></i>${cls.duration_minutes}분</span>
         </div>
@@ -10716,9 +10723,9 @@ ${navHTML}
             
             <div class="flex items-center gap-2 mb-3">
               <div class="flex-1 bg-gray-100 rounded-full h-2">
-                <div class="bg-primary-500 h-2 rounded-full" style="width:${Math.round(cls.current_students / cls.max_students * 100)}%"></div>
+                <div class="bg-primary-500 h-2 rounded-full" style="width:${Math.round((cls.active_students || 0) / cls.max_students * 100)}%"></div>
               </div>
-              <span class="text-xs text-gray-500 whitespace-nowrap">${cls.current_students}/${cls.max_students}명</span>
+              <span class="text-xs text-gray-500 whitespace-nowrap">${cls.active_students || 0}/${cls.max_students}명</span>
             </div>
             
             <!-- 결제 옵션 탭 (유료 코스만, 라벨 가격 대치 시 숨김) -->
@@ -13361,7 +13368,7 @@ function classCardTemplate(cls: any): string {
         </div>
         <div class="flex items-center gap-3 mt-2 pt-2 border-t border-gray-50 text-[11px] text-gray-400">
           <span><i class="far fa-clock mr-0.5"></i>${cls.duration_minutes}분</span>
-          <span><i class="far fa-user mr-0.5"></i>${cls.current_students}명</span>
+          <span><i class="far fa-user mr-0.5"></i>${cls.active_students || 0}명</span>
         </div>
       </div>
     </a>
