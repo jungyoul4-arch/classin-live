@@ -5409,7 +5409,7 @@ app.post('/api/admin/instructors', async (c) => {
   const classInAccountValue = classInMethod === 'email' ? email : phone
 
   // 1. 유저 생성
-  const passwordHash = '$2a$10$defaulthash' // 임시 비밀번호
+  const passwordHash = 'pbkdf2_test1234' // 기본 비밀번호: test1234
   const userResult = await c.env.DB.prepare(`
     INSERT INTO users (email, password_hash, name, phone, role)
     VALUES (?, ?, ?, ?, 'instructor')
