@@ -11245,8 +11245,15 @@ async function checkAccessAndRun(action) {
 
 function downloadMaterial(url, filename) {
   checkAccessAndRun(function(token) {
-    fetch(url, { headers: { 'Authorization': 'Bearer ' + token } })
-      .then(function(r) { if (!r.ok) throw new Error(); return r.blob(); })
+    // classId를 URL에 추가하여 백엔드에서 수강 신청 확인
+    var downloadUrl = url + (url.includes('?') ? '&' : '?') + 'classId=' + COURSE_ID;
+    fetch(downloadUrl, { headers: { 'Authorization': 'Bearer ' + token } })
+      .then(function(r) {
+        if (!r.ok) {
+          return r.json().then(function(data) { throw new Error(data.error || '다운로드 실패'); });
+        }
+        return r.blob();
+      })
       .then(function(blob) {
         var a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
@@ -11254,7 +11261,7 @@ function downloadMaterial(url, filename) {
         a.click();
         URL.revokeObjectURL(a.href);
       })
-      .catch(function() { alert('다운로드에 실패했습니다.'); });
+      .catch(function(e) { alert(e.message || '다운로드에 실패했습니다.'); });
   });
 }
 
@@ -13780,23 +13787,79 @@ app.post('/api/admin/upload-material', async (c) => {
 // Serve material files from R2
 app.get('/api/materials/*', async (c) => {
   const path = c.req.path.replace('/api/materials/', '')
+  const classId = c.req.query('classId')
 
   // 인증 체크 — 로그인한 사용자만 다운로드 가능
   const authHeader = c.req.header('Authorization') || ''
   const cookieHeader = c.req.header('Cookie') || ''
-  const token = authHeader.replace('Bearer ', '') || cookieHeader.match(/token=([^;]+)/)?.[1]
-  if (!token) {
-    const queryToken = c.req.query('token')
-    if (!queryToken) {
-      // 관리자 세션 쿠키로도 확인
-      const adminSession = cookieHeader.match(/admin_session=([^;]+)/)?.[1]
-      if (adminSession) {
-        const isAdmin = await checkAdminSession(c.env.DB, adminSession)
-        if (!isAdmin) return c.json({ error: '로그인이 필요합니다.' }, 401)
-      } else {
-        return c.json({ error: '로그인이 필요합니다.' }, 401)
+  let token = authHeader.replace('Bearer ', '') || cookieHeader.match(/token=([^;]+)/)?.[1]
+  const queryToken = c.req.query('token')
+  if (!token && queryToken) token = queryToken
+
+  // 관리자 세션 체크
+  const adminSession = cookieHeader.match(/admin_session=([^;]+)/)?.[1]
+  if (adminSession) {
+    const isAdmin = await checkAdminSession(c.env.DB, adminSession)
+    if (isAdmin) {
+      // 관리자는 바로 다운로드 허용
+      try {
+        const object = await c.env.IMAGES.get(path)
+        if (!object) return c.json({ error: 'File not found' }, 404)
+        const headers = new Headers()
+        headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream')
+        headers.set('Cache-Control', 'public, max-age=31536000')
+        return new Response(object.body, { headers })
+      } catch (error) {
+        return c.json({ error: 'Failed to serve file' }, 500)
       }
     }
+  }
+
+  // 토큰 필수
+  if (!token) {
+    return c.json({ error: '로그인이 필요합니다.' }, 401)
+  }
+
+  // JWT 검증 및 사용자 정보 추출
+  let payload: any
+  try {
+    payload = await verifyJWT(token, c.env.JWT_SECRET)
+  } catch {
+    return c.json({ error: '인증이 만료되었습니다.' }, 401)
+  }
+  if (!payload) return c.json({ error: '유효하지 않은 토큰입니다.' }, 401)
+
+  const userId = payload.sub
+  const userRole = payload.role
+  const isInstructor = payload.is_instructor
+
+  // 관리자 또는 강사는 바로 다운로드 허용
+  if (userRole === 'admin' || userRole === 'instructor' || isInstructor === 1) {
+    try {
+      const object = await c.env.IMAGES.get(path)
+      if (!object) return c.json({ error: 'File not found' }, 404)
+      const headers = new Headers()
+      headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream')
+      headers.set('Cache-Control', 'public, max-age=31536000')
+      return new Response(object.body, { headers })
+    } catch (error) {
+      return c.json({ error: 'Failed to serve file' }, 500)
+    }
+  }
+
+  // 일반 사용자: classId 필수 및 수강 신청 확인
+  if (!classId) {
+    return c.json({ error: '수강 신청 후 다운로드할 수 있습니다.' }, 403)
+  }
+
+  // 수강 신청 여부 확인
+  const enrollment = await c.env.DB.prepare(`
+    SELECT id FROM enrollments
+    WHERE user_id = ? AND class_id = ? AND (status IS NULL OR status = 'active')
+  `).bind(userId, parseInt(classId)).first()
+
+  if (!enrollment) {
+    return c.json({ error: '수강 신청 후 다운로드할 수 있습니다.' }, 403)
   }
 
   try {
