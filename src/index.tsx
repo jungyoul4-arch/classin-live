@@ -2219,7 +2219,7 @@ app.delete('/api/cart', async (c) => {
 
 // Process payment (demo) - with ClassIn session auto-creation
 app.post('/api/payment/process', async (c) => {
-  const { userId, classId, lessonId, paymentMethod, cardNumber, cardExpiry, cardCvc, amount, orderType, subscriptionPlan } = await c.req.json()
+  const { userId, classId, classIds, lessonId, paymentMethod, cardNumber, cardExpiry, cardCvc, amount, orderType, subscriptionPlan } = await c.req.json()
 
   const last4 = cardNumber ? cardNumber.slice(-4) : '0000'
   const txId = `TXN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
@@ -2369,6 +2369,63 @@ app.post('/api/payment/process', async (c) => {
   if (orderType === 'subscription' && subscriptionPlan) {
     const months = subscriptionPlan === 'annual' ? 12 : 1
     await c.env.DB.prepare(`UPDATE users SET subscription_plan = ?, subscription_expires_at = datetime('now', '+' || ? || ' months') WHERE id = ?`).bind(subscriptionPlan, months, userId).run()
+  }
+
+  // Bulk payment - 장바구니 전체 결제
+  if (orderType === 'bulk' && classIds && Array.isArray(classIds) && classIds.length > 0) {
+    const user = await c.env.DB.prepare('SELECT name FROM users WHERE id = ?').bind(userId).first() as any
+    const userName = user?.name || 'Student'
+
+    const classInConfig: ClassInConfig | null = (c.env.CLASSIN_SID && c.env.CLASSIN_SECRET)
+      ? { SID: c.env.CLASSIN_SID, SECRET: c.env.CLASSIN_SECRET, API_BASE: 'https://api.eeo.cn' }
+      : null
+
+    const enrolledClasses: number[] = []
+
+    for (const cid of classIds) {
+      try {
+        const classInfo = await c.env.DB.prepare('SELECT schedule_end FROM classes WHERE id = ?').bind(cid).first() as any
+        const expiresAt = classInfo?.schedule_end || null
+
+        // Create enrollment
+        await c.env.DB.prepare(`
+          INSERT INTO enrollments (user_id, class_id, expires_at, status)
+          VALUES (?, ?, ?, 'active')
+          ON CONFLICT(user_id, class_id) DO UPDATE SET expires_at = COALESCE(?, expires_at), status = 'active', updated_at = datetime('now')
+        `).bind(userId, cid, expiresAt, expiresAt).run()
+
+        // Get enrollment ID
+        const enrollment = await c.env.DB.prepare('SELECT id FROM enrollments WHERE user_id = ? AND class_id = ?').bind(userId, cid).first() as any
+
+        // Remove from cart
+        await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, cid).run()
+        // Update student count
+        await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(cid).run()
+
+        // Assign virtual account
+        if (enrollment?.id && classInConfig) {
+          await assignVirtualAccountToEnrollment(
+            c.env.DB,
+            enrollment.id,
+            userId,
+            userName,
+            classInConfig
+          )
+        }
+
+        enrolledClasses.push(cid)
+      } catch (e) {
+        console.error('Bulk enrollment error for class ' + cid + ':', e)
+      }
+    }
+
+    return c.json({
+      success: true,
+      orderId: orderResult.meta.last_row_id,
+      transactionId: txId,
+      message: `${enrolledClasses.length}개 코스 결제 및 수강등록이 완료되었습니다!`,
+      enrolledCount: enrolledClasses.length
+    })
   }
 
   return c.json({
@@ -7019,8 +7076,10 @@ app.get('/api/payment/hecto/test-hash', async (c) => {
 
 // 결제 요청 준비 (파라미터 암호화 및 해시 생성)
 app.post('/api/payment/hecto/prepare', async (c) => {
+  try {
   const {
     classId,
+    classIds,  // bulk 결제용 여러 코스 ID
     lessonId,
     userId,
     amount,
@@ -7028,7 +7087,7 @@ app.post('/api/payment/hecto/prepare', async (c) => {
     customerName,
     customerPhone,
     customerEmail,
-    orderType  // 'class' | 'lesson' | 'subscription'
+    orderType  // 'class' | 'lesson' | 'subscription' | 'bulk'
   } = await c.req.json()
 
   if (!c.env.HECTO_MID || !c.env.HECTO_LICENSE_KEY || !c.env.HECTO_AES_KEY) {
@@ -7053,14 +7112,18 @@ app.post('/api/payment/hecto/prepare', async (c) => {
   const mchtTrdNo = 'PAYMENT' + trdDt + trdTm
 
   // DB에 주문 생성 (pending 상태)
+  // bulk 결제는 DB에 'class'로 저장 (CHECK constraint: order_type IN ('class', 'subscription'))
+  const dbOrderType = (orderType === 'bulk') ? 'class' : (orderType || 'class')
+  // bulk 결제인 경우 classIds를 콤마로 연결하여 DB에 저장 (취소 시 사용)
+  const classIdsStr = (orderType === 'bulk' && classIds && Array.isArray(classIds)) ? classIds.join(',') : null
   const orderResult = await c.env.DB.prepare(`
-    INSERT INTO orders (user_id, order_type, class_id, amount, payment_method, payment_status, transaction_id)
-    VALUES (?, ?, ?, ?, 'card', 'pending', ?)
-  `).bind(userId, orderType || 'class', classId || null, amount, mchtTrdNo).run()
+    INSERT INTO orders (user_id, order_type, class_id, class_ids, amount, payment_method, payment_status, transaction_id)
+    VALUES (?, ?, ?, ?, ?, 'card', 'pending', ?)
+  `).bind(userId, dbOrderType, classId || null, classIdsStr, amount, mchtTrdNo).run()
   const orderId = orderResult.meta.last_row_id
 
   // mchtParam에 주문 정보 저장 (결제 완료 후 처리용)
-  const mchtParam = `${orderId}|${userId}|${classId || ''}|${lessonId || ''}|${orderType || 'class'}`
+  const mchtParam = `${orderId}|${userId}|${classId || ''}|${lessonId || ''}|${orderType || 'class'}|${classIdsStr || ''}`
 
   const params = {
     mchtId: config.MID,
@@ -7137,6 +7200,10 @@ app.post('/api/payment/hecto/prepare', async (c) => {
       }
     }
   })
+  } catch (e: any) {
+    console.error('[Hecto Prepare Error]', e)
+    return c.json({ error: e.message || 'Internal Server Error' }, 500)
+  }
 })
 
 // 결제 결과 수신 (nextUrl/cancUrl로 호출됨)
@@ -7339,7 +7406,7 @@ app.post('/api/admin/orders/:orderId/update', async (c) => {
 
 // 결제 완료 후 수강 등록 처리 API
 app.post('/api/payment/hecto/complete', async (c) => {
-  const { orderId, userId, classId, lessonId, orderType, trdNo, mchtTrdNo } = await c.req.json()
+  const { orderId, userId, classId, lessonId, orderType, trdNo, mchtTrdNo, classIds } = await c.req.json()
 
   try {
     // 이미 취소된 주문은 처리하지 않음
@@ -7363,6 +7430,23 @@ app.post('/api/payment/hecto/complete', async (c) => {
         VALUES (?, ?, ?, 'active')
         ON CONFLICT(user_id, class_lesson_id) DO UPDATE SET status = 'active'
       `).bind(userId, lessonId, orderId).run()
+    } else if (orderType === 'bulk' && classIds && Array.isArray(classIds) && classIds.length > 0) {
+      // Bulk 결제 - 여러 코스 등록
+      for (const cid of classIds) {
+        // 코스 등록
+        await c.env.DB.prepare(`
+          INSERT INTO enrollments (user_id, class_id, status)
+          VALUES (?, ?, 'active')
+          ON CONFLICT(user_id, class_id) DO UPDATE SET status = 'active', updated_at = datetime('now')
+        `).bind(userId, cid).run()
+
+        // 수강생 수 업데이트
+        await c.env.DB.prepare('UPDATE classes SET current_students = current_students + 1 WHERE id = ?').bind(cid).run()
+
+        // 장바구니에서 제거
+        await c.env.DB.prepare('DELETE FROM cart WHERE user_id = ? AND class_id = ?').bind(userId, cid).run()
+      }
+      console.log('[Hecto Complete] Bulk enrollment processed:', orderId, classIds)
     } else if (classId) {
       // 코스 등록
       await c.env.DB.prepare(`
@@ -7430,12 +7514,22 @@ app.post('/api/payment/hecto/cancel', async (c) => {
     `).bind(orderId).run()
 
     // 수강 취소 처리
-    if (order.class_id) {
+    if (order.class_ids) {
+      // 묶음 결제: 모든 코스의 수강 취소
+      const classIdList = order.class_ids.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id))
+      for (const cid of classIdList) {
+        await c.env.DB.prepare(`
+          UPDATE enrollments SET status = 'cancelled', updated_at = datetime('now')
+          WHERE user_id = ? AND class_id = ?
+        `).bind(order.user_id, cid).run()
+        await c.env.DB.prepare('UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?').bind(cid).run()
+      }
+    } else if (order.class_id) {
+      // 단일 결제
       await c.env.DB.prepare(`
         UPDATE enrollments SET status = 'cancelled', updated_at = datetime('now')
         WHERE user_id = ? AND class_id = ?
       `).bind(order.user_id, order.class_id).run()
-
       await c.env.DB.prepare('UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?').bind(order.class_id).run()
     }
 
@@ -7471,12 +7565,22 @@ app.post('/api/admin/orders/:orderId/cancel', async (c) => {
     `).bind(orderId).run()
 
     // 수강 취소 처리
-    if (order.class_id) {
+    if (order.class_ids) {
+      // 묶음 결제: 모든 코스의 수강 취소
+      const classIdList = order.class_ids.split(',').map((id: string) => parseInt(id.trim())).filter((id: number) => !isNaN(id))
+      for (const cid of classIdList) {
+        await c.env.DB.prepare(`
+          UPDATE enrollments SET status = 'cancelled', updated_at = datetime('now')
+          WHERE user_id = ? AND class_id = ?
+        `).bind(order.user_id, cid).run()
+        await c.env.DB.prepare('UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?').bind(cid).run()
+      }
+    } else if (order.class_id) {
+      // 단일 결제
       await c.env.DB.prepare(`
         UPDATE enrollments SET status = 'cancelled', updated_at = datetime('now')
         WHERE user_id = ? AND class_id = ?
       `).bind(order.user_id, order.class_id).run()
-
       await c.env.DB.prepare('UPDATE classes SET current_students = MAX(0, current_students - 1) WHERE id = ?').bind(order.class_id).run()
     }
 
@@ -8930,9 +9034,69 @@ function openPaymentModal(classData) {
   \`;
 }
 
-function openBulkPayment() {
-  // For cart bulk payment
-  openPaymentModal({ title: '장바구니 전체 결제', price: 0, original_price: 0, orderType: 'bulk' });
+async function openBulkPayment() {
+  if (!currentUser) { openAuthModal('login'); return; }
+
+  // 장바구니 항목 가져오기
+  const res = await fetch('/api/user/' + currentUser.id + '/cart');
+  const items = await res.json();
+
+  if (!items || items.length === 0) {
+    alert('장바구니가 비어있습니다.');
+    return;
+  }
+
+  // 테스트 계정은 무료 등록
+  if (currentUser.is_test_account) {
+    for (const item of items) {
+      await testEnroll(item.class_id);
+    }
+    alert('테스트 계정으로 모든 코스가 등록되었습니다!');
+    window.location.reload();
+    return;
+  }
+
+  // 전체 무료인 경우
+  const total = items.reduce((sum, i) => sum + (i.price || 0), 0);
+  const originalTotal = items.reduce((sum, i) => sum + (i.original_price || i.price || 0), 0);
+
+  if (total === 0) {
+    // 무료 코스들만 있으면 바로 등록
+    for (const item of items) {
+      await freeEnroll(item.class_id);
+    }
+    alert('무료 코스 등록이 완료되었습니다!');
+    window.location.reload();
+    return;
+  }
+
+  // 유료 결제 진행
+  const classIds = items.map(i => i.class_id);
+  paymentData = {
+    title: '장바구니 전체 결제 (' + items.length + '개 코스)',
+    price: total,
+    original_price: originalTotal,
+    orderType: 'bulk',
+    classIds: classIds  // 여러 코스 ID 배열
+  };
+
+  document.getElementById('paymentModal').classList.remove('hidden');
+  document.getElementById('paymentOrderSummary').innerHTML = items.map(item => \`
+    <div class="flex gap-2 py-2 border-b border-gray-100 last:border-0">
+      \${item.thumbnail ? \`<img src="\${item.thumbnail}" class="w-12 h-9 rounded object-cover">\` : ''}
+      <div class="flex-1 min-w-0">
+        <p class="text-xs font-medium text-dark-800 line-clamp-1">\${item.title}</p>
+        <p class="text-xs text-gray-500">\${item.price.toLocaleString()}원</p>
+      </div>
+    </div>
+  \`).join('');
+
+  const discount = originalTotal - total;
+  document.getElementById('priceSummary').innerHTML = \`
+    <div class="flex justify-between text-sm"><span class="text-gray-500">정가 (\${items.length}개)</span><span class="text-gray-700">\${originalTotal.toLocaleString()}원</span></div>
+    \${discount > 0 ? \`<div class="flex justify-between text-sm"><span class="text-gray-500">할인</span><span class="text-primary-500 font-medium">-\${discount.toLocaleString()}원</span></div>\` : ''}
+    <div class="flex justify-between text-base font-bold pt-2 border-t border-gray-200 mt-2"><span class="text-dark-900">총 결제금액</span><span class="text-primary-600">\${total.toLocaleString()}원</span></div>
+  \`;
 }
 
 // 강의별 결제 모달
@@ -9051,14 +9215,16 @@ window.addEventListener('message', function(e) {
 // 결제 성공 후 수강 등록 처리
 async function processEnrollmentAfterPayment(result) {
   try {
-    // mchtParam에서 주문 정보 추출
+    // mchtParam에서 주문 정보 추출: orderId|userId|classId|lessonId|orderType|classIds
     const parts = (result.mchtParam || '').split('|');
     const orderId = parts[0];
     const userId = parts[1];
     const classId = parts[2];
     const lessonId = parts[3];
     const orderType = parts[4] || 'class';
-    
+    const classIdsStr = parts[5] || '';
+    const classIds = classIdsStr ? classIdsStr.split(',').map(id => parseInt(id)) : null;
+
     // 결제 완료 처리 API 호출
     const res = await fetch('/api/payment/hecto/complete', {
       method: 'POST',
@@ -9069,6 +9235,7 @@ async function processEnrollmentAfterPayment(result) {
         classId: classId ? parseInt(classId) : null,
         lessonId: lessonId ? parseInt(lessonId) : null,
         orderType,
+        classIds,
         trdNo: result.trdNo || result.mchtTrdNo,
         mchtTrdNo: result.mchtTrdNo
       })
@@ -9096,7 +9263,7 @@ async function processEnrollmentAfterPayment(result) {
 }
 
 async function processPayment() {
-  
+
   const agree = document.getElementById('paymentAgree').checked;
   if (!agree) { showError('paymentError', '결제 동의에 체크해주세요.'); return; }
 
@@ -9113,6 +9280,7 @@ async function processPayment() {
       const body = {
         userId: currentUser.id,
         classId: paymentData.id || null,
+        classIds: paymentData.classIds || null,  // bulk 결제용 여러 코스 ID
         lessonId: paymentData.lessonId || null,
         paymentMethod: paymentData.paymentMethod || 'card',
         cardNumber: document.getElementById('cardNumber')?.value?.replace(/\\s/g,'') || '',
@@ -9157,6 +9325,7 @@ async function processPayment() {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
         classId: paymentData.id || null,
+        classIds: paymentData.classIds || null,  // bulk 결제용
         lessonId: paymentData.lessonId || null,
         userId: currentUser.id,
         amount: paymentData.price,
@@ -9205,7 +9374,12 @@ async function processPayment() {
 
 function closeSuccessModal() {
   document.getElementById('successModal').classList.add('hidden');
-  // Refresh user data
+  // 결제 후 수강 등록 상태 반영을 위해 페이지 새로고침
+  if (paymentData && (paymentData.orderType === 'bulk' || paymentData.orderType === 'class' || paymentData.orderType === 'lesson')) {
+    window.location.reload();
+    return;
+  }
+  // Refresh user data (구독 등 기타 경우)
   if (currentUser) {
     fetch('/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email:currentUser.email, password:'any'}) })
       .then(r=>r.json()).then(d=>{ if(d.user){ currentUser=d.user; localStorage.setItem('classin_user',JSON.stringify(d.user)); updateAuthUI(); }});
@@ -9215,11 +9389,19 @@ function closeSuccessModal() {
 // 결제 완료 후 코스 상세 페이지로 이동
 function goToCourseDetail() {
   document.getElementById('successModal').classList.add('hidden');
+  // bulk 결제인 경우 현재 페이지 새로고침
+  if (paymentData.orderType === 'bulk') {
+    window.location.reload();
+    return;
+  }
   if (paymentData.slug) {
     window.location.href = '/class/' + paymentData.slug;
   } else if (paymentData.id) {
     // slug가 없으면 마이페이지로
     window.location.href = '/mypage';
+  } else {
+    // 아무것도 없으면 새로고침
+    window.location.reload();
   }
 }
 
